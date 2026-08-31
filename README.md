@@ -24,26 +24,16 @@ Axiom 是一个可以自己安排工作的 AI 控制台。
 
 ## 🧭 后端在哪里？
 
-有，后端就在仓库的 `server/` 目录。这个项目采用 **TypeScript 全栈**：
+有，后端就在仓库的 `server/` 目录。
 
-- `src/` 和 `.tsx`：浏览器里的 React 前端界面。
-- `server/` 和 `.ts`：Node.js 服务端、API、调度器和数据库代码。
-- `server/index.ts`：Hono 服务入口，提供 API、SSE 和生产环境静态页面。
-- `server/runtime/orchestrator.ts`：任务路由、Agent 协作、检查和交付流程。
-- `server/runtime/taskApi.ts`：任务、会话、插件、审核和事件接口。
-- `server/runtime/sqliteTaskStore.ts`：本地 SQLite 存储。
-- `server/runtime/postgresTaskStore.ts`：PostgreSQL 多 Worker 存储。
-- `server/runtime/modelClient.ts`：DeepSeek 和 OpenAI-compatible 模型调用。
+- 🎨 **前端**：`src/`，使用 React + Vite + TypeScript（`.tsx`）。
+- ⚙️ **后端**：`server/`，使用 Node.js + Hono + TypeScript（`.ts`），负责 API、Agent 调度、模型调用、任务和数据库。
 
-启动时会同时运行两部分：
+开发时执行 `npm run dev`，前后端会一起启动：前端 `5173`，后端 `8787`。
 
-```text
-npm run dev
-   ├─ 前端 Vite      http://127.0.0.1:5173
-   └─ 后端 Hono      http://127.0.0.1:8787
-```
+### 🌱 TypeScript 全栈有什么好处？
 
-Gitee 的语言统计会把 `.ts` 和 `.tsx` 合并显示为 TypeScript，这是语言分类方式，不代表仓库没有后端。执行 `npm run build` 后，服务端 TypeScript 会编译成 Node.js JavaScript，输出到本地的 `server-dist/`；该目录是生成物，因此没有提交到仓库。
+前后端使用同一种语言，接口数据和类型可以保持一致，少一些“前端以为是这样、后端实际是那样”的问题；代码更容易复用、重构和测试，新成员也只需要学习一套主要语言。TypeScript 还会在运行前提示很多拼写和数据错误，让项目更容易长期维护。
 
 ## ✨ 你可以用它做什么
 
