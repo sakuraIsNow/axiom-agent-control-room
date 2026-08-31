@@ -22,6 +22,29 @@ Axiom 是一个可以自己安排工作的 AI 控制台。
 
 简单问题不会被强行拆成复杂流程；需要搜索、分析、绘图或复核时，才会增加对应的 Agent。
 
+## 🧭 后端在哪里？
+
+有，后端就在仓库的 `server/` 目录。这个项目采用 **TypeScript 全栈**：
+
+- `src/` 和 `.tsx`：浏览器里的 React 前端界面。
+- `server/` 和 `.ts`：Node.js 服务端、API、调度器和数据库代码。
+- `server/index.ts`：Hono 服务入口，提供 API、SSE 和生产环境静态页面。
+- `server/runtime/orchestrator.ts`：任务路由、Agent 协作、检查和交付流程。
+- `server/runtime/taskApi.ts`：任务、会话、插件、审核和事件接口。
+- `server/runtime/sqliteTaskStore.ts`：本地 SQLite 存储。
+- `server/runtime/postgresTaskStore.ts`：PostgreSQL 多 Worker 存储。
+- `server/runtime/modelClient.ts`：DeepSeek 和 OpenAI-compatible 模型调用。
+
+启动时会同时运行两部分：
+
+```text
+npm run dev
+   ├─ 前端 Vite      http://127.0.0.1:5173
+   └─ 后端 Hono      http://127.0.0.1:8787
+```
+
+Gitee 的语言统计会把 `.ts` 和 `.tsx` 合并显示为 TypeScript，这是语言分类方式，不代表仓库没有后端。执行 `npm run build` 后，服务端 TypeScript 会编译成 Node.js JavaScript，输出到本地的 `server-dist/`；该目录是生成物，因此没有提交到仓库。
+
 ## ✨ 你可以用它做什么
 
 - 💬 **自然对话**：问问题、写方案、整理内容，支持流式回复。
