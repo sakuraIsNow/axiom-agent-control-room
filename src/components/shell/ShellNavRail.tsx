@@ -1,0 +1,6 @@
+import { Activity, Layers3, Network, Plus, Radio, Workflow } from 'lucide-react';
+import type { ShellView } from '../../lib/useShellStore';
+
+export function ShellNavRail({ view, onView, onNewTask, onOpenPlugins, agentCount, eventCount }: { view: ShellView; onView: (view: ShellView) => void; onNewTask: () => void; onOpenPlugins: () => void; agentCount: number; eventCount: number }) {
+  return <aside className="shell-nav-rail"><button type="button" className="shell-new-task" onClick={onNewTask}><Plus size={15} /><span>新任务</span></button><div className="shell-nav-group"><small>运行视图</small><button type="button" className={view === 'core' ? 'active' : ''} onClick={() => onView('core')}><Radio size={15} /><span>核心</span><b>01</b></button><button type="button" className={view === 'graph' ? 'active' : ''} onClick={() => onView('graph')}><Network size={15} /><span>推理图</span><b>{String(agentCount).padStart(2, '0')}</b></button><button type="button" className={view === 'stream' ? 'active' : ''} onClick={() => onView('stream')}><Workflow size={15} /><span>事件流</span><b>{String(eventCount).padStart(2, '0')}</b></button></div><div className="shell-nav-spacer" /><button type="button" onClick={onOpenPlugins}><Layers3 size={15} /><span>插件</span></button><div className="shell-nav-foot"><Activity size={13} /><span>任务 / 事件 / SSE</span></div></aside>;
+}

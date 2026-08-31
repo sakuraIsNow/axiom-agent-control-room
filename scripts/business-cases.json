@@ -1,0 +1,37 @@
+[
+  {
+    "id": "conversation-greeting",
+    "input": "你好，介绍一下你自己",
+    "mode": "analyze",
+    "expectedRoute": "direct",
+    "expectedDifficulty": "trivial"
+  },
+  {
+    "id": "focused-code-fix",
+    "input": "修复这个函数的空指针问题，并给出测试",
+    "mode": "build",
+    "expectedRoute": "single-agent",
+    "expectedDifficulty": "trivial"
+  },
+  {
+    "id": "architecture-tradeoff",
+    "input": "比较 PostgreSQL 和 SQLite，并分析多 Worker 部署的风险、成本和恢复策略",
+    "mode": "decide",
+    "expectedRoute": "team",
+    "expectedDifficulty": "moderate"
+  },
+  {
+    "id": "production-delivery",
+    "input": "设计并验证一个生产级多 Agent 平台，要求包含数据库迁移、队列、失败恢复、可观测性、权限和端到端验收",
+    "mode": "build",
+    "expectedRoute": "full-workflow",
+    "expectedDifficulty": "complex"
+  },
+  {
+    "id": "agent-catalog",
+    "input": "有哪些子智能体，各自负责什么",
+    "mode": "analyze",
+    "expectedRoute": "direct",
+    "expectedDifficulty": "trivial"
+  }
+]

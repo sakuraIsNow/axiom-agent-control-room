@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AXIOM · Emotion Ball Gray Lab</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f1f4f6;
+      --muted: #98a1a9;
+      --faint: #667078;
+      --line: rgba(227, 235, 240, .14);
+      --line-strong: rgba(227, 235, 240, .28);
+      --glass: rgba(44, 50, 56, .72);
+      --glass-deep: rgba(29, 34, 39, .84);
+      --glass-hi: rgba(192, 205, 213, .13);
+      --green: #95e4ba;
+      --green-strong: #4dd58d;
+      --amber: #f1bd72;
+      --rose: #f293a2;
+      --blue: #85c6ff;
+      --shadow: rgba(0, 0, 0, .35);
+      --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(900px 650px at 68% -10%, rgba(153, 170, 182, .18), transparent 62%),
+        radial-gradient(700px 500px at 3% 100%, rgba(105, 129, 142, .15), transparent 65%),
+        linear-gradient(135deg, #15191d 0%, #20262b 50%, #101316 100%);
+      font-family: var(--sans);
+      letter-spacing: .01em;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .18;
+      background-image: linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 88%);
+    }
+
+    button { font: inherit; color: inherit; }
+    button:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+
+    .demo-shell { width: min(1480px, calc(100% - 48px)); margin: 24px auto 42px; position: relative; z-index: 1; }
+    .topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin: 0 0 18px; }
+    .eyebrow { display: flex; align-items: center; gap: 9px; color: var(--muted); font: 500 11px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+    .signal { width: 7px; height: 7px; border-radius: 50%; background: var(--green-strong); box-shadow: 0 0 0 4px rgba(77, 213, 141, .1), 0 0 20px rgba(77, 213, 141, .45); animation: pulse 2.4s ease-in-out infinite; }
+    h1 { margin: 12px 0 0; font-size: clamp(29px, 4vw, 52px); line-height: .98; letter-spacing: -.045em; font-weight: 570; }
+    .subhead { margin: 12px 0 0; max-width: 670px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+    .top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    .control-btn { border: 1px solid var(--line); background: rgba(219, 229, 234, .08); padding: 9px 13px; border-radius: 11px; cursor: pointer; color: var(--muted); transition: .2s ease; backdrop-filter: blur(16px); }
+    .control-btn:hover { color: var(--ink); border-color: var(--line-strong); background: rgba(219, 229, 234, .14); transform: translateY(-1px); }
+    .control-btn.is-on { color: #122019; background: var(--green); border-color: var(--green); }
+    .control-btn .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin: 0 8px 1px 0; }
+
+    .workspace { display: grid; grid-template-columns: 238px minmax(460px, 1fr) 332px; gap: 14px; align-items: start; }
+    .glass { border: 1px solid var(--line); background: linear-gradient(145deg, rgba(112, 124, 133, .16), rgba(18, 22, 26, .54)); box-shadow: 0 20px 50px var(--shadow), inset 0 1px 0 rgba(255,255,255,.08); backdrop-filter: blur(24px) saturate(120%); -webkit-backdrop-filter: blur(24px) saturate(120%); }
+    .side-panel { padding: 17px; border-radius: 17px; min-height: 676px; }
+    .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font: 500 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+    .panel-title strong { color: var(--ink); font: 600 13px/1 var(--sans); letter-spacing: 0; text-transform: none; }
+    .agent-list { display: grid; gap: 6px; margin-top: 15px; }
+    .agent-row { width: 100%; display: grid; grid-template-columns: 34px 1fr auto; gap: 9px; align-items: center; text-align: left; border: 1px solid transparent; border-radius: 12px; padding: 8px 7px; background: transparent; cursor: pointer; transition: .2s ease; }
+    .agent-row:hover { background: rgba(255,255,255,.06); border-color: var(--line); }
+    .agent-row.is-selected { background: rgba(149, 228, 186, .12); border-color: rgba(149, 228, 186, .43); box-shadow: inset 3px 0 0 var(--green-strong); }
+    .mini-face { width: 31px; height: 31px; border-radius: 43% 57% 51% 49% / 56% 45% 55% 44%; display: grid; place-items: center; color: #172018; position: relative; box-shadow: inset -6px -8px 12px rgba(0,0,0,.18), inset 5px 6px 8px rgba(255,255,255,.24); }
+    .mini-face::after { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; box-shadow: 10px 0 currentColor; transform: translate(-5px, -1px); }
+    .mini-face.running { animation: breathe 1.8s ease-in-out infinite; }
+    .agent-copy strong { display: block; font-size: 12px; font-weight: 560; }
+    .agent-copy span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .agent-state { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+    .agent-state.running { background: var(--green-strong); box-shadow: 0 0 12px rgba(77,213,141,.6); }
+    .agent-state.waiting { background: var(--amber); }
+    .agent-state.done { background: var(--blue); }
+    .legend { display: grid; gap: 9px; margin-top: 28px; padding-top: 17px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    .legend-item { display: flex; align-items: center; gap: 8px; }
+    .legend-mark { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+    .legend-mark.green { background: var(--green-strong); box-shadow: 0 0 10px rgba(77,213,141,.6); }
+    .legend-mark.ribbon { width: 17px; height: 5px; border-radius: 99px; background: linear-gradient(90deg, var(--rose), var(--blue), var(--green)); }
+    .selection-readout { margin-top: 24px; padding: 13px 0 0; border-top: 1px solid var(--line); }
+    .selection-readout small { display: block; color: var(--faint); font: 500 10px/1 var(--mono); text-transform: uppercase; letter-spacing: .12em; }
+    .selection-readout h2 { margin: 9px 0 5px; font-size: 18px; letter-spacing: -.03em; }
+    .selection-readout p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .metric-line { display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    .metric-line b { color: var(--ink); font: 500 12px var(--mono); }
+
+    .stage-panel { min-width: 0; }
+    .stage-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 16px 13px; border: 1px solid var(--line); border-bottom: 0; border-radius: 17px 17px 0 0; background: rgba(24, 29, 33, .55); backdrop-filter: blur(18px); }
+    .stage-head h2 { margin: 0; font-size: 15px; font-weight: 560; letter-spacing: -.02em; }
+    .stage-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .stage-status { display: flex; align-items: center; gap: 8px; color: var(--green); font: 500 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+    .orbit-stage { position: relative; min-height: 572px; overflow: hidden; border: 1px solid var(--line); border-radius: 0 0 17px 17px; background: radial-gradient(ellipse at 50% 47%, rgba(142, 156, 165, .17), transparent 54%), linear-gradient(145deg, rgba(53, 62, 69, .2), rgba(11, 14, 17, .56)); cursor: grab; touch-action: none; perspective: 1050px; }
+    .orbit-stage.is-dragging { cursor: grabbing; }
+    .stage-grid { position: absolute; inset: 7% 7% 11%; opacity: .45; background: linear-gradient(rgba(175,193,201,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(175,193,201,.06) 1px, transparent 1px); background-size: 40px 40px; mask-image: radial-gradient(ellipse, black 10%, transparent 73%); pointer-events: none; }
+    .stage-vignette { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 42%, rgba(7,10,12,.65) 100%); }
+    .orbit-world { position: absolute; left: 50%; top: 50%; width: 1px; height: 1px; transform-style: flat; will-change: transform; }
+    .orbit-ring { position: absolute; left: 50%; top: 50%; border: 1px solid rgba(167, 185, 195, .18); border-radius: 50%; transform-style: flat; pointer-events: none; }
+    .orbit-ring.ring-a { width: 455px; height: 175px; margin: -87px -227px; transform: rotateX(69deg) rotateZ(-3deg); box-shadow: 0 0 28px rgba(134, 161, 173, .1); }
+    .orbit-ring.ring-b { width: 350px; height: 350px; margin: -175px; transform: rotateY(67deg) rotateZ(18deg); border-color: rgba(149, 228, 186, .13); }
+    .orbit-ring.ring-c { width: 580px; height: 245px; margin: -122px -290px; transform: rotateX(75deg) rotateZ(4deg); border-style: dashed; border-color: rgba(156, 175, 188, .12); }
+    .core-glow { position: absolute; left: 50%; top: 50%; width: 250px; height: 250px; margin: -125px; border-radius: 50%; background: radial-gradient(circle, rgba(163, 188, 200, .19), rgba(104, 135, 150, .06) 47%, transparent 72%); filter: blur(5px); pointer-events: none; }
+    .agent-shell { position: absolute; left: 0; top: 0; width: 150px; height: 150px; margin: -75px; transform-style: flat; will-change: transform, opacity; cursor: pointer; }
+    .agent-shell::before { content: ""; position: absolute; left: 50%; top: 50%; width: 112px; height: 112px; margin: -56px; border-radius: 50%; border: 1px solid transparent; transform: translateZ(-8px) scale(1.12); transition: .25s ease; }
+    .agent-shell.is-selected::before { border-color: rgba(149, 228, 186, .82); box-shadow: 0 0 0 5px rgba(149, 228, 186, .08), 0 0 34px rgba(77, 213, 141, .45); }
+    .agent-shell.is-selected::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; border: 1px solid rgba(149,228,186,.28); animation: selected-ring 2.6s ease-in-out infinite; pointer-events: none; }
+    .agent-surface { position: absolute; inset: 8px; transform-style: flat; transition: filter .22s ease; }
+    .agent-surface svg { display: block; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 20px 18px rgba(0,0,0,.26)); }
+    .agent-shell:hover .agent-surface { filter: brightness(1.11); }
+    .agent-label { position: absolute; left: 50%; top: calc(100% + 10px); transform: translateX(-50%); white-space: nowrap; color: rgba(235,240,242,.78); font: 500 10px var(--mono); letter-spacing: .06em; text-shadow: 0 2px 8px rgba(0,0,0,.55); pointer-events: none; }
+    .agent-label b { color: var(--ink); font-weight: 500; }
+    .ribbon { position: absolute; inset: -13px; pointer-events: none; transform-style: flat; opacity: 0; }
+    .agent-shell.is-thinking .ribbon { opacity: 1; }
+    .ribbon::before, .ribbon::after { content: ""; position: absolute; left: 50%; top: 50%; width: 128px; height: 42px; margin: -21px -64px; border: 3px solid transparent; border-top-color: var(--ribbon-a); border-bottom-color: var(--ribbon-b); border-radius: 50%; transform: rotate(21deg) rotateX(57deg); filter: drop-shadow(0 0 5px var(--ribbon-a)); animation: ribbon-spin 2.2s linear infinite; }
+    .ribbon::after { width: 103px; height: 68px; margin: -34px -51px; border-top-color: var(--ribbon-b); border-bottom-color: var(--ribbon-c); transform: rotate(-35deg) rotateX(61deg); animation-duration: 1.7s; animation-direction: reverse; }
+    .thinking-spark { position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: var(--ribbon-a); box-shadow: 0 0 12px var(--ribbon-a), 26px -13px 0 -1px var(--ribbon-b), -25px 18px 0 -1px var(--ribbon-c); animation: spark 1.5s ease-in-out infinite; }
+    .stage-hint { position: absolute; left: 50%; bottom: 17px; transform: translateX(-50%); color: rgba(198,211,218,.52); font: 10px var(--mono); letter-spacing: .08em; white-space: nowrap; pointer-events: none; }
+    .focus-marker { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px; border: 1px solid rgba(149,228,186,.55); border-radius: 50%; opacity: .55; pointer-events: none; }
+    .focus-marker::before, .focus-marker::after { content: ""; position: absolute; background: rgba(149,228,186,.52); }
+    .focus-marker::before { left: -9px; right: -9px; top: 8px; height: 1px; }
+    .focus-marker::after { top: -9px; bottom: -9px; left: 8px; width: 1px; }
+
+    .right-rail { display: grid; gap: 12px; }
+    .metric-card { padding: 16px; border-radius: 17px; }
+    .token-card { min-height: 257px; }
+    .token-total { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 13px; }
+    .token-total strong { font: 570 30px/1 var(--mono); letter-spacing: -.07em; }
+    .token-total span { color: var(--green); font: 500 11px var(--mono); }
+    .token-chart { width: 100%; height: 139px; margin-top: 13px; display: block; overflow: visible; }
+    .token-chart .grid { stroke: rgba(210,223,229,.1); stroke-width: 1; }
+    .token-chart .area { fill: url(#tokenFill); }
+    .token-chart .line { fill: none; stroke: var(--green); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 900; stroke-dashoffset: 900; animation: draw-line 1.7s .2s ease-out forwards; }
+    .token-chart .point { fill: #1f2925; stroke: var(--green); stroke-width: 2; }
+    .chart-labels { display: flex; justify-content: space-between; color: var(--faint); font: 10px var(--mono); }
+    .daily-card { min-height: 217px; }
+    .progress-scroll { max-height: 158px; overflow-y: auto; margin-top: 12px; padding-right: 6px; scrollbar-color: rgba(192,205,213,.35) transparent; }
+    .progress-item { display: grid; grid-template-columns: 24px 1fr auto; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(221,231,236,.08); }
+    .progress-item:last-child { border-bottom: 0; }
+    .progress-index { color: var(--faint); font: 10px var(--mono); }
+    .progress-copy strong { display: block; font-size: 11px; font-weight: 520; }
+    .progress-copy span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .progress-time { color: var(--muted); font: 10px var(--mono); }
+    .morph-card { padding: 16px; border-radius: 17px; }
+    .morph-preview { display: flex; align-items: center; gap: 12px; margin-top: 13px; }
+    .morph-button { width: 47px; height: 47px; border: 1px solid var(--line-strong); border-radius: 13px; display: grid; place-items: center; background: rgba(228,238,241,.1); cursor: pointer; transition: .2s ease; }
+    .morph-button:hover { background: rgba(149,228,186,.16); border-color: rgba(149,228,186,.5); }
+    .morph-button svg { width: 24px; height: 24px; color: var(--green); }
+    .morph-copy strong { display: block; font-size: 12px; font-weight: 560; }
+    .morph-copy span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .embed-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 13px; }
+    .embed-list span { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; background: rgba(255,255,255,.035); }
+    .footer-note { margin-top: 14px; color: var(--faint); font: 10px/1.5 var(--mono); text-align: right; }
+
+    @keyframes pulse { 0%,100% { opacity: .65; transform: scale(.82); } 50% { opacity: 1; transform: scale(1.15); } }
+    @keyframes breathe { 0%,100% { transform: scale(.96); } 50% { transform: scale(1.06); } }
+    @keyframes selected-ring { 0%,100% { opacity: .35; transform: scale(.98); } 50% { opacity: .9; transform: scale(1.08); } }
+    @keyframes ribbon-spin { to { transform: rotate(381deg) rotateX(57deg); } }
+    @keyframes spark { 0%,100% { transform: scale(.7); opacity: .45; } 50% { transform: scale(1.45); opacity: 1; } }
+    @keyframes draw-line { to { stroke-dashoffset: 0; } }
+
+    @media (max-width: 1180px) {
+      .workspace { grid-template-columns: 208px minmax(420px, 1fr); }
+      .right-rail { grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .side-panel { min-height: 630px; }
+    }
+    @media (max-width: 800px) {
+      .demo-shell { width: min(100% - 24px, 680px); margin-top: 16px; }
+      .topbar { align-items: flex-start; flex-direction: column; gap: 14px; }
+      .top-actions { justify-content: flex-start; }
+      .workspace { display: block; }
+      .side-panel { min-height: auto; margin-bottom: 12px; }
+      .agent-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .legend, .selection-readout { display: none; }
+      .orbit-stage { min-height: 480px; }
+      .orbit-ring.ring-a { transform: scale(.78) rotateX(69deg) rotateZ(-3deg); }
+      .orbit-ring.ring-b { transform: scale(.72) rotateY(67deg) rotateZ(18deg); }
+      .orbit-ring.ring-c { transform: scale(.72) rotateX(75deg) rotateZ(4deg); }
+      .right-rail { grid-template-columns: 1fr; margin-top: 12px; }
+    }
+    @media (max-width: 470px) {
+      h1 { font-size: 31px; }
+      .subhead { font-size: 12px; }
+      .stage-head { align-items: flex-start; flex-direction: column; gap: 7px; }
+      .orbit-stage { min-height: 420px; }
+      .agent-shell { width: 122px; height: 122px; margin: -61px; }
+      .agent-label { font-size: 9px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="demo-shell" id="axiom-gray-demo">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow"><span class="signal"></span>AXIOM / VISUAL LAB 02</div>
+        <h1>Soft intelligence,<br>in motion.</h1>
+        <p class="subhead">灰色毛玻璃场景实验：原创表情球、状态彩带、3D 轨道和可拖拽的 Agent Graph。</p>
+      </div>
+      <div class="top-actions">
+        <button class="control-btn is-on" id="autoToggle" type="button"><span class="dot"></span><span>自动旋转</span></button>
+        <button class="control-btn" id="focusBtn" type="button">聚焦选中</button>
+      </div>
+    </header>
+
+    <section class="workspace" aria-label="AXIOM agent graph demo">
+      <aside class="side-panel glass">
+        <div class="panel-title"><strong>协作中的 Agent</strong><span id="agentCount">04 / 04</span></div>
+        <div class="agent-list" id="agentList"></div>
+        <div class="legend" aria-label="图例">
+          <div class="legend-item"><i class="legend-mark green"></i><span>当前选中 / 可聚焦</span></div>
+          <div class="legend-item"><i class="legend-mark ribbon"></i><span>思考或输出中</span></div>
+          <div class="legend-item"><i class="legend-mark"></i><span>等待下一步</span></div>
+        </div>
+        <div class="selection-readout">
+          <small>当前焦点</small>
+          <h2 id="selectedName">编排中枢</h2>
+          <p id="selectedDescription">拆解目标、分配上下文，并等待协作节点回传。</p>
+          <div class="metric-line"><span>状态</span><b id="selectedState">思考中</b></div>
+          <div class="metric-line"><span>上下文占用</span><b id="selectedTokens">18.4k</b></div>
+        </div>
+      </aside>
+
+      <section class="stage-panel">
+        <div class="stage-head">
+          <div><h2>Agent Graph / 任务拓扑</h2><p>点击 Agent 选择；按住拖拽旋转整个场景</p></div>
+          <div class="stage-status"><span class="signal"></span><span id="sceneStatus">4 个节点在线</span></div>
+        </div>
+        <div class="orbit-stage" id="orbitStage" aria-label="可旋转的 Agent Graph 场景">
+          <div class="stage-grid"></div>
+          <div class="core-glow"></div>
+          <div class="orbit-world" id="orbitWorld">
+            <div class="orbit-ring ring-a"></div>
+            <div class="orbit-ring ring-b"></div>
+            <div class="orbit-ring ring-c"></div>
+            <div id="agentNodes"></div>
+          </div>
+          <div class="focus-marker" aria-hidden="true"></div>
+          <div class="stage-vignette"></div>
+          <div class="stage-hint">DRAG TO ROTATE  ·  CLICK TO SELECT  ·  AUTO ORBIT</div>
+        </div>
+      </section>
+
+      <aside class="right-rail">
+        <section class="metric-card token-card glass">
+          <div class="panel-title"><strong>近七日 Token 用量</strong><span>实时</span></div>
+          <div class="token-total"><strong>184.6k</strong><span>+12.8%</span></div>
+          <svg class="token-chart" viewBox="0 0 480 170" role="img" aria-label="近七日 token 用量趋势">
+            <defs><linearGradient id="tokenFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#95e4ba" stop-opacity=".28"></stop><stop offset="1" stop-color="#95e4ba" stop-opacity="0"></stop></linearGradient></defs>
+            <path class="grid" d="M0 30H480 M0 74H480 M0 118H480 M0 160H480"></path>
+            <path class="area" d="M0 140 C35 124 53 133 81 109 S126 121 151 87 S195 100 223 76 S268 86 301 60 S345 70 373 45 S422 65 480 27 V170 H0 Z"></path>
+            <path class="line" d="M0 140 C35 124 53 133 81 109 S126 121 151 87 S195 100 223 76 S268 86 301 60 S345 70 373 45 S422 65 480 27"></path>
+            <circle class="point" cx="0" cy="140" r="4"></circle><circle class="point" cx="81" cy="109" r="4"></circle><circle class="point" cx="151" cy="87" r="4"></circle><circle class="point" cx="223" cy="76" r="4"></circle><circle class="point" cx="301" cy="60" r="4"></circle><circle class="point" cx="373" cy="45" r="4"></circle><circle class="point" cx="480" cy="27" r="4"></circle>
+          </svg>
+          <div class="chart-labels"><span>08/19</span><span>08/22</span><span>08/25</span></div>
+        </section>
+
+        <section class="metric-card daily-card glass">
+          <div class="panel-title"><strong>每日工作进程</strong><span>今日 08:25—18:40</span></div>
+          <div class="progress-scroll" aria-label="每日工作进程，可上下滚动">
+            <div class="progress-item"><span class="progress-index">01</span><div class="progress-copy"><strong>目标拆解与路由</strong><span>编排中枢 · 已完成</span></div><span class="progress-time">08:25</span></div>
+            <div class="progress-item"><span class="progress-index">02</span><div class="progress-copy"><strong>代码仓库扫描</strong><span>侦察 Agent · 已完成</span></div><span class="progress-time">09:10</span></div>
+            <div class="progress-item"><span class="progress-index">03</span><div class="progress-copy"><strong>接口契约校验</strong><span>工程 Agent · 运行中</span></div><span class="progress-time">10:35</span></div>
+            <div class="progress-item"><span class="progress-index">04</span><div class="progress-copy"><strong>视觉回归与截图</strong><span>验证 Agent · 排队中</span></div><span class="progress-time">13:15</span></div>
+            <div class="progress-item"><span class="progress-index">05</span><div class="progress-copy"><strong>风险清单回写</strong><span>编排中枢 · 排队中</span></div><span class="progress-time">16:20</span></div>
+            <div class="progress-item"><span class="progress-index">06</span><div class="progress-copy"><strong>发布前复核</strong><span>验证 Agent · 预计</span></div><span class="progress-time">18:40</span></div>
+          </div>
+        </section>
+
+        <section class="morph-card glass">
+          <div class="panel-title"><strong>Morphicons 状态反馈</strong><span>交互预览</span></div>
+          <div class="morph-preview">
+            <button class="morph-button" id="morphButton" type="button" aria-label="切换状态图标">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path id="morphPath" d="M4 6 L20 6 M4 12 L20 12 M4 18 L20 18"></path></svg>
+            </button>
+            <div class="morph-copy"><strong id="morphLabel">队列入口</strong><span>适合 Graph 状态、发送 / 停止、暂停 / 恢复等微交互。</span></div>
+          </div>
+          <div class="embed-list"><span>Graph 状态</span><span>发送按钮</span><span>任务操作</span><span>思考反馈</span></div>
+        </section>
+      </aside>
+    </section>
+    <div class="footer-note">原创视觉原型 · Emotion Ball 仅参考“情绪状态 + 动态轨道”的交互语义 · Morphicons 预览为等结构路径演示</div>
+  </main>
+
+  <script>
+    (() => {
+      const agents = [
+        { id: 'orchestrator', name: '编排中枢', role: 'Orchestrator', state: 'running', stateText: '思考中', desc: '拆解目标、分配上下文，并等待协作节点回传。', tokens: '18.4k', color: '#a7e0c1', shape: 'soft', face: 'focused', angle: -1.1 },
+        { id: 'scout', name: '侦察 Agent', role: 'Research', state: 'done', stateText: '已完成', desc: '扫描仓库结构，归纳约束与可复用能力。', tokens: '9.8k', color: '#9ec9e6', shape: 'drop', face: 'calm', angle: .35 },
+        { id: 'builder', name: '工程 Agent', role: 'Build', state: 'running', stateText: '输出中', desc: '执行代码变更，持续回传可验证的中间产物。', tokens: '14.2k', color: '#d5b7e9', shape: 'soft', face: 'bright', angle: 1.85 },
+        { id: 'verifier', name: '验证 Agent', role: 'Verify', state: 'waiting', stateText: '排队中', desc: '等待依赖完成后运行测试、截图和业务验收。', tokens: '6.7k', color: '#e8c28e', shape: 'diamond', face: 'sleepy', angle: 3.05 }
+      ];
+      const root = document.getElementById('axiom-gray-demo');
+      const stage = document.getElementById('orbitStage');
+      const world = document.getElementById('orbitWorld');
+      const nodeLayer = document.getElementById('agentNodes');
+      const list = document.getElementById('agentList');
+      const autoToggle = document.getElementById('autoToggle');
+      const focusBtn = document.getElementById('focusBtn');
+      const selectedName = document.getElementById('selectedName');
+      const selectedDescription = document.getElementById('selectedDescription');
+      const selectedState = document.getElementById('selectedState');
+      const selectedTokens = document.getElementById('selectedTokens');
+      const sceneStatus = document.getElementById('sceneStatus');
+      const agentNodes = new Map();
+      let selectedId = agents[0].id;
+      let autoRotate = true;
+      let sceneSpin = 0;
+      let focusOffset = 0;
+      let yaw = -6;
+      let pitch = 3;
+      let lastFrame = performance.now();
+      let drag = null;
+
+      function bodyPath(shape) {
+        if (shape === 'drop') return 'M 93 20 C 127 14 144 38 139 71 C 135 99 119 135 84 137 C 50 139 24 117 24 82 C 24 47 56 26 93 20 Z';
+        if (shape === 'diamond') return 'M 81 17 C 111 18 136 34 142 65 C 148 97 126 130 95 139 C 63 149 29 130 22 96 C 16 65 34 34 81 17 Z';
+        return 'M 68 18 C 99 8 131 28 139 58 C 148 91 133 124 103 138 C 70 153 33 132 22 101 C 9 64 30 30 68 18 Z';
+      }
+      function faceMarkup(face) {
+        const mouths = { focused: 'M 64 104 Q 81 111 98 104', calm: 'M 65 103 Q 80 108 95 103', bright: 'M 61 101 Q 80 122 100 101', sleepy: 'M 65 106 Q 80 111 95 106' };
+        const eyes = face === 'sleepy' ? '<path d="M53 71 Q61 66 69 71"/><path d="M90 71 Q98 66 106 71"/>' : '<circle cx="61" cy="71" r="5" fill="#17201d"/><circle cx="99" cy="71" r="5" fill="#17201d"/>';
+        return eyes + '<path d="' + mouths[face] + '"/>';
+      }
+      function createBall(agent) {
+        const shell = document.createElement('div');
+        shell.className = 'agent-shell';
+        shell.dataset.id = agent.id;
+        shell.innerHTML = '<div class="ribbon" style="--ribbon-a:' + agent.color + ';--ribbon-b:#8eb9de;--ribbon-c:#e79bb0"><span class="thinking-spark"></span></div>'
+          + '<div class="agent-surface"><svg viewBox="0 0 160 160" role="img" aria-label="' + agent.name + '"><defs><radialGradient id="g-' + agent.id + '" cx="34%" cy="26%" r="80%"><stop offset="0" stop-color="#ffffff" stop-opacity=".7"/><stop offset=".32" stop-color="' + agent.color + '"/><stop offset="1" stop-color="#5b6870"/></radialGradient></defs><path d="' + bodyPath(agent.shape) + '" fill="url(#g-' + agent.id + ')" stroke="rgba(239,248,248,.44)" stroke-width="1.3"/><g fill="none" stroke="#17201d" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">' + faceMarkup(agent.face) + '</g><path d="M40 49 Q77 22 113 43" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="5" stroke-linecap="round"/></svg></div><div class="agent-label"><b>' + agent.name + '</b> · ' + agent.role + '</div>';
+        nodeLayer.appendChild(shell);
+        agentNodes.set(agent.id, shell);
+      }
+      function makeListRow(agent) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'agent-row';
+        row.dataset.id = agent.id;
+        row.innerHTML = '<span class="mini-face ' + (agent.state === 'running' ? 'running' : '') + '" style="background:' + agent.color + '"></span><span class="agent-copy"><strong>' + agent.name + '</strong><span>' + agent.role + ' · ' + agent.stateText + '</span></span><i class="agent-state ' + agent.state + '"></i>';
+        row.addEventListener('click', () => selectAgent(agent.id));
+        list.appendChild(row);
+      }
+      agents.forEach((agent) => { createBall(agent); makeListRow(agent); });
+
+      function selectAgent(id) {
+        selectedId = id;
+        const agent = agents.find((item) => item.id === id);
+        if (!agent) return;
+        document.querySelectorAll('.agent-row').forEach((item) => item.classList.toggle('is-selected', item.dataset.id === id));
+        agentNodes.forEach((item, itemId) => item.classList.toggle('is-selected', itemId === id));
+        selectedName.textContent = agent.name;
+        selectedDescription.textContent = agent.desc;
+        selectedState.textContent = agent.stateText;
+        selectedTokens.textContent = agent.tokens;
+      }
+      selectAgent(selectedId);
+
+      function updateScene(dt) {
+        if (autoRotate && !drag) sceneSpin += dt * .28;
+        const rect = stage.getBoundingClientRect();
+        const mobile = rect.width < 620;
+        const radiusX = Math.min(rect.width * (mobile ? .31 : .34), mobile ? 170 : 250);
+        const radiusZ = Math.min(rect.width * (mobile ? .22 : .29), mobile ? 120 : 205);
+        const radiusY = Math.min(rect.height * .18, 105);
+        const spread = mobile ? 1 : 1;
+        const base = 0.87;
+        agents.forEach((agent, index) => {
+          const shell = agentNodes.get(agent.id);
+          const angle = agent.angle * spread + sceneSpin + focusOffset;
+          const x = Math.cos(angle) * radiusX;
+          const z = Math.sin(angle) * radiusZ;
+          const y = Math.sin(angle * 2 + .55) * radiusY;
+          const depth = (z / radiusZ + 1) / 2;
+          const scale = .72 + depth * .36;
+          const opacity = .56 + depth * .44;
+          // Keep every node in front of the stage plane; depth is still expressed by scale and opacity.
+          shell.style.transform = 'translate3d(' + x.toFixed(2) + 'px,' + y.toFixed(2) + 'px,' + (240 + z).toFixed(2) + 'px) scale(' + scale.toFixed(3) + ')';
+          shell.style.opacity = opacity.toFixed(3);
+          shell.style.zIndex = String(10 + Math.round(depth * 20));
+          shell.classList.toggle('is-thinking', agent.state === 'running');
+        });
+        world.style.transform = 'rotateX(' + pitch.toFixed(2) + 'deg) rotateY(' + yaw.toFixed(2) + 'deg)';
+        requestAnimationFrame(frame);
+      }
+      function frame(now) { const dt = Math.min((now - lastFrame) / 1000, .05); lastFrame = now; updateScene(dt); }
+      requestAnimationFrame(frame);
+
+      stage.addEventListener('pointerdown', (event) => {
+        if (event.button !== undefined && event.button !== 0) return;
+        const target = event.target.closest('.agent-shell');
+        drag = { x: event.clientX, y: event.clientY, yaw, pitch, moved: false, targetId: target ? target.dataset.id : null };
+        stage.setPointerCapture(event.pointerId);
+        stage.classList.add('is-dragging');
+      });
+      stage.addEventListener('pointermove', (event) => {
+        if (!drag) return;
+        const dx = event.clientX - drag.x;
+        const dy = event.clientY - drag.y;
+        if (Math.hypot(dx, dy) > 6) drag.moved = true;
+        yaw = drag.yaw + dx * .25;
+        pitch = Math.max(-21, Math.min(21, drag.pitch - dy * .18));
+      });
+      function endDrag(event) {
+        if (!drag) return;
+        const state = drag;
+        drag = null;
+        stage.classList.remove('is-dragging');
+        if (event && stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+        if (!state.moved && state.targetId) selectAgent(state.targetId);
+      }
+      stage.addEventListener('pointerup', endDrag);
+      stage.addEventListener('pointercancel', endDrag);
+      autoToggle.addEventListener('click', () => {
+        autoRotate = !autoRotate;
+        autoToggle.classList.toggle('is-on', autoRotate);
+        autoToggle.querySelector('span:last-child').textContent = autoRotate ? '自动旋转' : '手动旋转';
+      });
+      focusBtn.addEventListener('click', () => {
+        const agent = agents.find((item) => item.id === selectedId);
+        if (!agent) return;
+        focusOffset = Math.PI / 2 - agent.angle - sceneSpin;
+        focusBtn.textContent = '已聚焦';
+        window.setTimeout(() => { focusBtn.textContent = '聚焦选中'; }, 900);
+      });
+
+      const morphStates = [
+        { label: '队列入口', d: 'M4 6 L20 6 M4 12 L20 12 M4 18 L20 18' },
+        { label: '执行中', d: 'M7 5 L7 19 M17 5 L17 19 M12 12 L12 12' },
+        { label: '已完成', d: 'M4 12 L9 17 M9 17 L20 6 M9 17 L9 17' }
+      ];
+      const morphPath = document.getElementById('morphPath');
+      const morphLabel = document.getElementById('morphLabel');
+      let morphIndex = 0;
+      let morphFrame = 0;
+      function morphTo(target) {
+        const from = (morphPath.getAttribute('d').match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+        const to = (target.d.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+        if (from.length !== to.length) { morphPath.setAttribute('d', target.d); morphLabel.textContent = target.label; return; }
+        const template = target.d.replace(/-?\d+(?:\.\d+)?/g, () => '__N__');
+        const started = performance.now();
+        cancelAnimationFrame(morphFrame);
+        const step = (now) => {
+          const t = Math.min((now - started) / 420, 1);
+          const eased = 1 - Math.pow(1 - t, 3);
+          let n = 0;
+          morphPath.setAttribute('d', template.replace(/__N__/g, () => (from[n] + (to[n++] - from[n - 1]) * eased).toFixed(2)));
+          if (t < 1) morphFrame = requestAnimationFrame(step); else morphLabel.textContent = target.label;
+        };
+        morphFrame = requestAnimationFrame(step);
+      }
+      document.getElementById('morphButton').addEventListener('click', () => { morphIndex = (morphIndex + 1) % morphStates.length; morphTo(morphStates[morphIndex]); });
+      sceneStatus.textContent = agents.length.toString().padStart(2, '0') + ' 个节点在线';
+      root.addEventListener('keydown', (event) => {
+        if (event.key === ' ' && event.target === stage) { event.preventDefault(); autoToggle.click(); }
+      });
+    })();
+  </script>
+</body>
+</html>

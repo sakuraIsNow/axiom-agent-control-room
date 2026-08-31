@@ -1,0 +1,27 @@
+node_modules/
+dist/
+server-dist/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.data/
+logs/
+
+# Local UI snapshots, demos, generated artifacts and temporary comparisons.
+frontend-backup/
+demo/
+20260829-032416-artifact-storage/
+qa/concept/
+qa/*.png
+qa/*.log
+qa/*-results.json
+qa/runtime-results.json
+*.tsbuildinfo
+vite.config.d.ts
+*.zip
+_compare-*/

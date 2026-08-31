@@ -1,0 +1,34 @@
+import type { AgentGraph, AgentMode, AgentPhase, BudgetConstraint, CollaborationConflict, CollaborationMessage, RunEvent, TaskProfile, TopologyAgent, Usage } from '../../types';
+import type { UiTheme } from '../../lib/uiTheme';
+
+export type ShellProps = {
+  phase: AgentPhase;
+  mode: AgentMode;
+  draft: string;
+  onDraftChange: (value: string) => void;
+  onSend: () => void;
+  onBack: () => void;
+  onNewTask: () => void;
+  onOpenSettings: () => void;
+  onOpenPlugins: () => void;
+  onStop: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  isRunning: boolean;
+  theme: UiTheme;
+  agents: TopologyAgent[];
+  graph: AgentGraph | null;
+  selectedNodeId: string | null;
+  onSelectAgent: (id: string) => void;
+  taskProfile: TaskProfile | null;
+  runEvents: RunEvent[];
+  collaborationMessages: CollaborationMessage[];
+  collaborationConflicts: CollaborationConflict[];
+  budgetConstraints: BudgetConstraint[];
+  usage: Usage;
+  durationMs: number;
+  catalogCount: number;
+  readiness: 'ready' | 'degraded' | 'blocked';
+  provider: string;
+  onThemeChange: (theme: UiTheme) => void;
+};
