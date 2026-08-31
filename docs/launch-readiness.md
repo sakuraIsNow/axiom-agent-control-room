@@ -10,7 +10,7 @@
 
 ## 最新本机验证（2026-08-29）
 
-在当前 Windows 单节点、PostgreSQL 数据规模和 10 并发条件下，50 次请求全部返回 HTTP 200：health `1357.15 RPS / P95 12.03ms`，Readiness `1695.35 RPS / P95 8.25ms`，运行观测 `488.74 RPS / P95 37.78ms`，任务列表 `843.52 RPS / P95 18.45ms`。标准门禁的单元测试为 `227/227`；本次 `npm run qa:all` 结果为 `20 passed / 0 failed / 3 skipped`，跳过项是未配置正式 TencentDB MemoryCore 和外部 Artifact 存储。原生搜索、会话路由本轮均一次通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量；完整原始结果见 [`qa/performance-results.json`](../qa/performance-results.json) 与 [`qa/production-gate-results.json`](../qa/production-gate-results.json)。
+在当前 Windows 单节点、PostgreSQL 数据规模和 10 并发条件下，50 次请求全部返回 HTTP 200：health `1472.58 RPS / P95 11.01ms`，Readiness `2031.08 RPS / P95 5.69ms`，运行观测 `682.26 RPS / P95 31.67ms`，任务列表 `1699.79 RPS / P95 7.31ms`。标准门禁的单元测试为 `247/247`；本次 `npm run qa:all` 结果为 `20 passed / 0 failed / 3 skipped`，跳过项是未配置正式 TencentDB MemoryCore 和外部 Artifact 存储。原生搜索、会话路由本轮均一次通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 
