@@ -24,8 +24,6 @@ Axiom 是一个可以自己安排工作的 AI 控制台。
 
 ## 🧭 前后端结构介绍
 
-有，后端就在仓库的 `server/` 目录。
-
 - 🎨 **前端**：`src/`，使用 React + Vite + TypeScript（`.tsx`）。
 - ⚙️ **后端**：`server/`，使用 Node.js + Hono + TypeScript（`.ts`），负责 API、Agent 调度、模型调用、任务和数据库。
 
