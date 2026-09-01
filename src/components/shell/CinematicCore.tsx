@@ -9,7 +9,7 @@ import { getUiTheme, type UiTheme } from '../../lib/uiTheme';
 import { isRibbonActive, resolveAgentStateId } from '../../lib/agentStateMachine';
 
 type Props = { phase: AgentPhase; agents: TopologyAgent[]; graph: AgentGraph | null; theme: UiTheme; onSelectAgent: (id: string) => void };
-type SceneNode = { id: string; title: string; role: string; status: TopologyAgent['status']; position: [number, number, number]; size: [number, number, number]; color: string };
+type SceneNode = { id: string; title: string; role: string; status: NonNullable<AgentGraph['nodes'][number]['status']>; position: [number, number, number]; size: [number, number, number]; color: string };
 
 const activePhase = (phase: AgentPhase) => phase === 'routing' || phase === 'context' || phase === 'inference';
 

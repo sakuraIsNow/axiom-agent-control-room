@@ -371,6 +371,18 @@ export type WorkflowEvent = {
   agentId?: string;
   timestamp: string;
   payload: Record<string, unknown>;
+  runtimeContext?: {
+    tenantId?: string;
+    userId?: string;
+    sessionId?: string;
+    workflowId?: string;
+    turnId?: string;
+    attemptId?: string;
+    runtimeGeneration?: string;
+    ownerId?: string;
+    source?: string;
+    submissionId?: string;
+  };
 };
 
 export type WorkflowTask = {
@@ -411,6 +423,7 @@ export type WorkflowTask = {
     tokens?: number;
     toolCalls?: ToolCall[];
     artifacts?: ArtifactRef[];
+    skipped?: boolean;
   }>;
   policy?: ExecutionPolicy;
   toolApprovals?: ToolApproval[];
@@ -460,6 +473,20 @@ export type WorkflowTaskSummary = {
   totalSteps: number;
   reviewScore?: number;
   pendingToolApprovals?: number;
+  /** Model-independent delivery receipt reconstructed from durable events. */
+  evidenceSummary?: {
+    status: 'verified' | 'partial' | 'unverified' | 'not-required';
+    totalSteps: number;
+    completedSteps: number;
+    failedSteps: number;
+    skippedSteps: number;
+    acceptanceCriteria: number;
+    evidenceItems: number;
+    artifactRefs: number;
+    toolReceipts: number;
+    review: 'approved' | 'not-required' | 'pending' | 'rejected';
+    gaps: string[];
+  };
 };
 
 export type WorkflowTemplateVisibility = 'private' | 'team';
@@ -670,11 +697,14 @@ export type AgentGraphNode = {
   id: string;
   stepId?: string;
   agentId?: string;
+  parentId?: string;
+  executionWave?: number;
   role: string;
   title: string;
   dependsOn: string[];
   skillIds?: string[];
-  status?: TopologyAgent['status'];
+  writeScopes?: string[];
+  status?: TopologyAgent['status'] | 'skipped' | 'waiting_for_human' | 'cancelled';
   tokens?: number;
   durationMs?: number;
   attempts?: number;
@@ -691,6 +721,7 @@ export type AgentGraphEdge = {
 export type AgentGraph = {
   nodes: AgentGraphNode[];
   edges: AgentGraphEdge[];
+  revision?: number;
 };
 
 export type Session = {

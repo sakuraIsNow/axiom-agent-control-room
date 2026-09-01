@@ -28,13 +28,16 @@ export const nodeTitle = (node: PresentableNode): string => ('title' in node && 
 
 export const nodeRole = (node: PresentableNode): string => node.role;
 
-export const nodeStatus = (node: PresentableNode): TopologyAgent['status'] => node.status ?? 'queued';
+export const nodeStatus = (node: PresentableNode): NonNullable<AgentGraphNode['status']> => node.status ?? 'queued';
 
 export const statusText: Record<string, string> = {
   queued: '等待',
   running: '执行中',
   completed: '完成',
   failed: '失败',
+  skipped: '已跳过',
+  waiting_for_human: '等人工处理',
+  cancelled: '已取消',
 };
 
 export function statusColor(status: string, theme: { roleColors: Record<string, string>; scene: { signal: string; idle: string } }, role?: string): string {

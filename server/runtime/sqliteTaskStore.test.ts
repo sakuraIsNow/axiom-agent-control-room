@@ -59,6 +59,26 @@ describe('SqliteTaskStore', () => {
     }
   });
 
+  test('persists a unified execution context for replay and cross-entrypoint tracing', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await store.createTask({ ...taskInput('trace context'), templateId: 'workflow-1', idempotencyKey: 'submission-1' });
+      await store.appendEvent(task, { type: 'turn.started', payload: { source: 'agent-nexus', turnId: 'turn-7', attemptId: 'attempt-2' } });
+      const event = (await store.getEvents(task.id))[0];
+      assert.equal(event?.runtimeContext?.tenantId, task.tenantId);
+      assert.equal(event?.runtimeContext?.userId, task.userId);
+      assert.equal(event?.runtimeContext?.sessionId, task.sessionId);
+      assert.equal(event?.runtimeContext?.workflowId, 'workflow-1');
+      assert.equal(event?.runtimeContext?.turnId, 'turn-7');
+      assert.equal(event?.runtimeContext?.attemptId, 'attempt-2');
+      assert.equal(event?.runtimeContext?.source, 'agent-nexus');
+      assert.equal(event?.runtimeContext?.submissionId, 'submission-1');
+    } finally {
+      await store.close();
+    }
+  });
+
   test('moves a queued cancellation directly to a terminal state', async () => {
     const store = new SqliteTaskStore(':memory:');
     await store.initialize();

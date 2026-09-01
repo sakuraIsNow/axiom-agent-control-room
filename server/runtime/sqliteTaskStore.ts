@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { runtimeEventSource } from './runtimeContext.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -60,6 +61,7 @@ type EventRow = {
   agent_id: string | null;
   timestamp: string;
   payload_json: string;
+  runtime_context_json: string | null;
 };
 
 type SessionRow = {
@@ -123,6 +125,7 @@ const eventFromRow = (row: EventRow): RuntimeEvent => ({
   agentId: row.agent_id ?? undefined,
   timestamp: row.timestamp,
   payload: parseJson(row.payload_json, {}),
+  runtimeContext: parseJson(row.runtime_context_json, undefined),
 });
 
 const sessionFromRow = (row: SessionRow): PersistedSession => ({
@@ -139,6 +142,7 @@ const sessionFromRow = (row: SessionRow): PersistedSession => ({
 
 export class SqliteTaskStore implements TaskStore {
   private readonly db: DatabaseSync;
+  private readonly runtimeGeneration = process.env.AXIOM_RUNTIME_GENERATION?.trim() || randomUUID();
 
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -189,6 +193,7 @@ export class SqliteTaskStore implements TaskStore {
         agent_id TEXT,
         timestamp TEXT NOT NULL,
         payload_json TEXT NOT NULL,
+        runtime_context_json TEXT,
         UNIQUE(task_id, sequence)
       );
 
@@ -214,6 +219,10 @@ export class SqliteTaskStore implements TaskStore {
 
       CREATE INDEX IF NOT EXISTS idx_sessions_user_updated ON sessions(tenant_id, user_id, updated_at DESC);
     `);
+    const eventColumns = this.db.prepare('PRAGMA table_info(task_events)').all() as Array<{ name: string }>;
+    if (!eventColumns.some((column) => column.name === 'runtime_context_json')) {
+      this.db.exec('ALTER TABLE task_events ADD COLUMN runtime_context_json TEXT');
+    }
     const columns = this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === 'plan_version')) {
       this.db.exec('ALTER TABLE tasks ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 0');
@@ -567,9 +576,25 @@ export class SqliteTaskStore implements TaskStore {
         sequence: sequenceRow.sequence,
         timestamp: new Date().toISOString(),
       };
+      const contextRow = this.db.prepare(`
+        SELECT tenant_id, user_id, session_id, template_id, idempotency_key
+        FROM tasks WHERE id = ?
+      `).get(task.id) as { tenant_id?: string; user_id?: string; session_id?: string; template_id?: string | null; idempotency_key?: string | null } | undefined;
+      runtimeEvent.runtimeContext = {
+        ...(contextRow?.tenant_id ? { tenantId: contextRow.tenant_id } : {}),
+        ...(contextRow?.user_id ? { userId: contextRow.user_id } : {}),
+        ...(contextRow?.session_id ? { sessionId: contextRow.session_id } : {}),
+        ...(contextRow?.template_id ? { workflowId: contextRow.template_id } : {}),
+        turnId: typeof runtimeEvent.payload.turnId === 'string' ? runtimeEvent.payload.turnId : runtimeEvent.runId,
+        ...(typeof runtimeEvent.payload.attemptId === 'string' ? { attemptId: runtimeEvent.payload.attemptId } : {}),
+        runtimeGeneration: this.runtimeGeneration,
+        ownerId: contextRow?.user_id ? String(contextRow.user_id) : undefined,
+        source: runtimeEventSource(runtimeEvent),
+        ...(contextRow?.idempotency_key ? { submissionId: contextRow.idempotency_key } : {}),
+      };
       this.db.prepare(`
-        INSERT INTO task_events (id, task_id, run_id, sequence, type, agent_id, timestamp, payload_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO task_events (id, task_id, run_id, sequence, type, agent_id, timestamp, payload_json, runtime_context_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         runtimeEvent.id,
         runtimeEvent.taskId,
@@ -579,6 +604,7 @@ export class SqliteTaskStore implements TaskStore {
         runtimeEvent.agentId ?? null,
         runtimeEvent.timestamp,
         JSON.stringify(runtimeEvent.payload),
+        JSON.stringify(runtimeEvent.runtimeContext),
       );
       this.db.exec('COMMIT');
       return runtimeEvent;

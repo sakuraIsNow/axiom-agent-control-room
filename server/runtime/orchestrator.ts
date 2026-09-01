@@ -26,6 +26,9 @@ import { ToolApprovalRequiredError, ToolRegistry, type ToolExecution } from './t
 import { executeWorkflowSpecialist, isWorkflowSpecialist } from './workflowSpecialists.js';
 import { routeSkillIds, runtimeSkillCatalog, skillInstructions } from './skillCatalog.js';
 import { evaluateWorkflowConditions } from './workflowConditions.js';
+import { analyzeWorkflowDag, workflowDagIssueText } from './workflowDag.js';
+import { summarizeCompletionEvidence } from './completionEvidence.js';
+import { selectNonConflictingSteps } from './workflowConcurrency.js';
 import type { ModelRoutingPolicy } from './modelRouting.js';
 import type { ArtifactStore } from './artifactStore.js';
 import type { ArtifactCatalog } from './artifactCatalog.js';
@@ -126,6 +129,7 @@ const buildPlanSchema = (customRoleIds: string[] = []) => z.object({
     skillIds: z.array(z.string().min(1).max(80)).max(12).default([]),
     model: z.string().min(1).max(120).optional(),
     toolNames: z.array(z.string().min(1).max(80)).max(16).optional(),
+    writeScopes: z.array(z.string().min(1).max(240)).max(16).optional(),
     maxTokens: z.number().int().min(128).max(64_000).optional(),
     maxDurationMs: z.number().int().min(5_000).max(600_000).optional(),
     failureStrategy: z.enum(['retry', 'skip', 'pause']).default('retry'),
@@ -465,12 +469,15 @@ const buildAgentGraph = (
   results: StepResult[] = [],
   includeQualityGate = false,
   synthesizerStatus: AgentGraphNode['status'] = 'queued',
+  revision = 1,
 ): AgentGraph => {
   const resultByStep = new Map(results.map((result) => [result.stepId, result]));
   const qualityGateStep: WorkflowStep | null = includeQualityGate && !steps.some((step) => step.role === 'reviewer')
     ? { id: 'reviewer-final', title: '质量审查', role: 'reviewer', objective: '验证证据树。', dependsOn: steps.map((step) => step.id), acceptanceCriteria: ['质量门禁清晰明确'], skillIds: ['quality-review'] }
     : null;
   const graphSteps: WorkflowStep[] = qualityGateStep ? [...steps, qualityGateStep] : steps;
+  const dag = analyzeWorkflowDag(graphSteps);
+  const waveByStep = new Map(dag.waves.flatMap((wave, index) => wave.map((stepId) => [stepId, index] as const)));
   const synthesisDependencies = qualityGateStep
     ? [qualityGateStep.id]
     : graphSteps.map((step) => step.id);
@@ -482,16 +489,20 @@ const buildAgentGraph = (
       title: 'Orchestrator',
       dependsOn: [],
       status: results.length ? 'completed' : 'running',
+      executionWave: 0,
     },
     ...graphSteps.map((step) => ({
       id: step.id,
       stepId: step.id,
       agentId: `${step.role}-${step.id}`,
+      parentId: 'orchestrator',
       role: step.role,
       title: step.title,
       dependsOn: step.dependsOn,
-      status: (resultByStep.get(step.id)?.status ?? 'queued') as AgentGraphNode['status'],
+      status: resultByStep.get(step.id)?.skipped ? 'skipped' : (resultByStep.get(step.id)?.status ?? 'queued') as AgentGraphNode['status'],
+      executionWave: (waveByStep.get(step.id) ?? 0) + 1,
       skillIds: step.skillIds,
+      writeScopes: step.writeScopes,
       tokens: resultByStep.get(step.id)?.tokens,
       durationMs: resultByStep.get(step.id)?.durationMs,
       attempts: resultByStep.get(step.id)?.attempts,
@@ -505,6 +516,8 @@ const buildAgentGraph = (
       title: '汇总交付',
       dependsOn: synthesisDependencies,
       status: synthesizerStatus,
+      parentId: 'orchestrator',
+      executionWave: (dag.waves.length || 0) + 1,
     },
   ];
   const edges: AgentGraphEdge[] = graphSteps.flatMap((step) => {
@@ -526,7 +539,7 @@ const buildAgentGraph = (
       kind: 'dependency' as const,
     })));
   }
-  return { nodes, edges };
+  return { nodes, edges, revision: Math.max(1, Math.floor(revision)) };
 };
 
 const retryDelay = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -817,7 +830,7 @@ Use the triage profile to size the workflow. For a team route, prefer 2-3 measur
 Select only the skills needed for each step from this catalog; a skill is an instruction bundle, not an extra Agent:
 ${skillHints}
 Independent steps should have no dependencies so they can run concurrently. Dependent steps must reference earlier step IDs.
-Return JSON only: {"summary":"...","routingReason":"...","steps":[{"id":"...","title":"...","role":"researcher|analyst|builder|reviewer","objective":"...","dependsOn":[],"acceptanceCriteria":["..."],"skillIds":["architecture-design"],"model":"one model from the allowed catalog, or omit this field","toolNames":[],"maxTokens":4096,"maxDurationMs":120000,"failureStrategy":"retry|skip|pause"}]}.
+Return JSON only: {"summary":"...","routingReason":"...","steps":[{"id":"...","title":"...","role":"researcher|analyst|builder|reviewer","objective":"...","dependsOn":[],"acceptanceCriteria":["..."],"skillIds":["architecture-design"],"model":"one model from the allowed catalog, or omit this field","toolNames":[],"writeScopes":[],"maxTokens":4096,"maxDurationMs":120000,"failureStrategy":"retry|skip|pause"}]}.
 Every step must include acceptanceCriteria. Use a smaller token and time budget for narrow steps. Use skip only when downstream work can proceed without the step; use pause when operator input is required.
 All human-readable fields must follow the user's language. If the task contains Chinese, write summary, routingReason, step titles, objectives, and acceptanceCriteria in Simplified Chinese. Keep role IDs, step IDs, schema keys, and enum values unchanged.
 Do not claim tools or evidence that are not available.`,
@@ -841,6 +854,7 @@ Do not claim tools or evidence that are not available.`,
         id: uniqueId,
         dependsOn,
         skillIds: routeSkillIds(latestUserInput(task.input), step.role, step.skillIds),
+        writeScopes: step.writeScopes?.length ? [...new Set(step.writeScopes.map((scope) => scope.trim()).filter(Boolean))] : (step.role === 'builder' ? ['workspace:*'] : []),
         ...(selectedModel ? { model: selectedModel } : {}),
         maxTokens: step.maxTokens ?? (step.role === 'reviewer' ? 8_192 : 6_144),
         maxDurationMs: step.maxDurationMs ?? 120_000,
@@ -848,6 +862,8 @@ Do not claim tools or evidence that are not available.`,
       };
     });
     const boundedSteps = steps.slice(0, Math.max(1, profile.maxSteps));
+    const dag = analyzeWorkflowDag(boundedSteps);
+    if (!dag.valid) throw new Error(dag.issues.map(workflowDagIssueText).join(' '));
     const allowedIds = new Set(boundedSteps.map((step) => step.id));
     return {
       ...parsed,
@@ -905,6 +921,7 @@ Do not claim tools or evidence that are not available.`,
         skillIds: step.skillIds,
         model: step.model,
         toolNames: allowedTools,
+        writeScopes: step.writeScopes ?? (step.role === 'builder' ? ['workspace:*'] : []),
         maxTokens: step.maxTokens,
         maxDurationMs: step.maxDurationMs,
         failureStrategy: step.failureStrategy ?? 'retry',
@@ -1501,6 +1518,17 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       user: prompt,
     });
     await this.assertActive(task.id, signal);
+    const stepResult: StepResult = {
+      stepId: 'single-agent',
+      agentId,
+      role,
+      status: 'completed',
+      output: limitText(completion.content, 48_000),
+      evidence: [],
+      confidence: 0.8,
+      attempts: Math.max(1, completion.attempts),
+      durationMs: Date.now() - startedAt,
+    };
     await this.emit(task, {
       type: 'agent.completed',
       agentId,
@@ -1531,6 +1559,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       status: 'completed',
       review,
       result: finalContent,
+      stepResults: [stepResult],
       plan: routingPlan(task, profile),
     });
     await this.emit(task, {
@@ -1545,7 +1574,13 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
     await this.captureMemory(task, task.result ?? '', signal);
     await this.emit(task, {
       type: 'task.completed',
-      payload: { result: task.result, review, agentCount: 1, profile },
+      payload: {
+        result: task.result,
+        review,
+        agentCount: 1,
+        profile,
+        evidenceSummary: summarizeCompletionEvidence(undefined, [stepResult], review, false),
+      },
     });
     return task;
   }
@@ -1640,7 +1675,15 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
     await this.captureMemory(task, task.result ?? '', signal);
     await this.emit(task, {
       type: 'task.completed',
-      payload: { result: task.result, agentCount: 1, intent: profile.kind, route: 'direct', profile, evidenceTree: false },
+      payload: {
+        result: task.result,
+        agentCount: 1,
+        intent: profile.kind,
+        route: 'direct',
+        profile,
+        evidenceTree: false,
+        evidenceSummary: summarizeCompletionEvidence(undefined, [result], undefined, false),
+      },
     });
     return task;
   }
@@ -1714,7 +1757,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         plan = {
           ...plan,
           profile,
-          graph: plan.graph ?? buildAgentGraph(plan.steps, [], profile.requiresReview),
+           graph: plan.graph ?? buildAgentGraph(plan.steps, [], profile.requiresReview, 'queued', 1),
           version,
           approvalStatus,
           ...(!task.policy.requirePlanApproval ? { approvedAt: new Date().toISOString(), approvedBy: 'runtime-policy' } : {}),
@@ -1737,6 +1780,18 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         await this.emit(task, { type: 'task.planned', agentId: 'scheduler-agent', payload: { plan, profile, graph: plan.graph, source: schedulingDecision ? 'scheduler-agent' : 'precomputed-plan' } });
         if (plan.graph) await this.emit(task, { type: 'graph.updated', agentId: 'scheduler-agent', payload: { graph: plan.graph, reason: 'scheduler-plan-created' } });
       }
+
+       const dag = analyzeWorkflowDag(plan.steps);
+       if (!dag.valid) throw new Error(dag.issues.map(workflowDagIssueText).join(' '));
+       let graphRevision = Math.max(1, plan.graph?.revision ?? 1);
+       const nextGraph = (resultsForGraph: StepResult[], status: AgentGraphNode['status'] = 'queued') => {
+         graphRevision += 1;
+         return buildAgentGraph(plan!.steps, resultsForGraph, profile.requiresReview, status, graphRevision);
+       };
+       if (plan.graph && plan.graph.revision !== graphRevision) {
+         plan = { ...plan, graph: { ...plan.graph, revision: graphRevision } };
+         task = await this.store.updateTask(task.id, { plan });
+       }
 
       if (plan.approvalStatus === 'pending' || plan.approvalStatus === 'rejected') {
         task = await this.store.updateTask(task.id, { status: 'awaiting_approval' });
@@ -1847,7 +1902,21 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           continue;
         }
 
-        let ready = executableCandidates;
+        let ready = selectNonConflictingSteps(
+          executableCandidates,
+          Math.min(waveConcurrency, task.policy.maxConcurrentSteps ?? waveConcurrency),
+        );
+        if (ready.length < executableCandidates.length) {
+          await this.emit(task, {
+            type: 'queue.updated',
+            payload: {
+              iteration: loopIteration,
+              selectedSteps: ready.map((step) => step.id),
+              deferredSteps: executableCandidates.filter((step) => !ready.some((selected) => selected.id === step.id)).map((step) => step.id),
+              reason: '检测到 Agent 写入范围重叠，已拆分为后续波次。',
+            },
+          });
+        }
         if (task.policy.maxTokens) {
           const usage = await this.budgetUsage(task.id);
           const reserveTokens = profile.requiresReview
@@ -1957,7 +2026,8 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
             },
           });
         }
-        task = await this.store.updateTask(task.id, { stepResults: results });
+        const checkpointGraph = nextGraph(results);
+        task = await this.store.updateTask(task.id, { stepResults: results, plan: { ...plan, graph: checkpointGraph } });
         await this.emit(task, {
           type: 'checkpoint.saved',
           payload: {
@@ -1969,7 +2039,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         await this.emit(task, {
           type: 'graph.updated',
           payload: {
-            graph: buildAgentGraph(plan.steps, results, profile.requiresReview),
+            graph: checkpointGraph,
             reason: 'checkpoint',
             iteration: loopIteration,
           },
@@ -2034,7 +2104,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       const result = await this.synthesize(task, results, review, signal);
       await this.assertActive(task.id, signal);
       const resultStorage = await this.persistResultArtifact(task, result);
-      const finalGraph = buildAgentGraph(plan.steps, results, profile.requiresReview, 'completed');
+       const finalGraph = nextGraph(results, 'completed');
       task = await this.store.updateTask(task.id, {
         status: 'completed',
         result,
@@ -2060,6 +2130,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           agentCount: new Set(results.map((item) => item.agentId)).size,
           profile,
           graph: finalGraph,
+          evidenceSummary: summarizeCompletionEvidence(plan, results, review, profile.requiresReview),
           partial: workflowFailures.length > 0,
           ...(workflowFailures.length ? {
             failures: workflowFailures.map((failure) => ({ stepId: failure.stepId, title: failure.title, diagnosis: failureLabel(failure.error) })),

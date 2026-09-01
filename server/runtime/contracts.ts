@@ -77,6 +77,8 @@ export type WorkflowStep = {
   skillIds?: string[];
   model?: string;
   toolNames?: string[];
+  /** Relative workspace paths this step may write; empty means read-only. */
+  writeScopes?: string[];
   maxTokens?: number;
   maxDurationMs?: number;
   failureStrategy?: 'retry' | 'skip' | 'pause';
@@ -133,6 +135,7 @@ export type AgentWorkflowNode = {
   acceptanceCriteria?: string[];
   model?: string;
   toolNames?: string[];
+  writeScopes?: string[];
   maxTokens?: number;
   maxDurationMs?: number;
   failureStrategy?: 'retry' | 'skip' | 'pause';
@@ -469,11 +472,16 @@ export type AgentGraphNode = {
   id: string;
   stepId?: string;
   agentId?: string;
+  /** Parent in the execution tree; the orchestrator is the root for now. */
+  parentId?: string;
+  /** Zero-based dependency wave used by the scheduler and Graph UI. */
+  executionWave?: number;
   role: AgentRole | 'orchestrator';
   title: string;
   dependsOn: string[];
   skillIds?: string[];
-  status?: 'queued' | 'running' | 'completed' | 'failed';
+  writeScopes?: string[];
+  status?: 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'waiting_for_human' | 'cancelled';
   tokens?: number;
   durationMs?: number;
   attempts?: number;
@@ -490,6 +498,8 @@ export type AgentGraphEdge = {
 export type AgentGraph = {
   nodes: AgentGraphNode[];
   edges: AgentGraphEdge[];
+  /** Monotonic graph revision, incremented whenever a plan/checkpoint changes. */
+  revision?: number;
 };
 
 export type StepResult = {
@@ -676,6 +686,37 @@ export type RuntimeEvent = {
   agentId?: string;
   timestamp: string;
   payload: Record<string, unknown>;
+  /** Cross-entrypoint execution identity used for replay and diagnostics. */
+  runtimeContext?: RuntimeExecutionContext;
+};
+
+export type RuntimeExecutionContext = {
+  tenantId?: string;
+  userId?: string;
+  sessionId?: string;
+  workflowId?: string;
+  turnId?: string;
+  attemptId?: string;
+  runtimeGeneration?: string;
+  ownerId?: string;
+  source?: RuntimeEventSource;
+  submissionId?: string;
+};
+
+export type RuntimeEventSource = 'builtin' | 'harness' | 'plugin' | 'agent-nexus' | 'schedule' | 'webhook' | 'conversation' | 'api';
+
+export type CompletionEvidenceSummary = {
+  status: 'verified' | 'partial' | 'unverified' | 'not-required';
+  totalSteps: number;
+  completedSteps: number;
+  failedSteps: number;
+  skippedSteps: number;
+  acceptanceCriteria: number;
+  evidenceItems: number;
+  artifactRefs: number;
+  toolReceipts: number;
+  review: 'approved' | 'not-required' | 'pending' | 'rejected';
+  gaps: string[];
 };
 
 /** Aggregates used by task list projections; avoids loading each task's full event stream. */

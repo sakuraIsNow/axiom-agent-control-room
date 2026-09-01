@@ -167,7 +167,16 @@ const fallbackDecision = (input: ChatRouteInput, intent: ChatIntent, workflowRou
   const profile = classifyTask(input.message, input.mode);
   const steps = intent === 'task' ? fallbackSteps(input.message, input.mode, workflowRoute) : [];
   const activeAgentIds = intent === 'task' ? workflowRoute === 'direct' ? ['direct-responder'] : unique(steps.map((step) => step.agentId)) : [intentAgent[intent]];
-  const selectedSkillIds = intent === 'task' ? unique(steps.flatMap((step) => step.skillIds)) : routeSkillIds(`${intent} ${input.message} ${reason}`, activeAgentIds[0]!);
+  // Route Skills from the user's turn. For ordinary specialist intents the
+  // rationale can add useful semantic context (for example, an external
+  // "事实" lookup needs evidence handling), but Registry rationale must not
+  // leak the word "实时" into the web-research matcher.
+  const skillRoutingText = intent === 'agent-registry'
+    ? `${intent} ${input.message}`
+    : `${intent} ${input.message} ${reason}`;
+  const selectedSkillIds = intent === 'task'
+    ? unique(steps.flatMap((step) => step.skillIds))
+    : routeSkillIds(skillRoutingText, activeAgentIds[0]!);
   const existing = currentGraphRoles(input);
   const scheduler: TurnSchedulingDecision = {
     route: workflowRoute, activeAgentIds, skippedAgentIds: existing.filter((id) => !activeAgentIds.includes(id)), appendAgentIds: activeAgentIds.filter((id) => !existing.includes(id)), selectedSkillIds,

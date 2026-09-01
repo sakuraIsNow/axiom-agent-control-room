@@ -44,10 +44,11 @@ export const AGENT_STATE_DEFS: Record<AgentStateId, AgentStateDef> = {
   '35': state('35', '失败告警', 0.92, 0.9, [{ type: 'jitter', amplitude: 0.06, frequency: 4 }, { type: 'blink', intervalSec: 0.9, durationSec: 0.3 }]),
 };
 
-export function resolveAgentStateId(status: TopologyAgent['status'] | undefined, phase: AgentPhase): AgentStateId {
+export function resolveAgentStateId(status: TopologyAgent['status'] | 'skipped' | 'waiting_for_human' | 'cancelled' | undefined, phase: AgentPhase): AgentStateId {
   if (!status || status === 'queued') return phase === 'idle' ? '00' : '10';
   if (status === 'failed') return '35';
-  if (status === 'completed') return '34';
+  if (status === 'completed' || status === 'skipped' || status === 'cancelled') return '34';
+  if (status === 'waiting_for_human') return '10';
   if (phase === 'routing') return '30';
   if (phase === 'context') return '31';
   if (phase === 'inference') return '32';

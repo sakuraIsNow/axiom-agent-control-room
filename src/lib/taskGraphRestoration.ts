@@ -26,10 +26,10 @@ export const restoreTaskGraph = (task: RestorableTask): AgentGraph | null => {
     nodes: graph.nodes.map((node) => {
       const result = resultByStep.get(node.stepId ?? node.id)
         ?? (node.agentId ? resultByAgent.get(node.agentId) : undefined);
-      const persistedStatus = result?.status ?? node.status ?? 'queued';
+      const persistedStatus = result?.skipped ? 'skipped' : result?.status ?? node.status ?? 'queued';
       return {
         ...node,
-        status: result?.status ?? terminalFallbackStatus(task.status, persistedStatus),
+        status: result?.skipped ? 'skipped' : result?.status ?? terminalFallbackStatus(task.status, persistedStatus),
         ...(result?.tokens !== undefined ? { tokens: result.tokens } : {}),
         ...(result?.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
         ...(result?.attempts !== undefined ? { attempts: result.attempts } : {}),

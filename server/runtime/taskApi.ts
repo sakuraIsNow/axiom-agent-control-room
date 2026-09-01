@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
+import { terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
 import { isBuiltinRoleId } from './agentStore.js';
 import type { TaskCoordinator } from './coordinator.js';
 import type { EventHub } from './eventHub.js';
@@ -84,6 +84,33 @@ const createTaskSchema = z.object({
   /** Validated output of the per-turn Router and Scheduler Agents. */
   routing: chatRouteDecisionSchema.optional(),
 });
+
+const completionEvidenceStatuses = new Set<CompletionEvidenceSummary['status']>(['verified', 'partial', 'unverified', 'not-required']);
+const completionEvidenceReviews = new Set<CompletionEvidenceSummary['review']>(['approved', 'not-required', 'pending', 'rejected']);
+const finiteCount = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
+const parseCompletionEvidence = (value: unknown): CompletionEvidenceSummary | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  if (typeof source.status !== 'string' || !completionEvidenceStatuses.has(source.status as CompletionEvidenceSummary['status'])) return undefined;
+  if (typeof source.review !== 'string' || !completionEvidenceReviews.has(source.review as CompletionEvidenceSummary['review'])) return undefined;
+  const counts = ['totalSteps', 'completedSteps', 'failedSteps', 'skippedSteps', 'acceptanceCriteria', 'evidenceItems', 'artifactRefs', 'toolReceipts'] as const;
+  const parsedCounts = Object.fromEntries(counts.map((key) => [key, finiteCount(source[key])])) as Record<(typeof counts)[number], number | null>;
+  if (Object.values(parsedCounts).some((count) => count === null)) return undefined;
+  const gaps = Array.isArray(source.gaps) && source.gaps.every((gap) => typeof gap === 'string') ? source.gaps.slice(0, 8) as string[] : [];
+  return {
+    status: source.status as CompletionEvidenceSummary['status'],
+    totalSteps: parsedCounts.totalSteps!,
+    completedSteps: parsedCounts.completedSteps!,
+    failedSteps: parsedCounts.failedSteps!,
+    skippedSteps: parsedCounts.skippedSteps!,
+    acceptanceCriteria: parsedCounts.acceptanceCriteria!,
+    evidenceItems: parsedCounts.evidenceItems!,
+    artifactRefs: parsedCounts.artifactRefs!,
+    toolReceipts: parsedCounts.toolReceipts!,
+    review: source.review as CompletionEvidenceSummary['review'],
+    gaps,
+  };
+};
 
 const reportExportSchema = z.object({
   sessionId: z.string().min(1).max(160),
@@ -669,6 +696,9 @@ export const createTaskApi = (dependencies: {
       toolCalls: 0,
     };
     const source = summary.source;
+    const evidenceSummary = summary.latest?.type === 'task.completed'
+      ? parseCompletionEvidence(summary.latest.payload.evidenceSummary)
+      : undefined;
     // Agent Nexus task cards are projections of the workflow, so a workflow
     // rename is reflected in every existing run without mutating immutable
     // task input/history records.
@@ -716,6 +746,7 @@ export const createTaskApi = (dependencies: {
       completedSteps: task.stepResults.filter((result) => result.status === 'completed').length,
       totalSteps,
       ...(task.review ? { reviewScore: task.review.score } : {}),
+      ...(evidenceSummary ? { evidenceSummary } : {}),
     };
   };
 

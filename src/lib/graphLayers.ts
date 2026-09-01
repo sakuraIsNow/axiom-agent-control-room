@@ -23,12 +23,16 @@ export function computeGraphLayers(graph: AgentGraph | null): GraphLayer[] {
   };
   const groups = new Map<number, AgentGraphNode[]>();
   nodes.forEach((node) => {
-    const level = levelFor(node.id);
+    // Prefer the scheduler's durable wave when present. Recomputing from
+    // dependencies remains the fallback for legacy snapshots.
+    const level = Number.isInteger(node.executionWave) && (node.executionWave ?? 0) > 0
+      ? (node.executionWave as number) - 1
+      : levelFor(node.id);
     const group = groups.get(level) ?? [];
     group.push(node);
     groups.set(level, group);
   });
   return [...groups.entries()]
     .sort(([left], [right]) => left - right)
-    .map(([level, groupedNodes]) => ({ level, nodes: groupedNodes }));
+    .map(([level, groupedNodes]) => ({ level, nodes: groupedNodes.sort((left, right) => left.id.localeCompare(right.id)) }));
 }

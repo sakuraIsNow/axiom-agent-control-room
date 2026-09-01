@@ -27,6 +27,7 @@ export type WorkflowCanvasNode = {
   acceptanceCriteria?: string[];
   model?: string;
   toolNames?: string[];
+  writeScopes?: string[];
   maxTokens?: number;
   maxDurationMs?: number;
   failureStrategy?: 'retry' | 'skip' | 'pause';

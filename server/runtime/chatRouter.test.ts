@@ -376,6 +376,15 @@ test('fallback routing assigns every specialist intent before ordinary task clas
   }
 });
 
+test('Agent Registry fallback does not inherit live-search metadata from its reason', () => {
+  const decision = fallbackChatRoute({ message: '你有哪些子智能体', mode: 'analyze' });
+  assert.equal(decision.intent, 'agent-registry');
+  assert.equal(decision.agentRole, 'registry-agent');
+  assert.equal(decision.requiresSearch, false);
+  assert.deepEqual(decision.skillIds, []);
+  assert.equal(decision.router.requiresExternalFacts, false);
+});
+
 test('Report Agent routes explicit exports while ordinary report writing remains a task', async () => {
   const lastAnswer = await routeChatIntent(
     { message: '把以上回答导出为 Word 报告并下载', mode: 'analyze' },

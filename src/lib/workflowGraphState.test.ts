@@ -52,3 +52,20 @@ test('graph payload validation rejects duplicate nodes, dangling edges, and cycl
     edges: [...validGraph.edges, { from: 'research', to: 'orchestrator', kind: 'dependency' }],
   }), null);
 });
+
+test('graph payload validation rejects invalid parent trees and non-integer revisions', () => {
+  assert.equal(parseAgentGraph({
+    ...validGraph,
+    revision: 1.5,
+  }), null);
+  assert.equal(parseAgentGraph({
+    ...validGraph,
+    nodes: validGraph.nodes.map((node) => node.id === 'research' ? { ...node, parentId: 'missing' } : node),
+  }), null);
+  assert.equal(parseAgentGraph({
+    ...validGraph,
+    nodes: validGraph.nodes.map((node) => node.id === 'research'
+      ? { ...node, parentId: 'orchestrator' }
+      : { ...node, parentId: 'research' }),
+  }), null);
+});

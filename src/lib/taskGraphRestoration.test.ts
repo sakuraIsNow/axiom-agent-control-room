@@ -86,3 +86,20 @@ test('tasks with a malformed persisted graph fail closed', () => {
   task.plan!.graph!.edges.push({ from: 'missing', to: 'step-1', kind: 'dependency' });
   assert.equal(restoreTaskGraph(task), null);
 });
+
+test('condition-skipped Agents remain visibly skipped after task restoration', () => {
+  const task = taskWithStatus('completed');
+  task.stepResults = [{
+    stepId: 'step-1',
+    agentId: 'researcher-step-1',
+    role: 'researcher',
+    status: 'completed',
+    skipped: true,
+    output: 'branch skipped',
+    evidence: [],
+    confidence: 1,
+    attempts: 0,
+    durationMs: 0,
+  }];
+  assert.equal(restoreTaskGraph(task)?.nodes[1]?.status, 'skipped');
+});

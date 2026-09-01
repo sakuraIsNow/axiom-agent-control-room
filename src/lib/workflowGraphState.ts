@@ -2,11 +2,12 @@ import type { AgentGraph, AgentGraphEdge, AgentGraphNode } from '../types';
 
 export const MAX_DASHBOARD_GRAPH_NODES = 16;
 
-const nodeStatuses = new Set<NonNullable<AgentGraphNode['status']>>(['queued', 'running', 'completed', 'failed']);
+const nodeStatuses = new Set<NonNullable<AgentGraphNode['status']>>(['queued', 'running', 'completed', 'failed', 'skipped', 'waiting_for_human', 'cancelled']);
 const edgeKinds = new Set<AgentGraphEdge['kind']>(['dependency', 'delegation', 'review']);
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const optionalString = (value: unknown) => typeof value === 'string' ? value : undefined;
 const optionalNumber = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+const optionalInteger = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 const optionalStringArray = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length > 0)
   ? [...new Set(value as string[])]
   : undefined;
@@ -18,6 +19,7 @@ const parseNode = (value: unknown): AgentGraphNode | null => {
     || typeof value.title !== 'string'
     || !Array.isArray(value.dependsOn)
     || !value.dependsOn.every((dependency) => typeof dependency === 'string' && dependency.length > 0)
+    || (value.executionWave !== undefined && optionalInteger(value.executionWave) === undefined)
     || (value.status !== undefined && !nodeStatuses.has(value.status as NonNullable<AgentGraphNode['status']>))) return null;
   return {
     id: value.id,
@@ -25,8 +27,11 @@ const parseNode = (value: unknown): AgentGraphNode | null => {
     title: value.title,
     dependsOn: [...value.dependsOn] as string[],
     ...(optionalStringArray(value.skillIds) ? { skillIds: optionalStringArray(value.skillIds) } : {}),
+    ...(optionalStringArray(value.writeScopes) ? { writeScopes: optionalStringArray(value.writeScopes) } : {}),
     ...(optionalString(value.stepId) ? { stepId: optionalString(value.stepId) } : {}),
     ...(optionalString(value.agentId) ? { agentId: optionalString(value.agentId) } : {}),
+    ...(optionalString(value.parentId) ? { parentId: optionalString(value.parentId) } : {}),
+    ...(optionalInteger(value.executionWave) !== undefined ? { executionWave: optionalInteger(value.executionWave) } : {}),
     ...(value.status ? { status: value.status as AgentGraphNode['status'] } : {}),
     ...(optionalNumber(value.tokens) !== undefined ? { tokens: optionalNumber(value.tokens) } : {}),
     ...(optionalNumber(value.durationMs) !== undefined ? { durationMs: optionalNumber(value.durationMs) } : {}),
@@ -67,6 +72,7 @@ const isAcyclic = (nodeIds: Set<string>, edges: AgentGraphEdge[]) => {
 
 export const parseAgentGraph = (value: unknown): AgentGraph | null => {
   if (!isRecord(value) || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) return null;
+  if (value.revision !== undefined && optionalInteger(value.revision) === undefined) return null;
   const nodes = value.nodes.map(parseNode);
   const edges = value.edges.map(parseEdge);
   if (nodes.some((node) => node === null) || edges.some((edge) => edge === null)) return null;
@@ -78,7 +84,11 @@ export const parseAgentGraph = (value: unknown): AgentGraph | null => {
   if (validEdges.some((edge) => edge.from === edge.to || !nodeIds.has(edge.from) || !nodeIds.has(edge.to))) return null;
   const edgeIds = new Set(validEdges.map((edge) => `${edge.from}\u0000${edge.to}\u0000${edge.kind}`));
   if (edgeIds.size !== validEdges.length || !isAcyclic(nodeIds, validEdges)) return null;
-  return { nodes: validNodes, edges: validEdges };
+  if (validNodes.some((node) => node.parentId && (node.parentId === node.id || !nodeIds.has(node.parentId)))) return null;
+  const parentEdges = validNodes.filter((node) => node.parentId).map((node) => ({ from: node.parentId!, to: node.id }));
+  if (!isAcyclic(nodeIds, parentEdges.map((edge) => ({ ...edge, kind: 'delegation' as const })))) return null;
+  const revision = optionalInteger(value.revision);
+  return { nodes: validNodes, edges: validEdges, ...(revision !== undefined ? { revision } : {}) };
 };
 
 export const visibleGraphNodes = <T>(nodes: readonly T[], limit = MAX_DASHBOARD_GRAPH_NODES) => (

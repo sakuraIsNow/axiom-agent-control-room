@@ -538,6 +538,18 @@ npm run qa:search-agent
 - [x] `queued`、`paused`、`awaiting_approval` 和 `waiting_for_human` 任务取消后立即进入终态并落库 `task.cancelled`，避免人工门禁任务无法删除或长期占用资源。
 - [x] 修复 Orchestrator 覆盖步骤模型的问题：`WorkflowStep.model` 现在优先于任务默认模型，模型完成事件记录实际选择；补充步骤级模型回归测试。
 - [x] 约束 Planner 的步骤模型选择：只接受任务默认模型、运行时模型或 `AXIOM_ALLOWED_MODELS` 中的候选；`optional-model` 等占位值会被清除，避免把自然语言占位符发送给 Provider。
+
+### 2026-09-01 Reasonix Runtime 借鉴升级
+
+- [x] Planner 计划和恢复任务统一使用 `workflowDag` 校验：拒绝重复步骤、悬空依赖、自依赖和循环，并计算稳定的并行执行波次；无效计划不会进入执行队列。
+- [x] SQLite/PostgreSQL `task_events` 增加可回放的 `runtime_context_json`：记录租户、用户、会话、工作流、Turn、Attempt、Runtime generation、来源和提交标识；旧事件兼容读取。
+- [x] Agent Graph 节点携带 `parentId`、`executionWave` 和 `skipped/waiting_for_human/cancelled` 状态，前端优先消费服务端执行波次，避免拓扑层级与实际调度顺序漂移。
+- [x] 任务终态事件增加结构化 `evidenceSummary`，统计步骤、验收条件、证据、工具回执、Artifact 和审核状态，区分 `verified`、`partial`、`unverified` 与 `not-required`。
+- [x] 新增 DAG、事件上下文和交付证据回归测试；标准 `check/test/build` 作为本批验收门禁。
+- [x] 统一 Runtime Context 的入口来源枚举：Agent Nexus、插件、Harness、会话、定时任务和 Webhook 在 SQLite/PostgreSQL 中可分别聚合，并记录 ownerId。
+- [x] Graph revision 现在从计划创建到每次检查点和终态交付单调递增，并随任务计划持久化；前端拒绝非整数 revision、执行波次和非法 parent tree。
+- [x] 交付证据摘要透传到任务列表/详情，用户可直接看到核验状态、步骤、证据、Artifact、工具回执和缺口；单智能体/直连响应也写入真实交付摘要。
+- [x] 增加编排器级写入范围冲突回归：重叠写入 Agent 被拆到后续波次，`queue.updated` 可回放，Graph 节点保留执行波次和写入范围。
 - [x] 对已持久化的未知步骤模型增加上游拒绝回退：Provider 明确返回“不支持模型”时自动改用任务模型，并通过运行事件记录失败模型与回退模型。
 - [x] 安全凭据引用可绑定可恢复任务：任务/重试任务只保存 `modelCredentialId`，Worker 领取后按租户和用户重新解析 Provider，重启和多 Worker 不依赖浏览器明文 Key。
 - [x] 新增 `npm run perf:smoke` 可重复 GET 基准脚本，输出 `qa/performance-results.json`，覆盖 health、Readiness、运营快照和任务列表的顺序/并发延迟、吞吐和错误率；运营快照在 40 并发下 P95 约 21ms，0 错误。
@@ -631,3 +643,7 @@ npm run qa:search-agent
 - [x] 新增路由、历史任务匹配、失败重试链路与复合检索回归测试；完整单测 280/280 通过。
 - [x] 综合会话回归 `npm run qa:session-routing` 通过：多 Agent Graph、追问追加节点、能力查询追加节点、历史 Graph 恢复、空白草稿复用、无重复会话、切换会话不取消后台任务均通过；人工审核门禁由测试操作员显式批准后继续验证交付。
 - [x] 本轮最终门禁通过：`npm run check`、`npm test`、`npm run build`、`npm run qa:chat`、`npm run qa:routing`、`npm run qa:runtime`、`npm run qa:visual` 以及会话、任务、审核、持久化回归均通过。
+
+### 2026-09-01 Agent Registry 兜底路由修复
+- [x] 修复确定性兜底把 Registry 说明中的“实时”误识别为联网检索 Skill 的问题；“你有哪些子智能体”等目录查询现在只调用实时 Agent 目录，不再误触发 DeepSeek 原生搜索。
+- [x] 增加 Registry 路由回归测试，验证 `requiresSearch=false`、无额外联网 Skill，并通过 `npm run qa:search-agent` 与完整 `npm run qa:all` 门禁。

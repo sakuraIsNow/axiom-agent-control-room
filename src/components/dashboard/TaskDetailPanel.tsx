@@ -7,6 +7,13 @@ import { localizeRuntimeText, taskDifficultyLabel, taskKindLabel, taskReasonLabe
 
 type ReviewResult = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
 
+const evidenceStatusLabel = {
+  verified: '交付已核验',
+  partial: '部分交付',
+  unverified: '待核验',
+  'not-required': '无需核验',
+} as const;
+
 export function TaskDetailPanel({
   task,
   sessionTopic,
@@ -66,7 +73,7 @@ export function TaskDetailPanel({
         <div><dt>阶段</dt><dd>{taskStageLabel(task.currentStage)}</dd></div>
         <div><dt>难度</dt><dd>{taskDifficultyLabel(task.profile?.difficulty ?? taskProfile?.difficulty)}</dd></div>
       </dl>
-      <div className="dash-detail-pills"><span>{taskKindLabel(task.profile?.kind ?? taskProfile?.kind)}</span><span>{taskRouteLabel(task.profile?.route ?? taskProfile?.route)}</span><span>{task.tokens.total.toLocaleString()} Token</span></div>
+      <div className="dash-detail-pills"><span>{taskKindLabel(task.profile?.kind ?? taskProfile?.kind)}</span><span>{taskRouteLabel(task.profile?.route ?? taskProfile?.route)}</span><span>{task.tokens.total.toLocaleString()} Token</span>{task.evidenceSummary && <span className={`dash-evidence-pill ${task.evidenceSummary.status}`}>{evidenceStatusLabel[task.evidenceSummary.status]}</span>}</div>
       <div className="dash-lifecycle" aria-label="执行链">
         <div className="dash-lifecycle-head"><span>执行链</span><small>意图到交付</small></div>
         <div className="dash-lifecycle-track">
@@ -101,6 +108,16 @@ export function TaskDetailPanel({
         <ul>{reviewResult.requiredCorrections.map((item) => <li key={item}>{localizeRuntimeText(item)}</li>)}</ul>
       </div>}
       {reviewResult.gaps.length === 0 && reviewResult.requiredCorrections.length === 0 && <p className="dash-detail-empty">{reviewResult.summary ? localizeRuntimeText(reviewResult.summary) : '审查员未提出具体缺口。'}</p>}
+    </div>}
+    {task?.evidenceSummary && <div className="dash-detail-section dash-evidence-summary">
+      <div className="dash-detail-head"><ListChecks size={14} /><span>交付凭据</span><em className={task.evidenceSummary.status}>{evidenceStatusLabel[task.evidenceSummary.status]}</em></div>
+      <div className="dash-evidence-grid">
+        <span><strong>{task.evidenceSummary.completedSteps}/{task.evidenceSummary.totalSteps}</strong> 步骤完成</span>
+        <span><strong>{task.evidenceSummary.evidenceItems}</strong> 条证据</span>
+        <span><strong>{task.evidenceSummary.artifactRefs}</strong> 个 Artifact</span>
+        <span><strong>{task.evidenceSummary.toolReceipts}</strong> 次工具回执</span>
+      </div>
+      {task.evidenceSummary.gaps.length > 0 && <ul className="dash-evidence-gaps">{task.evidenceSummary.gaps.slice(0, 3).map((gap) => <li key={gap}>{localizeRuntimeText(gap)}</li>)}</ul>}
     </div>}
     {reviewAvailable && <section className="dash-human-review" data-testid="human-review-controls" aria-labelledby="dash-human-review-title">
       <div className="dash-human-review-head">

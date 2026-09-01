@@ -214,6 +214,25 @@ class ConflictModel implements ModelClient {
   }
 }
 
+class WriteScopeModel extends FakeModel {
+  async complete(request: ModelCompletionRequest) {
+    if (request.system.includes('planner in a production')) {
+      const content = JSON.stringify({
+        summary: '并行读取与分批写入。',
+        routingReason: '两个写入 Agent 触碰同一目录，必须分到不同执行波次。',
+        steps: [
+          { id: 'read', title: '读取部署资料', role: 'researcher', objective: '读取资料。', dependsOn: [], acceptanceCriteria: ['资料已读取'] },
+          { id: 'write-a', title: '更新配置 A', role: 'builder', objective: '更新 A。', dependsOn: [], writeScopes: ['deploy/config'], acceptanceCriteria: ['A 已更新'] },
+          { id: 'write-b', title: '更新配置 B', role: 'builder', objective: '更新 B。', dependsOn: [], writeScopes: ['deploy/config/prod'], acceptanceCriteria: ['B 已更新'] },
+        ],
+      });
+      await request.onDelta?.({ content });
+      return { content, attempts: 1, durationMs: 1 };
+    }
+    return super.complete(request);
+  }
+}
+
 class UnavailableConversationModel implements ModelClient {
   readonly model = 'unavailable-model';
 
@@ -820,6 +839,39 @@ describe('WorkflowOrchestrator', () => {
       const constrainedSteps = constrained?.payload.steps as Array<{ maxTokens?: number }> | undefined;
       assert.ok((constrainedSteps?.length ?? 0) > 0);
       assert.ok(constrainedSteps!.every((step) => Number(step.maxTokens) < 6_144));
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('persists write-scope scheduling decisions and monotonic graph revisions', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await store.createTask({
+        tenantId: 'tenant-a',
+        userId: 'user-a',
+        sessionId: 'session-a',
+        title: 'write scope scheduling',
+        input: '比较两个部署方案。',
+        mode: 'analyze',
+      });
+      const orchestrator = new WorkflowOrchestrator(store, new EventHub(), new WriteScopeModel(), memory, pino({ level: 'silent' }));
+      const result = await orchestrator.run(task, new AbortController().signal);
+      assert.equal(result.status, 'completed', result.error);
+      const events = await store.getEvents(task.id);
+      const queueUpdate = events.find((event) => event.type === 'queue.updated');
+      assert.deepEqual(queueUpdate?.payload.selectedSteps, ['read', 'write-a']);
+      assert.deepEqual(queueUpdate?.payload.deferredSteps, ['write-b']);
+      const graphs = events.filter((event) => event.type === 'graph.updated')
+        .map((event) => (event.payload.graph as { revision?: number; nodes?: Array<{ id: string; writeScopes?: string[]; executionWave?: number }> }));
+      const revisions = graphs.map((graph) => graph.revision ?? 0);
+      assert.ok(revisions.length >= 2);
+      assert.ok(revisions.every((revision, index) => index === 0 || revision >= revisions[index - 1]!));
+      assert.ok(new Set(revisions).size >= 2, 'a checkpoint or final delivery must advance the graph revision');
+      const writeNode = graphs.at(-1)?.nodes?.find((node) => node.id === 'write-a');
+      assert.deepEqual(writeNode?.writeScopes, ['deploy/config']);
+      assert.equal(typeof writeNode?.executionWave, 'number');
     } finally {
       await store.close();
     }

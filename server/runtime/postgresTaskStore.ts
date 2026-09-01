@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { runtimeEventSource } from './runtimeContext.js';
 import { Pool, type PoolClient } from 'pg';
 import type {
   AgentGraph,
@@ -106,6 +107,7 @@ const sessionFromRow = (row: PostgresSessionRow): PersistedSession => ({
 
 export class PostgresTaskStore implements TaskStore {
   private readonly pool: Pool;
+  private readonly runtimeGeneration = process.env.AXIOM_RUNTIME_GENERATION?.trim() || randomUUID();
 
   constructor(connectionString: string) {
     this.pool = new Pool({
@@ -162,6 +164,7 @@ export class PostgresTaskStore implements TaskStore {
         agent_id TEXT,
         timestamp TIMESTAMPTZ NOT NULL,
         payload_json JSONB NOT NULL,
+        runtime_context_json JSONB,
         UNIQUE(task_id, sequence)
       );
 
@@ -199,6 +202,7 @@ export class PostgresTaskStore implements TaskStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS graph_json JSONB;
+      ALTER TABLE task_events ADD COLUMN IF NOT EXISTS runtime_context_json JSONB;
     `);
   }
 
@@ -545,13 +549,31 @@ export class PostgresTaskStore implements TaskStore {
         sequence: Number(sequenceResult.rows[0].sequence),
         timestamp: new Date().toISOString(),
       };
+      const contextResult = await client.query(`
+        SELECT tenant_id, user_id, session_id, template_id, idempotency_key
+        FROM tasks WHERE id = $1
+      `, [task.id]);
+      const contextRow = contextResult.rows[0] as { tenant_id?: string; user_id?: string; session_id?: string; template_id?: string | null; idempotency_key?: string | null } | undefined;
+      runtimeEvent.runtimeContext = {
+        ...(contextRow?.tenant_id ? { tenantId: String(contextRow.tenant_id) } : {}),
+        ...(contextRow?.user_id ? { userId: String(contextRow.user_id) } : {}),
+        ...(contextRow?.session_id ? { sessionId: String(contextRow.session_id) } : {}),
+        ...(contextRow?.template_id ? { workflowId: String(contextRow.template_id) } : {}),
+        turnId: typeof runtimeEvent.payload.turnId === 'string' ? runtimeEvent.payload.turnId : runtimeEvent.runId,
+        ...(typeof runtimeEvent.payload.attemptId === 'string' ? { attemptId: runtimeEvent.payload.attemptId } : {}),
+        runtimeGeneration: this.runtimeGeneration,
+        ownerId: contextRow?.user_id ? String(contextRow.user_id) : undefined,
+        source: runtimeEventSource(runtimeEvent),
+        ...(contextRow?.idempotency_key ? { submissionId: String(contextRow.idempotency_key) } : {}),
+      };
       await client.query(`
-        INSERT INTO task_events (id, task_id, run_id, sequence, type, agent_id, timestamp, payload_json)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO task_events (id, task_id, run_id, sequence, type, agent_id, timestamp, payload_json, runtime_context_json)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       `, [
         runtimeEvent.id, runtimeEvent.taskId, runtimeEvent.runId, runtimeEvent.sequence,
         runtimeEvent.type, runtimeEvent.agentId ?? null, runtimeEvent.timestamp,
         JSON.stringify(runtimeEvent.payload),
+        JSON.stringify(runtimeEvent.runtimeContext),
       ]);
       return runtimeEvent;
     });
@@ -571,6 +593,7 @@ export class PostgresTaskStore implements TaskStore {
       agentId: row.agent_id ?? undefined,
       timestamp: iso(row.timestamp as Date | string),
       payload: row.payload_json ?? {},
+      runtimeContext: row.runtime_context_json ?? undefined,
     }));
   }
 

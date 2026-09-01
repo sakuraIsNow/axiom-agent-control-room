@@ -8,7 +8,7 @@ import { visibleGraphNodes } from '../../lib/workflowGraphState';
 type SignalNode = {
   id: string;
   label: string;
-  status: TopologyAgent['status'];
+  status: NonNullable<AgentGraph['nodes'][number]['status']>;
 };
 
 type GraphPosition = { x: number; y: number; angle: number };
@@ -51,6 +51,7 @@ const statusIcons: Record<TopologyAgent['status'], string> = {
   completed: 'M4 12l5 5L20 6 M9 17l0 0',
   failed: 'M6 6l12 12 M18 6L6 18',
 };
+const statusIcon = (status: SignalNode['status']) => statusIcons[status as TopologyAgent['status']] ?? statusIcons.queued;
 
 const phaseIcons: Record<AgentPhase, string> = {
   idle: 'M5 5h14v14H5z',
@@ -241,7 +242,7 @@ export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelec
               <span className="dash-agent-mouth" />
               <b className="dash-agent-status-dot" />
             </span>
-            <span className="dash-agent-node-meta"><MorphIcon icon={statusIcons[node.status]} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" /><em>{node.label}</em></span>
+              <span className="dash-agent-node-meta"><MorphIcon icon={statusIcon(node.status)} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" /><em>{node.label}</em></span>
           </button>;
         })}
       </div>

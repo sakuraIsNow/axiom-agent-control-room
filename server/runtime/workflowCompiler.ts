@@ -31,6 +31,7 @@ export const agentWorkflowCanvasSchema = z.object({
     acceptanceCriteria: z.array(z.string().min(1).max(500)).max(8).optional(),
     model: z.string().min(1).max(160).optional(),
     toolNames: z.array(z.string().min(1).max(80)).max(32).optional(),
+    writeScopes: z.array(z.string().min(1).max(240)).max(16).optional(),
     maxTokens: z.number().int().min(128).max(1_000_000).optional(),
     maxDurationMs: z.number().int().min(1_000).max(3_600_000).optional(),
     failureStrategy: z.enum(['retry', 'skip', 'pause']).optional(),
@@ -405,6 +406,7 @@ export const compileAgentWorkflow = (
         ...(loopPath.length === 1 ? { loop: { id: loopPath[0]!.id, iteration: loopPath[0]!.iteration, maxIterations: loopPath[0]!.maxIterations, entry: loopPath[0]!.entry } } : {}),
         ...(agent.model ? { model: agent.model } : {}),
         toolNames: agent.tools,
+        ...(node.writeScopes?.length ? { writeScopes: [...new Set(node.writeScopes.map((scope) => scope.trim()).filter(Boolean))] } : {}),
         maxTokens: agent.maxTokens ?? 6_144,
         maxDurationMs: agent.maxDurationMs ?? 120_000,
         failureStrategy: agent.failureStrategy ?? 'retry',
@@ -421,6 +423,7 @@ export const compileAgentWorkflow = (
       role: step.role,
       title: step.title,
       dependsOn: step.dependsOn,
+      writeScopes: step.writeScopes,
       status: 'queued',
     })),
     edges: steps.flatMap((step) => step.dependsOn.map((dependency) => ({
