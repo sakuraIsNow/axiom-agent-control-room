@@ -2,6 +2,8 @@
 
 > 把一句话交给一组真正会分工的 Agent。Axiom 会判断任务难度、安排合适的 Agent、展示实时进度，并在交付前帮你检查结果。
 
+当前发布版本：**v1.1.0**（`v1.0.0` 为可回退的基线版本）
+
 ![Axiom 任务台](docs/images/overview.png)
 
 ## 🌌 先用一句话认识 Axiom
@@ -41,6 +43,55 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - 👀 **过程看得见**：Agent Graph、实时事件和任务阶段来自真实执行状态，不是播放一段固定动画。
 - 🔌 **模型可以替换**：默认 DeepSeek，也支持自己的兼容接口；视觉、绘图和视频服务可以单独配置。
 - 🛡️ **高风险操作先确认**：写文件、发布等动作可以停下来等人工批准，避免 Agent 擅自完成危险操作。
+
+## 🆕 v1.1.0 运行时升级
+
+这一版参考 DeepSeek Reasonix、DeepSeek Harness、Codex app-server 和 Agent Nexus 的运行时设计，把“多个 Agent 一起回答”升级为可以恢复、可以验证、可以解释的执行系统。
+
+- 🧭 **稳定的任务计划**：Planner 生成的步骤会先检查依赖关系，拒绝重复步骤、悬空依赖、自我依赖和循环；互不依赖的步骤会被安排到同一执行波次并行运行。
+- 🧩 **统一运行上下文**：每条任务事件都会记录租户、用户、会话、工作流、对话轮次、重试次数、运行代次和入口来源。普通对话、任务、插件、Agent Nexus、Harness 和 API 使用同一套上下文标识。
+- 🕸️ **Graph 与真实执行一致**：Graph 节点带有父子关系、执行波次和单调递增的版本号。页面展示的节点状态来自持久化事件，不是预设动画。
+- 🔒 **写入冲突自动排队**：Agent 声明需要修改的目录或资源范围后，互不冲突的写入可以并行，重叠写入会自动拆分波次并留下调度记录，减少相互覆盖。
+- 🧾 **交付证据摘要**：任务完成时会汇总已完成步骤、失败或跳过步骤、验收条件、来源证据、Artifact、工具回执、审核结果和未解决缺口，模型说“完成”不再等于系统已验证完成。
+- 🔎 **Agent 目录实时回答**：询问“有哪些子智能体”或“支持哪些能力”时，系统读取当前运行目录和已发布自定义 Agent，不使用固定列表，也不会误触发联网搜索。
+- ♻️ **失败可继续**：任务、检查点、事件和交付证据会持久化；网络断开、Worker 重启或单个 Agent 失败后，可以从可用检查点继续，已有结果会保留为部分交付。
+
+### 🔁 一次任务的真实执行链路
+
+```text
+用户输入
+  ↓
+Router Agent：理解意图、难度和所需能力
+  ↓
+Scheduler Agent：选择本轮真正需要的 Agent 和 Skill
+  ↓
+DAG 计划：校验依赖并计算并行执行波次
+  ↓
+Researcher / Analyst / Builder / 工具调用
+  ↓
+Reviewer：检查证据、风险和验收条件
+  ↓
+Synthesizer：只汇总已验证的结果
+  ↓
+带证据的最终交付
+```
+
+每轮对话都会重新判断是否需要继续使用旧 Agent、跳过旧 Agent 或加入新 Agent；简单聊天不会被强行升级成完整工作流。
+
+### ✅ v1.1.0 验收结果
+
+当前源码版本已经通过：
+
+```text
+npm run check       通过
+npm test            291 passed / 0 failed
+npm run build       通过
+npm run qa:search-agent
+                    通过
+npm run qa:all      21 passed / 0 failed / 3 skipped
+```
+
+跳过的 3 项只涉及尚未配置的外部服务：TencentDB MemoryCore、MinIO/S3/COS 对象存储。配置对应 endpoint 后，可以继续进行真实多 Worker 验收；这不影响 SQLite、本地文件目录和协议级 Harness/Codex 回归。
 
 ### 📈 本机性能基线
 
@@ -257,6 +308,7 @@ npm run qa:all      # 生产门禁回归
 - [工具目录](docs/tool-registry.md)：工具权限、审批和执行边界。
 - [MemoryCore 接入](docs/memorycore-integration.md)：长期记忆配置与验收。
 - [Harness 适配器](docs/harness-adapters.md)：DeepSeek Harness/Codex 的可选接入方式。
+- [Reasonix 运行时采纳说明](docs/reasonix-runtime-adoption.md)：DAG、统一运行上下文、写入冲突调度和交付证据的设计边界。
 - [上线就绪度](docs/launch-readiness.md)：当前能力、风险和生产前置条件。
 
 ## 📄 开源许可
