@@ -1750,7 +1750,9 @@ const shutdown = async (signal: string) => {
   logger.info({ signal }, 'graceful shutdown started');
   httpServer.close();
   await coordinator.stop();
-  (harnessAdapter as DeepSeekHarnessAdapter & { close?: () => void }).close?.();
+  // Harness/Codex is optional. The built-in runtime must shut down cleanly
+  // when no sidecar was configured instead of dereferencing `undefined`.
+  (harnessAdapter as (DeepSeekHarnessAdapter & { close?: () => void }) | undefined)?.close?.();
   await pluginStore.close();
   await agentStore.close();
   await templateStore.close();

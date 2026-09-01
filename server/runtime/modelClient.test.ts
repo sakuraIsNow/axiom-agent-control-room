@@ -231,3 +231,39 @@ test('reconnects after an SSE transport failure without losing the final answer'
     globalThis.fetch = originalFetch;
   }
 });
+
+test('aborts a provider stream that stalls after headers instead of hanging forever', async () => {
+  const originalFetch = globalThis.fetch;
+  let cancelled = false;
+  globalThis.fetch = (async () => {
+    let timer: NodeJS.Timeout | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Simulate a provider that accepted the request but never emits its
+        // first SSE frame. The client timeout must still release the read.
+        timer = setTimeout(() => controller.close(), 60_000);
+      },
+      cancel() {
+        cancelled = true;
+        if (timer) clearTimeout(timer);
+      },
+    });
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }) as typeof fetch;
+  try {
+    const client = new OpenAICompatibleModelClient({
+      apiKey: 'test-key',
+      apiBase: 'https://provider.invalid',
+      model: 'test-model',
+      timeoutMs: 5_000,
+      maxAttempts: 1,
+    });
+    await assert.rejects(
+      () => client.complete({ system: 'test', user: 'hello', signal: new AbortController().signal }),
+      /Timeout|timed out|aborted/i,
+    );
+    assert.equal(cancelled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

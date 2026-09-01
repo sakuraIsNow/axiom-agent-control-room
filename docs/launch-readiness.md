@@ -10,7 +10,7 @@
 
 ## 最新本机验证（2026-08-29）
 
-在当前 Windows 单节点、PostgreSQL 数据规模和 10 并发条件下，50 次请求全部返回 HTTP 200：health `1472.58 RPS / P95 11.01ms`，Readiness `2031.08 RPS / P95 5.69ms`，运行观测 `682.26 RPS / P95 31.67ms`，任务列表 `1699.79 RPS / P95 7.31ms`。标准门禁的单元测试为 `247/247`；本次 `npm run qa:all` 结果为 `20 passed / 0 failed / 3 skipped`，跳过项是未配置正式 TencentDB MemoryCore 和外部 Artifact 存储。原生搜索、会话路由本轮均一次通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
+在当前 Windows 单节点、PostgreSQL 数据规模和 10 并发条件下，50 次请求全部返回 HTTP 200：health `1472.58 RPS / P95 11.01ms`，Readiness `2031.08 RPS / P95 5.69ms`，运行观测 `682.26 RPS / P95 31.67ms`，任务列表 `1699.79 RPS / P95 7.31ms`。标准门禁的单元测试为 `249/249`；本次 `npm run qa:all` 结果为 `20 passed / 0 failed / 3 skipped`，跳过项是未配置正式 TencentDB MemoryCore 和外部 Artifact 存储。原生搜索、会话路由本轮均一次通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 
@@ -19,7 +19,7 @@
 | 任务持久化与恢复 | 已可用 | PostgreSQL task/event 表、租约、`FOR UPDATE SKIP LOCKED`、SSE 事件回放 |
 | 智能分级路由 | 已可用 | `direct`、`single-agent`、`team`、`full-workflow` 四路回归评测 4/4 |
 | 子 Agent 协作 | 已可用 | Planner 生成依赖批次，Researcher/Analyst/Builder 并行，Reviewer 可要求修正 |
-| 失败处理 | 已可用 | 模型超时/429/5xx 退避重试，Worker 续租，任务总超时，取消状态持久化 |
+| 失败处理 | 已可用 | 模型超时/429/5xx 退避重试；推理模型自适应超时与并发；流读取停滞可中止；部分 Agent 失败时保留检查点并生成部分交付，全部失败才终止 |
 | 工具执行隔离 | 有边界可用 | Docker `--network=none`、只读根文件系统、能力丢弃、命令白名单；当前已接入 4 个只读/测试 Tool Registry 工具，写入和发布工具仍需策略审批 |
 | 图片生成/编辑 | 已可用 | 独立于文本会话的 Image Runtime；服务端 DMX 或临时自定义 Provider |
 | 长期记忆 | 适配器与恢复闭环已完成，部署未启用 | `TencentMemoryClient` 已完成 L1/L2/L3 召回、过期/置信度过滤、时间游标去重、跨重启收据和失败补偿；当前平台正式环境仍未配置 `TDAI_MEMORY_ENDPOINT`，真实 TencentDB 现场验收待凭据 |

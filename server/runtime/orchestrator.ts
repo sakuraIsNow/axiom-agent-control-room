@@ -92,6 +92,27 @@ const isUnsupportedModelError = (error: unknown) => {
   return /(?:unsupported|supported API model names|invalid).*model|model.*(?:unsupported|not supported|invalid)/i.test(message);
 };
 
+const isReasoningModel = (model: string | undefined) => Boolean(model && /(?:reasoner|reasoning|deepseek-v4-pro|deepseek-r1|\br1\b)/i.test(model));
+
+const failureLabel = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const status = (error as { status?: number } | null)?.status;
+  if (status === 401 || /unauthori[sz]ed|invalid.*(?:api|key)|api key/i.test(message)) return '模型 API Key 无效或未授权';
+  if (status === 403 || /forbidden|permission|权限/i.test(message)) return '模型服务拒绝了当前请求';
+  if (status === 404 || /not found|unsupported.*model|model.*(?:not supported|invalid)/i.test(message)) return '当前模型在服务端不可用';
+  if (status === 429 || /rate.?limit|too many requests|限流/i.test(message)) return '模型服务暂时限流';
+  if (/timeout|timed out|超时/i.test(message)) return '模型响应超时';
+  if (/fetch failed|network|连接|socket|econn/i.test(message)) return '无法连接模型服务';
+  if (/empty response|no completion|没有返回/i.test(message)) return '模型没有返回最终内容';
+  return message.replace(/\s+/g, ' ').slice(0, 240) || '模型执行失败';
+};
+
+const failureSummary = (failures: Array<{ title: string; error: unknown }>) => {
+  const details = failures.slice(0, 4).map(({ title, error }) => `${title}：${failureLabel(error)}`);
+  const suffix = failures.length > details.length ? `，另有 ${failures.length - details.length} 个 Agent` : '';
+  return `部分 Agent 未完成（${details.join('；')}${suffix}）。已保存已完成步骤，可在任务管理中重试失败 Agent。`;
+};
+
 const buildPlanSchema = (customRoleIds: string[] = []) => z.object({
   summary: z.string().min(1).max(2_000),
   routingReason: z.string().min(1).max(2_000),
@@ -484,7 +505,9 @@ const retryDelay = (ms: number, signal: AbortSignal) => new Promise<void>((resol
 export class WorkflowOrchestrator {
   private readonly taskModels = new Map<string, Promise<ModelClient>>();
   private readonly stepConcurrency: number;
+  private readonly reasoningStepConcurrency: number;
   private readonly stepMaxAttempts: number;
+  private readonly reasoningStepTimeoutMs: number;
   private readonly reviewCorrectionRounds: number;
   private readonly requireReviewApproval: boolean;
   private readonly reviewMinScore: number;
@@ -504,8 +527,20 @@ export class WorkflowOrchestrator {
   ) {
     // Dependency-ready steps define the useful parallelism; six is the
     // system safety ceiling, not a setting ordinary users need to tune.
-    this.stepConcurrency = Math.min(6, Math.max(1, Number(process.env.AGENT_STEP_CONCURRENCY ?? 6)));
-    this.stepMaxAttempts = Math.min(4, Math.max(1, Number(process.env.AGENT_STEP_MAX_ATTEMPTS ?? 2)));
+    const configuredStepConcurrency = Number(process.env.AGENT_STEP_CONCURRENCY ?? 6);
+    this.stepConcurrency = Math.min(6, Math.max(1, Number.isFinite(configuredStepConcurrency) ? configuredStepConcurrency : 6));
+    const configuredReasoningConcurrency = Number(process.env.AGENT_REASONING_STEP_CONCURRENCY ?? 3);
+    this.reasoningStepConcurrency = Math.min(
+      this.stepConcurrency,
+      Math.max(1, Number.isFinite(configuredReasoningConcurrency) ? configuredReasoningConcurrency : 3),
+    );
+    const configuredStepAttempts = Number(process.env.AGENT_STEP_MAX_ATTEMPTS ?? 2);
+    this.stepMaxAttempts = Math.min(4, Math.max(1, Number.isFinite(configuredStepAttempts) ? configuredStepAttempts : 2));
+    const configuredReasoningStepTimeout = Number(process.env.AGENT_REASONING_STEP_TIMEOUT_MS ?? 300_000);
+    this.reasoningStepTimeoutMs = Math.max(
+      120_000,
+      Number.isFinite(configuredReasoningStepTimeout) ? configuredReasoningStepTimeout : 300_000,
+    );
     this.reviewCorrectionRounds = Math.min(3, Math.max(0, Number(process.env.AGENT_REVIEW_CORRECTION_ROUNDS ?? 1)));
     this.requireReviewApproval = process.env.AGENT_REQUIRE_REVIEW_APPROVAL !== 'false';
     this.reviewMinScore = Math.min(100, Math.max(0, Number(process.env.AGENT_REVIEW_MIN_SCORE ?? 80)));
@@ -840,7 +875,14 @@ Do not claim tools or evidence that are not available.`,
     await this.emit(task, {
       type: 'agent.started',
       agentId,
-      payload: { stepId: step.id, role: step.role, title: step.title, objective: step.objective, dependsOn: step.dependsOn, skillIds: step.skillIds },
+      payload: {
+        stepId: step.id,
+        role: step.role,
+        title: step.title,
+        objective: step.objective,
+        dependsOn: step.dependsOn,
+        skillIds: step.skillIds,
+      },
     });
     await this.emit(task, { type: 'memory.recall.started', agentId, payload: { query: limitText(step.objective, 500) } });
     const recall = await this.memory.recall(task, agentId, `${task.input}\n${step.objective}`, signal).catch(() => ({
@@ -978,7 +1020,12 @@ Do not claim tools or evidence that are not available.`,
     let completion: Awaited<ReturnType<ModelClient['complete']>> | undefined;
     let stepAttempt = 0;
     let lastError: unknown;
-    const stepSignal = step.maxDurationMs ? AbortSignal.any([signal, AbortSignal.timeout(step.maxDurationMs)]) : signal;
+    const stepModelName = step.model ?? task.model ?? (await this.modelForTask(task)).model;
+    const requestedStepTimeout = step.maxDurationMs ?? 120_000;
+    const stepTimeoutMs = isReasoningModel(stepModelName)
+      ? Math.max(requestedStepTimeout, this.reasoningStepTimeoutMs)
+      : requestedStepTimeout;
+    const stepSignal = AbortSignal.any([signal, AbortSignal.timeout(stepTimeoutMs)]);
     const attemptsAllowed = step.failureStrategy === 'retry' ? this.stepMaxAttempts : 1;
     const availableTools = canUseTools && this.tools?.enabled()
       ? this.tools.catalog()
@@ -1609,9 +1656,15 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
 
       task = await this.store.updateTask(task.id, { status: 'running' });
       let results = [...task.stepResults];
+      const workflowFailures: Array<{ stepId: string; title: string; error: unknown }> = [];
       const pending = new Map(plan.steps
         .filter((step) => !results.some((result) => result.stepId === step.id && (result.status === 'completed' || result.skipped)))
         .map((step) => [step.id, step]));
+      const runtimeTaskModel = await this.modelForTask(task);
+      const taskModelName = task.model ?? runtimeTaskModel.model;
+      const waveConcurrency = isReasoningModel(taskModelName)
+        ? this.reasoningStepConcurrency
+        : this.stepConcurrency;
 
       const graph = plan.graph ?? buildAgentGraph(plan.steps, results, profile.requiresReview);
       const priorIterations = priorControlEvents.filter((event) => event.type === 'loop.iteration' && event.payload.scope !== 'workflow-loop').length;
@@ -1630,10 +1683,15 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       while (pending.size > 0) {
         await this.assertActive(task.id, signal);
         loopIteration += 1;
-        const completedIds = new Set(results.filter((result) => result.status === 'completed' || result.skipped).map((result) => result.stepId));
+        // A failed step is also a durable checkpoint. Downstream Agents receive
+        // its diagnostic output and can continue with a bounded partial result
+        // instead of becoming stuck on an unresolved dependency join.
+        const completedIds = new Set(results
+          .filter((result) => result.status === 'completed' || result.status === 'failed' || result.skipped)
+          .map((result) => result.stepId));
         const readyCandidates = [...pending.values()]
           .filter((step) => step.dependsOn.every((dependency) => completedIds.has(dependency)))
-          .slice(0, Math.min(this.stepConcurrency, task.policy.maxConcurrentSteps ?? this.stepConcurrency));
+          .slice(0, Math.min(waveConcurrency, task.policy.maxConcurrentSteps ?? waveConcurrency));
         if (!readyCandidates.length) throw new Error('Workflow plan contains an unresolved dependency cycle.');
 
         // Condition edges are evaluated only after all source Agents have a
@@ -1773,6 +1831,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
               skipped: step.failureStrategy === 'skip',
             };
             results.push(failed);
+            if (!failed.skipped) workflowFailures.push({ stepId: step.id, title: step.title, error: outcome.reason });
             await this.emit(task, {
               type: 'agent.failed',
               agentId: failed.agentId,
@@ -1785,6 +1844,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
                 skillIds: step.skillIds,
                 model: step.model,
                 error: limitText(failed.output, 2_000),
+                diagnosis: failureLabel(outcome.reason),
                 skipped: failed.skipped === true,
                 failureStrategy: step.failureStrategy ?? 'retry',
               },
@@ -1804,7 +1864,11 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         task = await this.store.updateTask(task.id, { stepResults: results });
         await this.emit(task, {
           type: 'checkpoint.saved',
-          payload: { completedSteps: results.filter((result) => result.status === 'completed').length, totalSteps: plan.steps.length },
+          payload: {
+            completedSteps: results.filter((result) => result.status === 'completed').length,
+            failedSteps: results.filter((result) => result.status === 'failed' && !result.skipped).length,
+            totalSteps: plan.steps.length,
+          },
         });
         await this.emit(task, {
           type: 'graph.updated',
@@ -1819,10 +1883,13 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           task = await this.store.updateTask(task.id, { status: 'waiting_for_human', stepResults: results, error: '步骤失败策略要求人工处理。' });
           throw new Error('Workflow paused for operator intervention.');
         }
-        if (results.some((result) => result.status === 'failed' && !result.skipped)) throw new Error('One or more sub-agents failed after retry limits were exhausted.');
       }
 
       await this.assertActive(task.id, signal);
+      const completedResults = results.filter((result) => result.status === 'completed' && !result.skipped);
+      if (workflowFailures.length > 0 && completedResults.length === 0) {
+        throw new Error(failureSummary(workflowFailures));
+      }
       let review: ReviewResult;
       if (profile.requiresReview && task.review?.approved) {
         // A human-approved review is durable. Resuming the task must not call
@@ -1875,6 +1942,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       task = await this.store.updateTask(task.id, {
         status: 'completed',
         result,
+        error: workflowFailures.length ? failureSummary(workflowFailures) : null,
         review,
         stepResults: results,
         plan: { ...plan, graph: finalGraph },
@@ -1890,7 +1958,17 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       await this.captureMemory(task, result, signal);
       await this.emit(task, {
         type: 'task.completed',
-        payload: { result, review, agentCount: new Set(results.map((item) => item.agentId)).size, profile, graph: finalGraph },
+        payload: {
+          result,
+          review,
+          agentCount: new Set(results.map((item) => item.agentId)).size,
+          profile,
+          graph: finalGraph,
+          partial: workflowFailures.length > 0,
+          ...(workflowFailures.length ? {
+            failures: workflowFailures.map((failure) => ({ stepId: failure.stepId, title: failure.title, diagnosis: failureLabel(failure.error) })),
+          } : {}),
+        },
       });
       return task;
     } catch (caught) {

@@ -2045,13 +2045,21 @@ function App() {
     if (event.type === 'task.completed') {
       setFailedTaskId(null);
       const result = String(event.payload.result ?? '任务已完成，但没有返回文本结果。');
+      const partialFailures = Array.isArray(event.payload.failures)
+        ? event.payload.failures
+          .filter((failure): failure is { title?: unknown; diagnosis?: unknown } => Boolean(failure && typeof failure === 'object'))
+          .map((failure) => `${String(failure.title ?? '某个 Agent')}：${String(failure.diagnosis ?? '未完成')}`)
+        : [];
+      const displayedResult = event.payload.partial === true && partialFailures.length
+        ? `${result}\n\n> 部分 Agent 未完成：${partialFailures.join('；')}。已保留可交付结果，可在任务管理中重试。`
+        : result;
       if (!isDirectRoute) upsertAgent({ id: 'synthesizer', label: agentDisplayName('synthesizer'), role: 'synthesizer', status: 'completed' });
       updateSession(sessionId, (session) => ({
         ...session,
         activeTaskId: undefined,
         activeAssistantId: undefined,
         messages: session.messages.map((message) =>
-          message.id === assistantId ? { ...message, content: result, pending: false, taskId: event.taskId, route: eventProfile?.route ?? 'workflow', agentRole: isDirectRoute ? 'direct-responder' : 'orchestrator' } : message,
+          message.id === assistantId ? { ...message, content: displayedResult, pending: false, taskId: event.taskId, route: eventProfile?.route ?? 'workflow', agentRole: isDirectRoute ? 'direct-responder' : 'orchestrator' } : message,
         ),
         updatedAt: Date.now(),
       }));

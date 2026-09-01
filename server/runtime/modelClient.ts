@@ -69,6 +69,8 @@ export class OpenAICompatibleModelClient implements ModelClient {
   private readonly apiKey: string;
   private readonly apiBase: string;
   private readonly timeoutMs: number;
+  private readonly timeoutExplicit: boolean;
+  private readonly reasoningTimeoutMs: number;
   private readonly maxAttempts: number;
   private readonly apiKeyOptional: boolean;
   private readonly onUsage?: (usage?: Record<string, number>) => void;
@@ -85,7 +87,17 @@ export class OpenAICompatibleModelClient implements ModelClient {
     this.apiKey = options?.apiKey ?? process.env.DEEPSEEK_API_KEY ?? '';
     this.apiBase = options?.apiBase ?? process.env.DEEPSEEK_API_BASE ?? 'https://api.deepseek.com';
     this.model = options?.model ?? process.env.DEEPSEEK_MODEL ?? 'deepseek-chat';
+    this.timeoutExplicit = options?.timeoutMs !== undefined;
     this.timeoutMs = Math.max(5_000, options?.timeoutMs ?? Number(process.env.AGENT_MODEL_TIMEOUT_MS ?? 120_000));
+    // Reasoning-heavy models (for example DeepSeek V4 Pro) can spend more than
+    // two minutes in the model stream before returning a final answer. Keep the
+    // short timeout for routing/health probes, while allowing the normal runtime
+    // client a bounded longer window. An explicit per-client timeout always wins.
+    const configuredReasoningTimeout = Number(process.env.AGENT_REASONING_MODEL_TIMEOUT_MS ?? 300_000);
+    this.reasoningTimeoutMs = Math.max(
+      this.timeoutMs,
+      Number.isFinite(configuredReasoningTimeout) ? configuredReasoningTimeout : 300_000,
+    );
     this.maxAttempts = Math.min(6, Math.max(1, options?.maxAttempts ?? Number(process.env.AGENT_MODEL_MAX_ATTEMPTS ?? 3)));
     this.apiKeyOptional = options?.apiKeyOptional ?? false;
     this.onUsage = options?.onUsage;
@@ -99,6 +111,10 @@ export class OpenAICompatibleModelClient implements ModelClient {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       if (request.signal.aborted) throw request.signal.reason ?? new DOMException('Aborted', 'AbortError');
       try {
+        const requestedModel = request.model ?? this.model;
+        const isReasoningModel = /(?:reasoner|reasoning|deepseek-v4-pro|deepseek-r1|\br1\b)/i.test(requestedModel);
+        const requestTimeoutMs = isReasoningModel && !this.timeoutExplicit ? this.reasoningTimeoutMs : this.timeoutMs;
+        const requestSignal = AbortSignal.any([request.signal, AbortSignal.timeout(requestTimeoutMs)]);
         const response = await fetch(endpoint(this.apiBase), {
           method: 'POST',
           headers: {
@@ -106,7 +122,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: request.model ?? this.model,
+            model: requestedModel,
             messages: [
               { role: 'system', content: request.system.slice(0, 30_000) },
               { role: 'user', content: request.user.slice(0, 80_000) },
@@ -118,7 +134,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
             ...(request.responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
             ...(request.tools?.length ? { tools: request.tools, tool_choice: request.toolChoice ?? 'auto' } : {}),
           }),
-          signal: AbortSignal.any([request.signal, AbortSignal.timeout(this.timeoutMs)]),
+          signal: requestSignal,
         });
 
         const contentType = response.headers.get('content-type') ?? '';
@@ -128,10 +144,32 @@ export class OpenAICompatibleModelClient implements ModelClient {
         const streamedToolCalls = new Map<number, { id?: string; name: string; arguments: string }>();
         if (contentType.includes('text/event-stream') && response.body) {
           const reader = response.body.getReader();
+          // Undici can resolve fetch() once headers arrive and leave a body
+          // reader pending even after the request signal times out. Race every
+          // read with the same signal so a stalled provider becomes retryable.
+          const readChunk = async () => {
+            if (requestSignal.aborted) throw requestSignal.reason ?? new DOMException('Aborted', 'AbortError');
+            return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+              const onAbort = () => {
+                cleanup();
+                void reader.cancel().catch(() => undefined);
+                reject(requestSignal.reason ?? new DOMException('Aborted', 'AbortError'));
+              };
+              const cleanup = () => requestSignal.removeEventListener('abort', onAbort);
+              requestSignal.addEventListener('abort', onAbort, { once: true });
+              reader.read().then((result) => {
+                cleanup();
+                resolve(result);
+              }, (error) => {
+                cleanup();
+                reject(error);
+              });
+            });
+          };
           const decoder = new TextDecoder();
           let buffer = '';
           while (true) {
-            const { done, value } = await reader.read();
+            const { done, value } = await readChunk();
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
             const blocks: string[] = [];

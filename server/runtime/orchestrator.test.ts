@@ -945,6 +945,54 @@ describe('WorkflowOrchestrator', () => {
     }
   });
 
+  test('preserves completed sibling work and synthesizes a partial result after one Agent exhausts retries', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await store.createTask({
+        tenantId: 'tenant-partial',
+        userId: 'user-partial',
+        sessionId: 'session-partial',
+        title: 'partial workflow recovery',
+        input: 'Compare two deployment options.',
+        mode: 'build',
+      });
+      const plan = {
+        summary: 'Run independent evidence steps.',
+        routingReason: 'Independent work can be combined even when one provider call fails.',
+        profile: { kind: 'implementation' as const, difficulty: 'moderate' as const, route: 'team' as const, score: 2, reasons: ['test'], maxSteps: 3, requiresReview: false },
+        steps: [
+          { id: 'evidence', title: '收集证据', role: 'researcher' as const, objective: '收集部署证据。', dependsOn: [], acceptanceCriteria: ['给出证据'], failureStrategy: 'retry' as const },
+          { id: 'risk', title: '分析风险', role: 'analyst' as const, objective: '分析部署风险。', dependsOn: [], acceptanceCriteria: ['给出风险'], failureStrategy: 'retry' as const },
+        ],
+        approvalStatus: 'approved' as const,
+        version: 1,
+      };
+      const planned = await store.updateTask(task.id, { plan });
+      const model: ModelClient = {
+        model: 'partial-test-model',
+        async complete(request) {
+          if (request.system.includes('You are a analyst')) throw new Error('upstream timeout while analyzing');
+          const content = request.system.includes('synthesizer')
+            ? '已根据成功完成的证据生成部分交付，并标注了未完成的风险分析。'
+            : JSON.stringify({ output: '已收集部署证据。', evidence: ['真实测试证据'], confidence: 0.8, toolCalls: [] });
+          await request.onDelta?.({ content });
+          return { content, attempts: 1, durationMs: 1 };
+        },
+      };
+      const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' })).run(planned, new AbortController().signal);
+      assert.equal(result.status, 'completed');
+      assert.match(result.error ?? '', /部分 Agent 未完成/);
+      assert.ok(result.stepResults.some((step) => step.stepId === 'evidence' && step.status === 'completed'));
+      assert.ok(result.stepResults.some((step) => step.stepId === 'risk' && step.status === 'failed'));
+      assert.match(result.result ?? '', /部分交付/);
+      const completed = (await store.getEvents(task.id)).find((event) => event.type === 'task.completed');
+      assert.equal(completed?.payload.partial, true);
+    } finally {
+      await store.close();
+    }
+  });
+
   test('routes a short factual question to a direct response', async () => {
     const store = new SqliteTaskStore(':memory:');
     await store.initialize();

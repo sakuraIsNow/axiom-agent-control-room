@@ -595,3 +595,10 @@ npm run qa:search-agent
 4. [x] Harness transport 生产接入：DeepSeek ACP/Codex v2 stdio、审批回放、Artifact/事件关联、跨重启断点恢复和失败补偿已完成协议级回归；真实 sidecar 现场验收待部署环境。
 5. [x] Workflow 高级恢复：条件分支、多 Loop/嵌套 Loop、节点级局部恢复和单节点重跑已完成，并补充图结构、事件顺序和人工审核 API 回归。
 6. [ ] 可观测性与规模压测：接入 OpenTelemetry/外部 Prometheus，关联 trace/span、队列等待、模型成本和人工接管；在多 Worker、大数据量下重跑性能基准。
+
+### 2026-09-01 Git 部署后复杂任务稳定性修复
+
+- [x] 修复推理模型 SSE 在响应头已返回但内容停滞时无法真正超时的问题；每次流读取都与受控 AbortSignal 竞速，并在超时后释放 Reader，避免 Worker 长时间占用。
+- [x] 对 `deepseek-v4-pro`、Reasoner 等推理模型启用自适应执行策略：默认 5 分钟单步骤上限、3 路并发波次；普通模型保持原有 6 路并发，均可通过环境变量收紧。
+- [x] 子 Agent 重试耗尽后保留失败诊断和已完成检查点；存在可用结果时继续由 Synthesizer 生成“部分交付”，全部 Agent 均失败才终止。失败事件包含 Agent、原因分类和可操作提示。
+- [x] 前端消费部分交付事件并展示失败 Agent 摘要，不再用泛化英文错误覆盖已有流式结果；新增 SSE 停滞与部分交付回归测试。`npm run check`、`npm test`（249/249）和 `npm run build` 已通过。
