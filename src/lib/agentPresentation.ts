@@ -15,6 +15,7 @@ const BUILTIN_AGENT_NAMES: Record<string, string> = {
   'academic-search-agent': '论文搜索',
   'github-research-agent': 'GitHub 研究',
   'document-agent': '文档分析',
+  'report-agent': '报告生成',
   'registry-agent': 'Agent 检测',
   'router-agent': '语义路由',
   'scheduler-agent': '调度 Agent',

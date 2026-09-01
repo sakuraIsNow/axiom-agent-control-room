@@ -49,7 +49,14 @@ export const taskHistoryState = (task: WorkflowTask) => {
     return { pending: false, content: task.result || '', activity: '' };
   }
   if (task.status === 'failed') {
-    return { pending: false, content: `工作流失败：${task.error || '未返回失败原因。'}`, activity: '' };
+    const failure = task.error || '未返回失败原因。';
+    return {
+      pending: false,
+      content: task.result
+        ? `${task.result}\n\n> 本次任务未完整结束：${failure}`
+        : `工作流失败：${failure}`,
+      activity: '',
+    };
   }
   if (task.status === 'cancelled') {
     return { pending: false, content: '任务已取消。', activity: '' };

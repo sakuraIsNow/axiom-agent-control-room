@@ -71,7 +71,7 @@ test('forwards provider SSE deltas while preserving the final completion', async
   const deltas: string[] = [];
   globalThis.fetch = (async () => new Response([
     'data: {"choices":[{"delta":{"content":"stream "}}]}\n\n',
-    'data: {"choices":[{"delta":{"content":"works"}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}\n\n',
+    'data: {"choices":[{"delta":{"content":"works"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}\n\n',
     'data: [DONE]\n\n',
   ].join(''), { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch;
 
@@ -86,6 +86,7 @@ test('forwards provider SSE deltas while preserving the final completion', async
     assert.deepEqual(deltas, ['stream ', 'works']);
     assert.equal(result.content, 'stream works');
     assert.equal(result.usage?.total_tokens, 4);
+    assert.equal(result.finishReason, 'stop');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -162,6 +163,41 @@ test('forwards per-step model and token budget overrides to compatible providers
     await client.complete({ system: 'test', user: 'hello', model: 'step-model', maxTokens: 2048, signal: new AbortController().signal });
     assert.equal(payload?.model, 'step-model');
     assert.equal(payload?.max_tokens, 2048);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('preserves a length finish reason from a non-stream provider response', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    choices: [{ message: { content: 'truncated response' }, finish_reason: 'length' }],
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+  try {
+    const client = new OpenAICompatibleModelClient({ apiKey: 'test-key', apiBase: 'https://provider.invalid', model: 'test-model' });
+    const result = await client.complete({ system: 'test', user: 'hello', signal: new AbortController().signal });
+    assert.equal(result.content, 'truncated response');
+    assert.equal(result.finishReason, 'length');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('preserves a length finish reason from a streaming provider response', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response([
+    'data: {"choices":[{"delta":{"content":"truncated"}}]}\n\n',
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+    'data: [DONE]\n\n',
+  ].join(''), { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch;
+  try {
+    const client = new OpenAICompatibleModelClient({ apiKey: 'test-key', apiBase: 'https://provider.invalid', model: 'test-model' });
+    const result = await client.complete({ system: 'test', user: 'hello', signal: new AbortController().signal });
+    assert.equal(result.content, 'truncated');
+    assert.equal(result.finishReason, 'length');
   } finally {
     globalThis.fetch = originalFetch;
   }

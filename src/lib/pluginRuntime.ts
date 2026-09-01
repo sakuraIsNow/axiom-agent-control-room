@@ -192,9 +192,15 @@ export async function runPlugin(input: {
   input?: string;
   values?: Record<string, string | number>;
   policy?: Partial<ExecutionPolicy>;
+  /** Stable per-run key prevents duplicate workflow tasks after a retry. */
+  idempotencyKey?: string;
 }) {
   const response = await fetch(`/api/plugins/${encodeURIComponent(input.pluginId)}/run`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(input.idempotencyKey?.trim() ? { 'Idempotency-Key': input.idempotencyKey.trim().slice(0, 160) } : {}),
+    },
     body: JSON.stringify({ sessionId: input.sessionId, input: input.input, values: input.values, policy: input.policy }),
   });
   return readJson<{ task: WorkflowTask; eventsUrl: string; pluginId: string; pluginVersion: number }>(response, '插件运行失败');

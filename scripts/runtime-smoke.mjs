@@ -35,7 +35,7 @@ const events = [];
 let terminal;
 let lastSequence = 0;
 let gateApprovals = 0;
-const isVisibleStage = (stage) => stage === 'direct-response' || stage === 'synthesizer' || stage.startsWith('single-agent:');
+const isVisibleStage = (stage) => stage === 'direct-response' || stage === 'synthesizer' || stage.startsWith('synthesizer:') || stage.startsWith('single-agent:');
 const streamedLengths = new Map();
 const streamedLengthSamples = new Map();
 const approveGate = async (event) => {

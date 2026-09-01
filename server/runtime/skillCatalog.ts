@@ -54,6 +54,22 @@ export const runtimeSkillCatalog: RuntimeSkill[] = [
     instruction: '先提取文档结构和原文证据，再给出摘要、表格或结论；标注无法读取的部分。',
   },
   {
+    id: 'report-authoring',
+    label: '报告撰写',
+    description: '按明确覆盖清单组织详细研究报告、评估报告和商业方案。',
+    keywords: /(详细|完整|深度|研究|评估|商业化).{0,20}(?:报告|方案)|(?:报告|方案).{0,20}(?:详细|完整|成熟度|成本|落地)|detailed report|research report/i,
+    roles: ['researcher', 'analyst', 'builder'],
+    instruction: '逐项覆盖用户明确提出的问题；保留证据、数字、来源、成熟度、风险和落地层级，不以摘要代替详细正文。',
+  },
+  {
+    id: 'report-export',
+    label: '报告导出',
+    description: '把现有回答或完整会话整理为可下载报告。',
+    keywords: /(导出|下载|另存|保存为|word|docx|pdf|latex|tex|markdown|报告文件|export|download)/i,
+    roles: ['report-agent'],
+    instruction: '严格按用户指定范围和格式整理现有会话；保留来源、表格和不确定性，不补造事实。',
+  },
+  {
     id: 'implementation',
     label: '方案实现',
     description: '把分析结果转成可执行步骤、代码和验收项。',

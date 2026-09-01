@@ -7,6 +7,8 @@ const createdTaskIds = [];
 const createdSessionIds = new Set();
 let observeNavigation = true;
 let navigationCancelRequests = 0;
+const approvedReviewTaskIds = new Set();
+const approvedPlanTaskIds = new Set();
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -22,11 +24,43 @@ const taskState = async (taskId) => {
   return body.task;
 };
 
+// This suite exercises the complete delivery path. Review gates are real
+// runtime behavior, so the test operator approves them explicitly instead of
+// treating waiting_for_human as a timeout.
+const advanceApprovalGate = async (task) => {
+  if (task.status === 'waiting_for_human' && task.review && !approvedReviewTaskIds.has(task.id)) {
+    const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(task.id)}/approve-review`, {
+      method: 'POST',
+      headers: { ...qaHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: '自动化回归测试批准审核门禁。' }),
+    });
+    if (!response.ok && response.status !== 409) {
+      throw new Error(`Review approval failed with ${response.status}.`);
+    }
+    approvedReviewTaskIds.add(task.id);
+    return true;
+  }
+  if (task.status === 'awaiting_approval' && task.plan?.steps?.length && !approvedPlanTaskIds.has(task.id)) {
+    const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(task.id)}/approve-plan`, {
+      method: 'POST',
+      headers: { ...qaHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: '自动化回归测试批准执行计划。' }),
+    });
+    if (!response.ok && response.status !== 409) {
+      throw new Error(`Plan approval failed with ${response.status}.`);
+    }
+    approvedPlanTaskIds.add(task.id);
+    return true;
+  }
+  return false;
+};
+
 const waitForTerminalTask = async (taskId, timeoutMs = 240_000) => {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const task = await taskState(taskId);
     if (terminalStatuses.has(task.status)) return task;
+    await advanceApprovalGate(task);
     await new Promise((resolve) => setTimeout(resolve, 750));
   }
   throw new Error(`Task ${taskId} did not reach a terminal state within ${timeoutMs} ms.`);

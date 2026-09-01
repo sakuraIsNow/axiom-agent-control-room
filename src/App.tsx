@@ -84,11 +84,13 @@ import { routeChatMessage } from './lib/chatRouting';
 import { deleteConversationSession, listConversationSessions, upsertConversationSession, type RemoteSession } from './lib/sessionRuntime';
 import { restoreTaskGraph } from './lib/taskGraphRestoration';
 import { taskHistoryState } from './lib/taskHistoryState';
+import { findTaskAssistantIndex } from './lib/taskHistorySelection';
 import { useDashboardStore } from './lib/useDashboardStore';
 import { acceptGraphEventSequence, parseAgentGraph } from './lib/workflowGraphState';
 import { buildConversationContext } from './lib/conversationContext';
 import { readDashboardUrlState, subscribeDashboardUrlState, writeDashboardUrlState } from './lib/dashboardUrlState';
 import { saveProviderCredential, type ProviderCredentialKind } from './lib/providerCredentials';
+import { downloadReportAttachment, exportConversationReport } from './lib/reportExport';
 
 const STORAGE_KEY = 'axiom-agent-sessions-v1';
 const SETTINGS_KEY = 'axiom-provider-settings-v1';
@@ -198,6 +200,14 @@ const workflowPhase = (event: WorkflowEvent): AgentPhase => {
 
 const workflowEventLabel = (event: WorkflowEvent) => {
   const eventAgentName = agentDisplayName(String(event.payload.role ?? event.agentId?.split('-')[0] ?? 'agent'));
+  if (event.type === 'agent.retrying') {
+    const attempt = String(event.payload.nextAttempt ?? '');
+    const retryError = String(event.payload.error ?? '');
+    if (/流式响应未完整结束|stream.*(?:incomplete|ended)|unexpected.*end/i.test(retryError)) return `${eventAgentName}连接提前结束，正在重新连接（第 ${attempt} 次）`;
+    if (/(?:429|限流|rate.?limit|too many requests)/i.test(retryError)) return `${eventAgentName}遇到服务限流，正在稍后重试（第 ${attempt} 次）`;
+    if (/(?:timeout|timed out|超时)/i.test(retryError)) return `${eventAgentName}等待响应超时，正在重试（第 ${attempt} 次）`;
+    return `${eventAgentName}遇到可恢复错误，正在重试（第 ${attempt} 次）`;
+  }
   if (event.type === 'task.completed' && event.payload.route === 'direct') return '直接回答已完成';
   if (event.type === 'task.started' && event.payload.intent === 'conversation') return '直接响应已开始';
   if (event.type === 'task.planning' || event.type === 'task.planned') {
@@ -244,7 +254,7 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'agent.spawned': `已创建${eventAgentName}`,
     'agent.assigned': `已分配步骤给${eventAgentName}`,
     'agent.started': `${eventAgentName}开始执行`,
-    'agent.retrying': `${eventAgentName}正在重试第 ${String(event.payload.nextAttempt ?? '')} 次`,
+    'agent.retrying': `${eventAgentName}正在重试`,
     'agent.completed': `${eventAgentName}已完成`,
     'agent.failed': `${eventAgentName}执行失败`,
     'agent.message': `${eventAgentName}发送了协作消息`,
@@ -569,21 +579,7 @@ const directAgentRole = (session: Session) => {
 };
 
 const taskAssistantIndex = (session: Session | undefined, task: WorkflowTask) => {
-  if (!session) return -1;
-  const explicit = session.messages.findIndex((message) => message.role === 'assistant' && message.taskId === task.id);
-  if (explicit >= 0) return explicit;
-  if (session.activeTaskId === task.id && session.activeAssistantId) {
-    const active = session.messages.findIndex((message) => message.id === session.activeAssistantId && message.role === 'assistant');
-    if (active >= 0) return active;
-  }
-  const taskInput = compactStoredUserMessage(latestUserInput(task.input)).trim();
-  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
-    const message = session.messages[index];
-    if (message?.role !== 'user' || compactStoredUserMessage(message.content).trim() !== taskInput) continue;
-    const assistant = session.messages.slice(index + 1).findIndex((candidate) => candidate.role === 'assistant');
-    if (assistant >= 0) return index + 1 + assistant;
-  }
-  return -1;
+  return findTaskAssistantIndex(session, task);
 };
 
 const runtimeTaskIdForSession = (session: Session, catalog: WorkflowTaskSummary[]) => {
@@ -1392,7 +1388,13 @@ function App() {
       updatedAt: Date.now(),
     }));
     try {
-      const result = await runPlugin({ pluginId: selectedPlugin.id, sessionId: activeSession.id, input: userInput, values: pluginValues });
+      const result = await runPlugin({
+        pluginId: selectedPlugin.id,
+        sessionId: activeSession.id,
+        input: userInput,
+        values: pluginValues,
+        idempotencyKey: `plugin:${selectedPlugin.id}:${activeSession.id}:${assistantId}`,
+      });
       useDashboardStore.getState().setNav('chat');
       setSelectedPlugin(null);
       setPluginValues({});
@@ -1818,7 +1820,7 @@ function App() {
     if (event.type === 'model.delta') {
       const stage = String(event.payload.stage ?? '');
       const content = typeof event.payload.content === 'string' ? event.payload.content : '';
-      const userFacing = stage === 'direct-response' || stage === 'synthesizer' || stage.startsWith('single-agent:');
+      const userFacing = stage === 'direct-response' || stage === 'synthesizer' || stage.startsWith('synthesizer:') || stage.startsWith('single-agent:');
       if (userFacing && event.payload.reset === true) {
         updateSession(sessionId, (session) => ({
           ...session,
@@ -2066,6 +2068,7 @@ function App() {
     }
     if (event.type === 'task.failed') {
       const message = userFacingError(String(event.payload.error ?? ''), 'Agent 工作流执行失败。');
+      const partialResult = typeof event.payload.result === 'string' ? event.payload.result : '';
       setError(message);
       setFailedTaskId(event.taskId);
       updateSession(sessionId, (session) => ({
@@ -2073,7 +2076,7 @@ function App() {
         activeTaskId: undefined,
         activeAssistantId: undefined,
         messages: session.messages.map((item) =>
-          item.id === assistantId ? { ...item, content: `工作流失败：${message}`, pending: false, taskId: event.taskId, route: eventProfile?.route ?? 'workflow', agentRole: isDirectRoute ? 'direct-responder' : 'orchestrator' } : item,
+          item.id === assistantId ? { ...item, content: partialResult ? `${partialResult}\n\n> 本次任务未完整结束：${message}` : `工作流失败：${message}`, pending: false, taskId: event.taskId, route: eventProfile?.route ?? 'workflow', agentRole: isDirectRoute ? 'direct-responder' : 'orchestrator' } : item,
         ),
         updatedAt: Date.now(),
       }));
@@ -2497,6 +2500,9 @@ function App() {
       let usedDirectGateway = false;
       let directGraphAgentId: string | null = null;
       let directGraphNodeId: string | null = null;
+      let workflowTaskCreated = false;
+      let workflowTerminalObserved = false;
+      let directStreamError: string | null = null;
 
       const updateDirectGraphNode = (patch: Partial<AgentGraph['nodes'][number]>) => {
         if (!directGraphNodeId) return;
@@ -2650,7 +2656,47 @@ function App() {
         addRunEvent('routing', `已分配${agentDisplayName(routing.agentRole)}：${routing.reason}`);
         setAgentActivity(`${agentDisplayName(routing.agentRole)}正在准备执行`);
 
-        if (usedDirectGateway) {
+        if (routing.intent === 'report-export') {
+          if (!routing.reportExport) throw new Error('报告生成 Agent 没有取得导出范围或文件格式。');
+          setPhase('inference');
+          setAgentActivity('报告生成 Agent 正在整理会话并制作文件');
+          addRunEvent('inference', `报告生成 Agent 正在生成 ${routing.reportExport.format.toUpperCase()} 文件`);
+          // Force the last completed conversation snapshot to the server before
+          // the report endpoint reads it. This closes the normal 350 ms session
+          // debounce window without trusting user-supplied transcript text.
+          await upsertConversationSession(activeSession, controller.signal);
+          const startedAt = performance.now();
+          const attachment = await exportConversationReport({
+            sessionId: activeSession.id,
+            instruction: content,
+            decision: routing.reportExport,
+            modelCredentialId: providerSettings.text.useCustom ? providerSettings.text.credentialId : undefined,
+          }, controller.signal);
+          const elapsed = Math.round(performance.now() - startedAt);
+          updateSession(activeSession.id, (session) => ({
+            ...session,
+            messages: session.messages.map((message) => message.id === assistantId
+              ? {
+                  ...message,
+                  content: `报告已生成：**${attachment.name}**\n\n导出范围：${routing.reportExport?.scope === 'conversation' ? '完整会话' : '最近一条 Agent 回答'}。`,
+                  attachments: [attachment],
+                  pending: false,
+                  agentRole: 'report-agent',
+                  route: 'report-export',
+                }
+              : message),
+            updatedAt: Date.now(),
+          }));
+          downloadReportAttachment(attachment);
+          setPhase('complete');
+          setAgentActivity('');
+          setDurationMs(elapsed);
+          setTopologyAgents((current) => current.map((agent) => agent.id === `${routing.agentRole}-${activeSession.id}`
+            ? { ...agent, status: 'completed' as const, durationMs: elapsed }
+            : agent));
+          updateDirectGraphNode({ status: 'completed', durationMs: elapsed });
+          addRunEvent('complete', `报告生成 Agent 已交付 ${attachment.name}`);
+        } else if (usedDirectGateway) {
           await streamAgentResponse(
             requestMessages,
             mode,
@@ -2711,6 +2757,7 @@ function App() {
                 setPhase('error');
                 setAgentActivity('');
                 const displayMessage = userFacingError(message, '自定义模型请求失败。');
+                directStreamError = displayMessage;
                 setError(displayMessage);
                 setTopologyAgents((current) => current.map((agent) => agent.id === `${routing.agentRole}-${activeSession.id}`
                   ? { ...agent, status: 'failed' as const, failureReason: displayMessage }
@@ -2741,9 +2788,13 @@ function App() {
             mode,
             templateId: selectedTemplateId ?? undefined,
             modelCredentialId: providerSettings.text.useCustom ? providerSettings.text.credentialId : undefined,
+            // assistantId is created once for this user turn and remains stable
+            // if the task POST is retried or the stream reconnects.
+            idempotencyKey: `conversation:${activeSession.id}:${assistantId}`,
             routing,
             signal: controller.signal,
           });
+          workflowTaskCreated = true;
           void refreshTaskCatalog();
           setActiveTaskId(task.id);
           updateSession(activeSession.id, (session) => ({
@@ -2756,13 +2807,14 @@ function App() {
             updatedAt: Date.now(),
           }));
           await streamWorkflowEvents(task.id, controller.signal, (event) => {
+            if (['task.completed', 'task.failed', 'task.cancelled'].includes(event.type)) workflowTerminalObserved = true;
             applyWorkflowEvent(event, activeSession.id, assistantId);
           });
           setDurationMs(Math.round(performance.now() - startedAt));
         }
       } catch (caught) {
         if (controller.signal.aborted) return;
-        const message = userFacingError(caught, '无法连接 Agent 网关。');
+        const message = directStreamError ?? userFacingError(caught, '无法连接 Agent 网关。');
         setPhase('error');
         setAgentActivity('');
         setError(message);
@@ -2774,18 +2826,37 @@ function App() {
           updateSession(activeSession.id, (session) => ({
             ...session,
             messages: session.messages.map((item) => item.id === assistantId
-              ? { ...item, content: 'Agent 执行中断，未保存不完整回答，请重试。', pending: false }
+              ? {
+                  ...item,
+                  content: item.content.trim()
+                    ? `${item.content}\n\n> 本轮未完整结束：${message}`
+                    : `Agent 执行失败：${message}`,
+                  pending: false,
+                }
               : item),
             updatedAt: Date.now(),
           }));
         }
         addRunEvent('error', '网关连接失败');
       } finally {
-        if (!controller.signal.aborted) {
+        // A workflow that was only disconnected is still running on the
+        // server; keep its pending marker so history recovery can reconnect.
+        // Direct responses have no durable task, so an abort must converge to
+        // a visible terminal message instead of leaving a permanent spinner.
+        if (!(workflowTaskCreated && !workflowTerminalObserved)) {
           updateSession(activeSession.id, (session) => ({
             ...session,
             messages: session.messages
-              .map((message) => (message.id === assistantId ? { ...message, pending: false } : message))
+              .map((message) => {
+                if (message.id !== assistantId) return message;
+                if (controller.signal.aborted && !message.content.trim()) {
+                  return { ...message, content: '本轮已停止，未生成完整回答。', pending: false };
+                }
+                if (controller.signal.aborted && message.content.trim() && !message.content.includes('本轮已停止')) {
+                  return { ...message, content: `${message.content}\n\n> 本轮已停止，以上内容可能不完整。`, pending: false };
+                }
+                return { ...message, pending: false };
+              })
               .filter((message) => message.id !== assistantId || message.content.length > 0),
             updatedAt: Date.now(),
           }));
@@ -2800,12 +2871,34 @@ function App() {
     [activeSession, addRunEvent, applyWorkflowEvent, draft, draftAttachments, isRunning, mode, persistSessionGraph, providerSettings.image, providerSettings.text, providerSettings.video, providerSettings.vision, refreshTaskCatalog, selectedTemplateId, topologyAgents, updateSession],
   );
 
-  const retryFailedTask = useCallback(() => {
+  const retryFailedTask = useCallback(async () => {
     if (!failedTaskId || isRunning) return;
-    const lastUserMessage = [...activeSession.messages].reverse().find((message) => message.role === 'user');
-    if (!lastUserMessage) return;
-    void sendMessage(lastUserMessage.content);
-  }, [activeSession.messages, failedTaskId, isRunning, sendMessage]);
+    const originalTaskId = failedTaskId;
+    const assistantIndex = [...activeSession.messages]
+      .map((message, index) => ({ message, index }))
+      .reverse()
+      .find(({ message }) => message.role === 'assistant' && message.taskId === originalTaskId)?.index ?? -1;
+    if (assistantIndex < 0) return;
+    const assistant = activeSession.messages[assistantIndex]!;
+    try {
+      const retried = await retryWorkflowTask(originalTaskId);
+      updateSession(activeSession.id, (session) => ({
+        ...session,
+        activeTaskId: retried.id,
+        activeAssistantId: assistant.id,
+        messages: session.messages.map((message) => message.id === assistant.id
+          ? { ...message, taskId: retried.id, pending: true, content: '' }
+          : message),
+        updatedAt: Date.now(),
+      }));
+      setFailedTaskId(null);
+      setError(null);
+      setPhase('routing');
+      setAgentActivity('工作流正在重新安排执行');
+    } catch (caught) {
+      setError(userFacingError(caught, '任务重试失败'));
+    }
+  }, [activeSession.id, activeSession.messages, failedTaskId, isRunning, updateSession]);
 
   const handleImageFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];

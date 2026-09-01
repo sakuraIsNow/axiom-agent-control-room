@@ -1625,3 +1625,25 @@
   .ops-agent-list > div { grid-template-columns: minmax(0, 1fr) 50px 92px; }
   .ops-agent-list small { display: none; }
 }
+.dash-chat-file-attachment.downloadable {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: min(100%, 320px);
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid rgb(75 211 166 / 26%);
+  border-radius: 7px;
+  color: var(--dash-text);
+  background: rgb(255 255 255 / 5%);
+  text-decoration: none;
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+.dash-chat-file-attachment.downloadable:hover {
+  border-color: rgb(75 211 166 / 55%);
+  background: rgb(75 211 166 / 9%);
+  transform: translateY(-1px);
+}
+.dash-chat-file-attachment.downloadable > span { display: grid; min-width: 0; gap: 2px; }
+.dash-chat-file-attachment.downloadable strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.dash-chat-file-attachment.downloadable small { color: var(--dash-muted); font-size: 11px; }

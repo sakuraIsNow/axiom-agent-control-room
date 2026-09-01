@@ -4,7 +4,8 @@ import type { ModelClient } from './modelClient.js';
 import { classifyTask } from './orchestrator.js';
 import { routeSkillIds, runtimeSkillCatalog } from './skillCatalog.js';
 
-export type ChatIntent = 'conversation' | 'agent-registry' | 'web-search' | 'academic-search' | 'github-research' | 'image-generation' | 'video-generation' | 'image-analysis' | 'document-analysis' | 'task';
+export type ReportExportDecision = { scope: 'last-answer' | 'conversation'; format: 'md' | 'docx' | 'tex' | 'pdf'; title?: string };
+export type ChatIntent = 'conversation' | 'agent-registry' | 'web-search' | 'academic-search' | 'github-research' | 'image-generation' | 'video-generation' | 'image-analysis' | 'document-analysis' | 'report-export' | 'task';
 export type RoutingAgentDirectoryEntry = { id: string; label: string; description: string; capabilities: string[]; available?: boolean };
 export type RoutingSkillDirectoryEntry = { id: string; label: string; description: string };
 export type ChatRouteDecision = {
@@ -18,6 +19,7 @@ export type ChatRouteDecision = {
   skillIds: string[];
   routingVersion: string;
   routerModel?: string;
+  reportExport?: ReportExportDecision;
   router: TurnRoutingDecision & { intent: ChatIntent };
   scheduler: TurnSchedulingDecision;
 };
@@ -33,10 +35,22 @@ export type ChatRouteInput = {
 };
 
 const routingVersion = 'router-scheduler/v1';
-const intentSchema = z.enum(['conversation', 'agent-registry', 'web-search', 'academic-search', 'github-research', 'image-generation', 'video-generation', 'image-analysis', 'document-analysis', 'task']);
+const intentSchema = z.enum(['conversation', 'agent-registry', 'web-search', 'academic-search', 'github-research', 'image-generation', 'video-generation', 'image-analysis', 'document-analysis', 'report-export', 'task']);
+const reportExportDecisionSchema = z.object({
+  scope: z.enum(['last-answer', 'conversation']),
+  format: z.enum(['md', 'docx', 'tex', 'pdf']),
+  title: z.string().min(1).max(120).optional(),
+}).strict();
 const routeSchema = z.enum(['direct', 'single-agent', 'team', 'full-workflow']);
 const taskKindSchema = z.enum(['conversation', 'question', 'research', 'implementation', 'decision', 'creative', 'operations']);
 const difficultySchema = z.enum(['trivial', 'easy', 'moderate', 'hard', 'complex']);
+// Models commonly emit `null` for an optional object even when the prompt says
+// to omit it. Normalize that harmless representation instead of discarding
+// the complete Router/Scheduler decision and falling back to regex triage.
+const optionalReportExportSchema = z.preprocess(
+  (value) => value === null ? undefined : value,
+  reportExportDecisionSchema.optional(),
+);
 
 export const routerAgentDecisionSchema = z.object({
   intent: intentSchema,
@@ -48,6 +62,7 @@ export const routerAgentDecisionSchema = z.object({
   candidateSkillIds: z.array(z.string().min(1).max(80)).max(12),
   confidence: z.number().min(0).max(1),
   rationale: z.string().min(1).max(600),
+  reportExport: optionalReportExportSchema,
 }).strict();
 const schedulingStepSchema = z.object({
   id: z.string().min(1).max(64),
@@ -80,6 +95,7 @@ export const chatRouteDecisionSchema = z.object({
   skillIds: z.array(z.string().min(1).max(80)).max(12),
   routingVersion: z.string().min(1).max(80),
   routerModel: z.string().min(1).max(160).optional(),
+  reportExport: reportExportDecisionSchema.optional(),
   router: routerAgentDecisionSchema,
   scheduler: schedulerAgentDecisionSchema,
 }).strict();
@@ -94,6 +110,7 @@ const defaultAgents: RoutingAgentDirectoryEntry[] = [
   { id: 'video-agent', label: '视频制作 Agent', description: '生成或编辑视频。', capabilities: ['video-generation'] },
   { id: 'vision-agent', label: '视觉分析 Agent', description: '识别并分析图片附件。', capabilities: ['image-analysis', 'vision'] },
   { id: 'document-agent', label: '文档分析 Agent', description: '解析 PDF、Word 与文本附件。', capabilities: ['document-analysis'] },
+  { id: 'report-agent', label: '报告生成 Agent', description: '按用户语义整理会话并导出 Markdown、Word、LaTeX 或 PDF。', capabilities: ['report-export', 'document-generation'] },
   { id: 'researcher', label: '研究员', description: '收集约束、事实和证据。', capabilities: ['research', 'evidence'] },
   { id: 'analyst', label: '分析员', description: '完成系统分析、方案权衡和风险判断。', capabilities: ['analysis', 'architecture', 'decision'] },
   { id: 'builder', label: '工程师', description: '形成可执行实现与验收步骤。', capabilities: ['implementation', 'testing'] },
@@ -102,6 +119,7 @@ const defaultAgents: RoutingAgentDirectoryEntry[] = [
 const intentAgent: Record<Exclude<ChatIntent, 'task'>, string> = {
   conversation: 'direct-responder', 'agent-registry': 'registry-agent', 'web-search': 'search-agent', 'academic-search': 'academic-search-agent',
   'github-research': 'github-research-agent', 'image-generation': 'drawing-agent', 'video-generation': 'video-agent', 'image-analysis': 'vision-agent', 'document-analysis': 'document-agent',
+  'report-export': 'report-agent',
 };
 const extractJson = (content: string) => {
   const unfenced = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -145,7 +163,7 @@ const fallbackSteps = (message: string, mode: ChatRouteInput['mode'], route: Cha
   const review: TurnSchedulingStep = { id: 'quality-review', title: '验证交付质量', agentId: 'reviewer', objective: '检查完整性、证据、风险和验收标准。', dependsOn: ['delivery'], skillIds: ['quality-review'] };
   return [research, analysis, build, review];
 };
-const fallbackDecision = (input: ChatRouteInput, intent: ChatIntent, workflowRoute: ChatRouteDecision['workflowRoute'], reason: string): ChatRouteDecision => {
+const fallbackDecision = (input: ChatRouteInput, intent: ChatIntent, workflowRoute: ChatRouteDecision['workflowRoute'], reason: string, reportExport?: ReportExportDecision): ChatRouteDecision => {
   const profile = classifyTask(input.message, input.mode);
   const steps = intent === 'task' ? fallbackSteps(input.message, input.mode, workflowRoute) : [];
   const activeAgentIds = intent === 'task' ? workflowRoute === 'direct' ? ['direct-responder'] : unique(steps.map((step) => step.agentId)) : [intentAgent[intent]];
@@ -158,13 +176,29 @@ const fallbackDecision = (input: ChatRouteInput, intent: ChatIntent, workflowRou
   const router: ChatRouteDecision['router'] = {
     intent, taskKind: (intent === 'task' ? profile.kind : intent === 'conversation' ? 'conversation' : 'question') as TaskKind,
     difficulty: (intent === 'task' ? profile.difficulty : intent === 'conversation' ? 'trivial' : 'easy') as TaskDifficulty,
-    requiresExternalFacts: ['web-search', 'academic-search', 'github-research'].includes(intent), requiredCapabilities: activeAgentIds,
+    requiresExternalFacts: ['web-search', 'academic-search', 'github-research'].includes(intent) || selectedSkillIds.includes('web-research') || selectedSkillIds.includes('github-inspection'), requiredCapabilities: activeAgentIds,
     candidateAgentIds: activeAgentIds, candidateSkillIds: selectedSkillIds, confidence: 0, rationale: reason,
+    ...(reportExport ? { reportExport } : {}),
   };
   return {
     intent, execution: intent === 'task' && workflowRoute !== 'direct' ? 'workflow' : 'gateway', agentRole: intent === 'task' && workflowRoute !== 'direct' ? 'orchestrator' : activeAgentIds[0]!,
-    workflowRoute, requiresSearch: router.requiresExternalFacts, reason, source: 'deterministic-fallback', skillIds: selectedSkillIds, routingVersion, router, scheduler,
+    workflowRoute, requiresSearch: router.requiresExternalFacts || activeAgentIds.some((id) => ['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id)), reason, source: 'deterministic-fallback', skillIds: selectedSkillIds, routingVersion, router, scheduler,
+    ...(reportExport ? { reportExport } : {}),
   };
+};
+
+const fallbackReportExport = (text: string): ReportExportDecision => {
+  const format: ReportExportDecision['format'] = /(?:latex|\.tex\b|tex\s*格式)/i.test(text)
+    ? 'tex'
+    : /(?:markdown|\.md\b|md\s*格式)/i.test(text)
+      ? 'md'
+      : /(?:pdf)/i.test(text)
+        ? 'pdf'
+        : 'docx';
+  const scope: ReportExportDecision['scope'] = /(?:完整|全部|整个|整段|全量).{0,12}(?:对话|会话|聊天|历史)|(?:对话|会话|聊天|历史).{0,12}(?:完整|全部|整个|全量)|full\s+(?:conversation|chat)|entire\s+(?:conversation|chat)/i.test(text)
+    ? 'conversation'
+    : 'last-answer';
+  return { scope, format };
 };
 
 /** Regex-based routing is retained only as the model-unavailable fallback. */
@@ -177,6 +211,7 @@ export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
   const imageGeneration = /(?:生成|绘制|画|制作|设计|编辑|修改).{0,16}(?:图片|图像|海报|插画|封面)|(?:draw|generate|create|edit).{0,16}(?:image|picture|poster|illustration)/i.test(text);
   const agentRegistry = /(?:有哪些|哪几个|列出|查看|介绍|可用).{0,20}(?:agent|智能体|子智能体)|(?:agent|agents).{0,20}(?:available|list|registry|catalog)/i.test(text);
   const capabilityRegistry = /(?:你有.{0,24}(?:能力|功能)(?:吗|么)?|你(?:能|可以|会)(?:进行|使用|调用)?.{0,20}(?:吗|么)|你(?:支持|提供)(?:联网搜索|搜索|图片识别|视觉分析|文档分析|绘图|视频生成|工具)|有哪些能力|支持哪些功能)/i.test(text);
+  const reportExport = /(?:导出|下载|另存为|保存为|输出为).{0,30}(?:以上|上述|回答|内容|对话|会话|聊天|报告|文档|文件|markdown|md|word|docx|latex|tex|pdf)|(?:把|将).{0,30}(?:以上|上述|回答|内容|对话|会话|聊天).{0,20}(?:导出|下载|另存|保存|生成).{0,15}(?:报告|文档|文件|markdown|md|word|docx|latex|tex|pdf)|(?:生成|制作).{0,8}(?:word|docx|latex|tex|pdf|markdown|md)(?:格式)?(?:报告|文档|文件)/i.test(text);
   const academicSearch = /(?:论文|文献|期刊|学术|arxiv|doi|paper|literature|academic|journal)/i.test(text);
   const githubResearch = /(?:github|开源仓库|代码仓库|repository|repo)|(?:开源|open[ -]?source).{0,30}(?:agent|智能体|项目|框架|工具|仓库)/i.test(text);
   const webSearch = /(?:天气|气温|预报|新闻|价格|股价|汇率|联网|上网|搜索|查找|网页|最新|目前|现在|今天|实时|weather|forecast|news|price|current|latest|today|internet)/i.test(text);
@@ -184,6 +219,7 @@ export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
   const workflowRoleCount = [/(?:搜索|研究|检索|search|research(?:er)?)\s*agent/i, /(?:架构|分析|方案|analyst|architect(?:ure)?)\s*agent/i, /(?:数据库|数据|database|db)\s*agent/i, /(?:实现|开发|构建|编程|builder|developer)\s*agent/i, /(?:审查|审核|评审|reviewer|review)\b/i, /(?:汇总|综合|整合|synthesizer|synthesis)\b/i].filter((pattern) => pattern.test(text)).length;
   const conversation = /^(?:你在吗|在吗|你好|您好|嗨|谢谢|感谢|再见|hi|hello|hey|thanks|bye)[？?！!。,\.\s]*$/i.test(text);
   if (workflowSignals && workflowRoleCount >= 2) return fallbackDecision(input, 'task', 'full-workflow', '兜底规则检测到明确的多 Agent 协作顺序。');
+  if (reportExport) return fallbackDecision(input, 'report-export', 'direct', '兜底规则检测到明确的会话报告导出动作。', fallbackReportExport(text));
   if (videoGeneration) return fallbackDecision(input, 'video-generation', 'direct', '兜底规则检测到视频生成目标。');
   if (imageGeneration) return fallbackDecision(input, 'image-generation', 'direct', '兜底规则检测到图像生成目标。');
   if (hasImage) return fallbackDecision(input, 'image-analysis', 'direct', '图片附件要求视觉能力。');
@@ -195,6 +231,92 @@ export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
   if (conversation) return fallbackDecision(input, 'conversation', 'direct', '短对话无需建立工作流。');
   const profile = classifyTask(text, input.mode);
   return fallbackDecision(input, 'task', profile.route, `兜底分类为 ${profile.kind} / ${profile.difficulty}。`);
+};
+
+/**
+ * Applies server-side constraints to a decision returned by the browser's
+ * routing pass. A decision can be stale when a request is retried, so an
+ * obviously explicit specialist capability must not be bypassed. We keep
+ * model-selected task routes intact because a task may intentionally combine
+ * retrieval with analysis or implementation.
+ */
+export const enforceChatRouteSafety = (routing: ChatRouteDecision, input: ChatRouteInput): ChatRouteDecision => {
+  const fallback = fallbackChatRoute(input);
+  const hardSpecialistIntents = new Set<ChatIntent>([
+    'report-export',
+    'image-generation',
+    'video-generation',
+    'image-analysis',
+    'document-analysis',
+    'agent-registry',
+  ]);
+  if (routing.intent === 'conversation' && fallback.intent !== 'conversation') return fallback;
+  if (hardSpecialistIntents.has(fallback.intent) && routing.intent !== fallback.intent) return fallback;
+  const specialistRole = intentAgent[routing.intent as Exclude<ChatIntent, 'task'>];
+  if (routing.intent !== 'task') {
+    // Specialist gateway intents never create a workflow task. Normalize stale
+    // browser state so the UI and server use the same execution contract.
+    return {
+      ...routing,
+      execution: 'gateway',
+      workflowRoute: 'direct',
+      agentRole: specialistRole ?? routing.agentRole,
+      scheduler: {
+        ...routing.scheduler,
+        route: 'direct',
+        activeAgentIds: specialistRole ? [specialistRole] : routing.scheduler.activeAgentIds,
+        steps: [],
+        executionWaves: [],
+        requiresReview: false,
+      },
+      requiresSearch: routing.requiresSearch
+        || routing.router.requiresExternalFacts
+        || routing.router.candidateAgentIds.some((id) => ['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id)),
+    };
+  }
+
+  const route = routing.workflowRoute;
+  const schedulerRoute = routing.scheduler.route;
+  const steps = routing.scheduler.steps;
+  // A task route with no executable steps cannot be sent to the workflow
+  // coordinator. Fall back to the same deterministic plan used when routing
+  // is unavailable instead of creating a task that can never advance.
+  if (route !== 'direct' && (!steps.length || !routing.scheduler.activeAgentIds.length)) return fallback;
+  if (route === 'direct') {
+    return {
+      ...routing,
+      execution: 'gateway',
+      workflowRoute: 'direct',
+      agentRole: 'direct-responder',
+      scheduler: {
+        ...routing.scheduler,
+        route: 'direct',
+        activeAgentIds: ['direct-responder'],
+        appendAgentIds: routing.scheduler.appendAgentIds.filter((id) => id === 'direct-responder'),
+        steps: [],
+        executionWaves: [],
+        requiresReview: false,
+      },
+      requiresSearch: routing.requiresSearch || routing.router.requiresExternalFacts,
+    };
+  }
+  if (schedulerRoute !== route) {
+    // Keep a valid model-selected plan, but make its duplicated route fields
+    // agree before persisting it in the task and graph history.
+    routing = {
+      ...routing,
+      scheduler: { ...routing.scheduler, route },
+    };
+  }
+  return {
+    ...routing,
+    execution: 'workflow',
+    workflowRoute: route,
+    agentRole: 'orchestrator',
+    requiresSearch: routing.requiresSearch
+      || routing.router.requiresExternalFacts
+      || routing.router.candidateAgentIds.some((id) => ['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id)),
+  };
 };
 
 const assertKnownIds = (values: string[], known: Set<string>, label: string) => {
@@ -210,6 +332,8 @@ const validateRouter = (router: ChatRouteDecision['router'], input: ChatRouteInp
   const hasDocument = attachments.some((attachment) => !attachment.mimeType?.startsWith('image/') && attachment.kind !== 'image');
   if (hasImage && (router.intent !== 'image-analysis' || !router.candidateAgentIds.includes('vision-agent'))) throw new Error('Image attachments require Vision Agent.');
   if (hasDocument && (router.intent !== 'document-analysis' || !router.candidateAgentIds.includes('document-agent'))) throw new Error('Documents require Document Agent.');
+  if (router.intent === 'report-export' && !router.reportExport) throw new Error('Report export intent requires format and scope.');
+  if (router.intent !== 'report-export' && router.reportExport) throw new Error('Only report export intent may include report export settings.');
   if (router.intent !== 'task' && !router.candidateAgentIds.includes(intentAgent[router.intent])) throw new Error('Required specialist is absent.');
 };
 const normalizeRouter = (router: ChatRouteDecision['router']): ChatRouteDecision['router'] => {
@@ -222,6 +346,28 @@ const normalizeRouter = (router: ChatRouteDecision['router']): ChatRouteDecision
     intent: 'task',
     candidateAgentIds: taskAgents.length ? taskAgents : router.candidateAgentIds,
     rationale: `${router.rationale} Router 的任务类型或候选能力表明本轮需要执行任务，已纠正寒暄意图。`,
+  };
+};
+
+/**
+ * An explicit file action is a hard product intent. The Router Agent still
+ * chooses the title and, when valid, the requested format/scope, but a
+ * malformed or over-broad model classification must not turn a download
+ * request into an ordinary answer. The deterministic classifier is only used
+ * here as a safety constraint; ordinary report-writing remains a task.
+ */
+const enforceExplicitReportExport = (
+  router: ChatRouteDecision['router'],
+  input: ChatRouteInput,
+): ChatRouteDecision['router'] => {
+  const explicit = fallbackChatRoute(input);
+  if (explicit.intent !== 'report-export' || !explicit.reportExport) return router;
+  if (router.intent === 'report-export' && router.reportExport) return router;
+  return {
+    ...explicit.router,
+    confidence: Math.max(0.92, router.confidence),
+    rationale: `${router.rationale} 检测到用户明确的文件导出动作，已启用报告导出护栏。`,
+    reportExport: explicit.reportExport,
   };
 };
 const routeForScheduledSteps = (
@@ -300,11 +446,15 @@ export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient,
       signal, responseFormat: 'json', temperature: 0, maxTokens: 900,
       system: `You are the Router Agent for a production Agent platform. Classify and select candidates only; never answer or schedule.
 Use the latest turn, compact conversation context, attachments, live Agent/Skill directories, and cumulative session Graph. Choose only supplied IDs and the smallest sufficient candidate set. Existing Graph Agents need not run again. Add capabilities only when this turn needs them.
-Intents: conversation only for greetings, thanks, social chat, or casual small talk; agent-registry; web-search for a simple current-fact lookup; academic-search; github-research; image-generation; video-generation; image-analysis; document-analysis; task for every comparison, decision, analysis, design, planning, implementation, or multi-stage request. A retrieval request that also needs analysis or implementation is a task and should include the relevant search Agent plus reasoning/build Agents. Do not call every task complex. Confidence below 0.55 triggers fallback.
-Return JSON only: {"intent":"...","taskKind":"conversation|question|research|implementation|decision|creative|operations","difficulty":"trivial|easy|moderate|hard|complex","requiresExternalFacts":false,"requiredCapabilities":["..."],"candidateAgentIds":["..."],"candidateSkillIds":["..."],"confidence":0.0,"rationale":"..."}.`,
+Intents: conversation only for greetings, thanks, social chat, or casual small talk; agent-registry; web-search for a simple current-fact lookup; academic-search; github-research; image-generation; video-generation; image-analysis; document-analysis; report-export only when the user explicitly asks to export, download, save, or generate a file from an existing answer/conversation; task for every comparison, decision, analysis, design, planning, implementation, report-writing request without an explicit file-export action, or multi-stage request. A retrieval request that also needs analysis or implementation is a task and should include the relevant search Agent plus reasoning/build Agents. Do not call every task complex. Confidence below 0.55 triggers fallback.
+For report-export, include reportExport with scope last-answer or conversation and format md, docx, tex, or pdf. Infer scope and format from the user's wording. Default to last-answer and docx when unspecified. For every other intent, omit reportExport. Never ask ordinary users whether they want an export.
+Return JSON only: {"intent":"...","taskKind":"conversation|question|research|implementation|decision|creative|operations","difficulty":"trivial|easy|moderate|hard|complex","requiresExternalFacts":false,"requiredCapabilities":["..."],"candidateAgentIds":["..."],"candidateSkillIds":["..."],"confidence":0.0,"rationale":"...","reportExport":{"scope":"last-answer|conversation","format":"md|docx|tex|pdf","title":"optional"}}.`,
       user: JSON.stringify({ latestUserTurn: input.message.slice(0, 8_000), mode: input.mode, attachments: input.attachments ?? [], conversationContext: (input.conversationContext ?? []).slice(-12).map((message) => ({ ...message, content: message.content.slice(0, 2_000) })), availableAgents: agents, availableSkills: skills, currentSessionGraph: graph }),
     });
-    const router = normalizeRouter(routerAgentDecisionSchema.parse(extractJson(routerCompletion.content)) as ChatRouteDecision['router']);
+    const router = enforceExplicitReportExport(
+      normalizeRouter(routerAgentDecisionSchema.parse(extractJson(routerCompletion.content)) as ChatRouteDecision['router']),
+      input,
+    );
     validateRouter(router, input, agentIds, skillIds);
     const schedulerCompletion = await model.complete({
       signal, responseFormat: 'json', temperature: 0, maxTokens: 1_800,
@@ -318,8 +468,10 @@ Return JSON only: {"route":"direct|single-agent|team|full-workflow","activeAgent
     const execution = router.intent === 'task' && scheduler.route !== 'direct' ? 'workflow' : 'gateway';
     return chatRouteDecisionSchema.parse({
       intent: router.intent, execution, agentRole: execution === 'workflow' ? 'orchestrator' : scheduler.activeAgentIds[0], workflowRoute: scheduler.route,
-      requiresSearch: ['web-search', 'academic-search', 'github-research'].includes(router.intent), reason: scheduler.reason, source: 'router-agent', skillIds: scheduler.selectedSkillIds,
-      routingVersion, routerModel: model.model, router, scheduler,
+      requiresSearch: router.requiresExternalFacts
+        || router.candidateAgentIds.some((id) => ['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id)),
+      reason: scheduler.reason, source: 'router-agent', skillIds: scheduler.selectedSkillIds,
+      routingVersion, routerModel: model.model, ...(router.reportExport ? { reportExport: router.reportExport } : {}), router, scheduler,
     }) as ChatRouteDecision;
   } catch (error) {
     input.onFallback?.(error);
@@ -345,11 +497,20 @@ export const workflowPlanFromChatRoute = (decision: ChatRouteDecision): Workflow
     kind: decision.router.taskKind, difficulty: decision.router.difficulty, route: decision.scheduler.route, score: difficultyScore[decision.router.difficulty],
     reasons: [decision.router.rationale, decision.scheduler.reason], maxSteps: decision.scheduler.steps.length, requiresReview: decision.scheduler.requiresReview,
   };
-  const steps: WorkflowStep[] = decision.scheduler.steps.map((step) => ({
-    id: step.id, title: step.title, role: step.agentId, objective: step.objective, dependsOn: step.dependsOn,
-    acceptanceCriteria: [`完成“${step.title}”并给出可验证的结果。`], skillIds: step.skillIds, maxTokens: step.agentId === 'reviewer' ? 8_192 : 6_144, maxDurationMs: 120_000, failureStrategy: 'retry',
-    ...(specialists.has(step.agentId) ? { agentContract: { source: 'builtin' as const, agentId: step.agentId, displayName: step.title, toolAllowlist: [] } } : {}),
-  }));
+  const steps: WorkflowStep[] = decision.scheduler.steps.map((step) => {
+    const reportWritingStep = decision.router.taskKind === 'research'
+      && step.agentId === 'builder'
+      && /(?:报告|report)/i.test(`${step.title} ${step.objective}`);
+    return {
+      id: step.id, title: step.title, role: step.agentId, objective: step.objective, dependsOn: step.dependsOn,
+      acceptanceCriteria: reportWritingStep
+        ? ['完整覆盖用户明确要求的研究维度，不以摘要代替正文。', '关键技术、成熟度、案例、成本和落地策略均有证据或明确的不确定性说明。']
+        : [`完成“${step.title}”并给出可验证的结果。`],
+      skillIds: reportWritingStep ? unique([...step.skillIds.filter((id) => id !== 'implementation'), 'report-authoring']) : step.skillIds,
+      maxTokens: step.agentId === 'reviewer' || reportWritingStep ? 8_192 : 6_144, maxDurationMs: 120_000, failureStrategy: 'retry',
+      ...(specialists.has(step.agentId) || reportWritingStep ? { agentContract: { source: 'builtin' as const, agentId: step.agentId, displayName: step.title, toolAllowlist: [] } } : {}),
+    };
+  });
   return {
     summary: `调度 Agent 已为本轮选择 ${steps.length} 个执行步骤。`, routingReason: decision.reason, steps, profile, graph: graphForSteps(steps), version: 1,
     approvalStatus: 'approved', approvedAt: new Date().toISOString(), approvedBy: 'router-scheduler-control-plane', routingDecision: decision.router,

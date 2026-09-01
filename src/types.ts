@@ -31,7 +31,14 @@ export type ChatIntent =
   | 'video-generation'
   | 'image-analysis'
   | 'document-analysis'
+  | 'report-export'
   | 'task';
+
+export type ReportExportDecision = {
+  scope: 'last-answer' | 'conversation';
+  format: 'md' | 'docx' | 'tex' | 'pdf';
+  title?: string;
+};
 
 export type ChatRouteDecision = {
   intent: ChatIntent;
@@ -44,6 +51,7 @@ export type ChatRouteDecision = {
   skillIds: string[];
   routingVersion: string;
   routerModel?: string;
+  reportExport?: ReportExportDecision;
   router: TurnRoutingDecision;
   scheduler: TurnSchedulingDecision;
 };
@@ -58,6 +66,7 @@ export type TurnRoutingDecision = {
   candidateSkillIds: string[];
   confidence: number;
   rationale: string;
+  reportExport?: ReportExportDecision;
 };
 
 export type TurnSchedulingStep = {

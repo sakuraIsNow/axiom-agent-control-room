@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ModelClient, ModelCompletionRequest } from './modelClient.js';
-import { fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute } from './chatRouter.js';
+import { enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute } from './chatRouter.js';
 
 class RouteModel implements ModelClient {
   readonly model = 'route-model';
@@ -115,6 +115,117 @@ test('a conversational Router decision discards redundant Scheduler steps withou
   assert.equal(decision.workflowRoute, 'direct');
   assert.deepEqual(decision.scheduler.activeAgentIds, ['direct-responder']);
   assert.deepEqual(decision.scheduler.steps, []);
+});
+
+test('server route safety prevents a stale conversation decision from bypassing explicit capabilities', () => {
+  const input = { message: '帮我生成一张未来城市海报', mode: 'build' as const };
+  const stale = fallbackChatRoute({ message: '你好', mode: 'analyze' });
+  const guarded = enforceChatRouteSafety(stale, input);
+  assert.equal(guarded.intent, 'image-generation');
+  assert.equal(guarded.agentRole, 'drawing-agent');
+  assert.equal(guarded.execution, 'gateway');
+});
+
+test('server route safety keeps a model-selected retrieval workflow intact', () => {
+  const input = { message: '搜索最新的 Agent 框架并比较架构、成本和落地风险', mode: 'analyze' as const };
+  const fallback = fallbackChatRoute(input);
+  const taskDecision = {
+    ...fallbackChatRoute({ message: '设计一个平台', mode: 'analyze' }),
+    intent: 'task' as const,
+    execution: 'workflow' as const,
+    agentRole: 'orchestrator',
+    workflowRoute: 'team' as const,
+  };
+  const guarded = enforceChatRouteSafety(taskDecision, input);
+  assert.equal(fallback.intent, 'web-search');
+  assert.equal(guarded.intent, 'task');
+  assert.equal(guarded.execution, 'workflow');
+});
+
+test('server route safety normalizes task execution to match its workflow route', () => {
+  const base = fallbackChatRoute({ message: '设计一个需要分析和实现的服务', mode: 'build' });
+  const stale = {
+    ...base,
+    intent: 'task' as const,
+    execution: 'gateway' as const,
+    agentRole: 'analyst',
+    workflowRoute: 'team' as const,
+    scheduler: { ...base.scheduler, route: 'single-agent' as const },
+  };
+  const guarded = enforceChatRouteSafety(stale, { message: '设计一个需要分析和实现的服务', mode: 'build' });
+  assert.equal(guarded.execution, 'workflow');
+  assert.equal(guarded.workflowRoute, 'team');
+  assert.equal(guarded.agentRole, 'orchestrator');
+  assert.equal(guarded.scheduler.route, 'team');
+});
+
+test('server route safety normalizes direct task routes to the gateway', () => {
+  const base = fallbackChatRoute({ message: '回答一个简单问题', mode: 'analyze' });
+  const stale = {
+    ...base,
+    intent: 'task' as const,
+    execution: 'workflow' as const,
+    agentRole: 'orchestrator',
+    workflowRoute: 'direct' as const,
+    scheduler: { ...base.scheduler, route: 'team' as const },
+  };
+  const guarded = enforceChatRouteSafety(stale, { message: '回答一个简单问题', mode: 'analyze' });
+  assert.equal(guarded.execution, 'gateway');
+  assert.equal(guarded.workflowRoute, 'direct');
+  assert.equal(guarded.agentRole, 'direct-responder');
+  assert.deepEqual(guarded.scheduler.steps, []);
+});
+
+test('composite task routes retain the external-facts requirement', () => {
+  const base = fallbackChatRoute({ message: '设计平台并搜索最新开源方案', mode: 'build' });
+  const routed = {
+    ...base,
+    intent: 'task' as const,
+    execution: 'workflow' as const,
+    workflowRoute: 'team' as const,
+    agentRole: 'orchestrator',
+    requiresSearch: false,
+    router: {
+      ...base.router,
+      intent: 'task' as const,
+      requiresExternalFacts: true,
+      candidateAgentIds: ['researcher', 'analyst', 'search-agent'],
+    },
+  };
+  const guarded = enforceChatRouteSafety(routed, { message: '设计平台并搜索最新开源方案', mode: 'build' });
+  assert.equal(guarded.requiresSearch, true);
+});
+
+test('Router accepts null for an omitted optional report export field', async () => {
+  const decision = await routeChatIntent(
+    { message: '你好，介绍一下你自己', mode: 'analyze' },
+    new RouteModel([
+      routerOutput({
+        intent: 'conversation',
+        taskKind: 'conversation',
+        difficulty: 'trivial',
+        requiredCapabilities: ['conversation'],
+        candidateAgentIds: ['direct-responder'],
+        candidateSkillIds: [],
+        confidence: 0.95,
+        reportExport: null,
+      }),
+      schedulerOutput({
+        route: 'direct',
+        activeAgentIds: ['direct-responder'],
+        skippedAgentIds: [],
+        appendAgentIds: ['direct-responder'],
+        selectedSkillIds: [],
+        executionWaves: [],
+        steps: [],
+        requiresReview: false,
+      }),
+    ]),
+    new AbortController().signal,
+  );
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(decision.intent, 'conversation');
+  assert.equal(decision.reportExport, undefined);
 });
 
 test('Router task fields correct a contradictory conversation intent before scheduling', async () => {
@@ -265,6 +376,59 @@ test('fallback routing assigns every specialist intent before ordinary task clas
   }
 });
 
+test('Report Agent routes explicit exports while ordinary report writing remains a task', async () => {
+  const lastAnswer = await routeChatIntent(
+    { message: '把以上回答导出为 Word 报告并下载', mode: 'analyze' },
+    new RouteModel([
+      routerOutput({
+        intent: 'report-export', taskKind: 'operations', difficulty: 'easy', requiresExternalFacts: false,
+        requiredCapabilities: ['report-export'], candidateAgentIds: ['report-agent'], candidateSkillIds: ['report-export'],
+        confidence: 0.98, rationale: '用户明确要求把现有回答导出为 Word 文件。',
+        reportExport: { scope: 'last-answer', format: 'docx' },
+      }),
+      schedulerOutput({
+        route: 'direct', activeAgentIds: ['report-agent'], skippedAgentIds: [], appendAgentIds: ['report-agent'],
+        selectedSkillIds: ['report-export'], executionWaves: [], steps: [], requiresReview: false,
+        reason: '报告生成 Agent 直接处理文件导出。',
+      }),
+    ]),
+    new AbortController().signal,
+  );
+  assert.equal(lastAnswer.intent, 'report-export');
+  assert.equal(lastAnswer.agentRole, 'report-agent');
+  assert.deepEqual(lastAnswer.reportExport, { scope: 'last-answer', format: 'docx' });
+
+  const conversation = fallbackChatRoute({ message: '把整个对话导出 PDF', mode: 'analyze' });
+  assert.equal(conversation.intent, 'report-export');
+  assert.deepEqual(conversation.reportExport, { scope: 'conversation', format: 'pdf' });
+
+  const writeOnly = fallbackChatRoute({ message: '帮我写一份详细的水库研究报告', mode: 'analyze' });
+  assert.equal(writeOnly.intent, 'task');
+  assert.equal(writeOnly.reportExport, undefined);
+});
+
+test('explicit export intent survives a semantic Router Agent misclassification', async () => {
+  const decision = await routeChatIntent(
+    { message: '把以上回答导出为 PDF', mode: 'analyze' },
+    new RouteModel([
+      routerOutput({
+        intent: 'task', taskKind: 'question', difficulty: 'easy', requiredCapabilities: ['direct-responder'],
+        candidateAgentIds: ['direct-responder'], candidateSkillIds: [], confidence: 0.98,
+        rationale: '模型误将导出请求当成普通问答。',
+      }),
+      schedulerOutput({
+        route: 'direct', activeAgentIds: ['direct-responder'], appendAgentIds: ['direct-responder'],
+        selectedSkillIds: [], steps: [], executionWaves: [], reason: '误判为直接回答。',
+      }),
+    ]),
+    new AbortController().signal,
+  );
+  assert.equal(decision.intent, 'report-export');
+  assert.equal(decision.agentRole, 'report-agent');
+  assert.deepEqual(decision.reportExport, { scope: 'last-answer', format: 'pdf' });
+  assert.ok(decision.reason.includes('导出'));
+});
+
 test('routes system design without an explicit Agent name and selects only relevant skills', async () => {
   const fallback = fallbackChatRoute({ message: '设计一个平台，包含前端、后端和数据流', mode: 'analyze' });
   assert.equal(fallback.intent, 'task');
@@ -300,7 +464,7 @@ test('explicit multi-agent sequences always enter the full workflow', () => {
   assert.equal(decision.execution, 'workflow');
   assert.equal(decision.workflowRoute, 'full-workflow');
   assert.equal(decision.agentRole, 'orchestrator');
-  assert.equal(decision.requiresSearch, false);
+  assert.equal(decision.requiresSearch, true);
 });
 
 test('semantic specialist misclassification cannot downgrade an explicit workflow', async () => {

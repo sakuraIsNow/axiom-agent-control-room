@@ -72,6 +72,7 @@ export async function streamAgentResponse(
   const decoder = new TextDecoder();
   let buffer = '';
   let completed = false;
+  let reportedError: string | null = null;
 
   const dispatch = (block: string) => {
     const lines = block.split(/\r?\n/);
@@ -99,7 +100,10 @@ export async function streamAgentResponse(
         model: typeof data.model === 'string' ? data.model : undefined,
       });
     }
-    if (event === 'error') handlers.onError(String(data.message));
+    if (event === 'error') {
+      reportedError = String(data.message ?? 'Agent 网关返回执行失败。');
+      handlers.onError(reportedError);
+    }
   };
 
   while (true) {
@@ -111,5 +115,6 @@ export async function streamAgentResponse(
 
   buffer += decoder.decode();
   if (buffer.trim()) dispatch(buffer);
+  if (reportedError) throw new Error(reportedError);
   if (!completed && !signal.aborted) throw new Error('Agent 响应流在完成前中断。');
 }

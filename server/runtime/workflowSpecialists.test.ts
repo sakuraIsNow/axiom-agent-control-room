@@ -80,6 +80,23 @@ test('search specialist forces native web_search and preserves source URLs', asy
   });
 });
 
+test('search specialist distinguishes a completed zero-result search from a transport failure', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ output_text: '' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+    await withEnvironment({ DEEPSEEK_API_KEY: 'test-key', DEEPSEEK_NATIVE_SEARCH: 'true' }, async () => {
+      const result = await executeWorkflowSpecialist('academic-search-agent', '检索一个非常冷门的主题', new AbortController().signal);
+      assert.match(result.output, /正常结束，但没有找到可核验/);
+      assert.equal(result.confidence, 0.2);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('workflow compilation rejects an unavailable service Agent before execution', async () => {
   await withEnvironment({}, async () => {
     const compiled = compileAgentWorkflow({

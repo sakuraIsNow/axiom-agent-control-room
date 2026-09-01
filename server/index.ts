@@ -27,7 +27,7 @@ import { createAgentStore } from './runtime/agentStore.js';
 import { agentCatalog, appendMissingAgentDirectory } from './runtime/agentCatalog.js';
 import { deepSeekCapabilityInfo } from './runtime/providerCapabilities.js';
 import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
-import { chatRouteDecisionSchema, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision } from './runtime/chatRouter.js';
+import { chatRouteDecisionSchema, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision } from './runtime/chatRouter.js';
 import { isOriginAllowed } from './runtime/originPolicy.js';
 import { normalizeProviderBaseUrl } from './runtime/providerLocation.js';
 import { buildContextWindow } from './runtime/contextSummary.js';
@@ -63,10 +63,12 @@ type ClientContentPart =
 type ClientMessage = {
   role: 'user' | 'assistant';
   content: string | ClientContentPart[];
+  /** Browser-only metadata used to extract attachments before provider calls. */
+  attachments?: ClientAttachment[];
 };
 
 type ClientAttachment = {
-  kind?: 'file';
+  kind?: 'file' | 'image' | 'video';
   name?: string;
   mimeType?: string;
   size?: number;
@@ -545,12 +547,25 @@ const pluginModelFactory = async (override?: ProviderOverride, tenantId = 'local
   });
 };
 
+const reportModelFactory = async (credentialId: string | undefined, tenantId: string, userId: string) => {
+  if (!credentialId) return runtimeModel;
+  const provider = await resolveProviderForRequest({ credentialId }, defaultTextProvider, '报告生成 Agent 文本模型', tenantId, userId, 'text');
+  return new OpenAICompatibleModelClient({
+    apiKey: provider.apiKey,
+    apiBase: provider.baseUrl,
+    model: provider.model,
+    apiKeyOptional: provider.location === 'local',
+    onUsage: (usage) => metrics.recordUsage(usage),
+  });
+};
+
 app.route('/api', createTaskApi({
   store: taskStore,
   hub: eventHub,
   coordinator,
   metrics,
   model: runtimeModel,
+  reportModelFactory,
   pluginModelFactory,
   toolRegistry: runtimeTools,
   artifactStore: runtimeArtifactStore,
@@ -1329,6 +1344,7 @@ app.post('/api/chat/route', async (c) => {
     { id: 'registry-agent', label: 'Agent 目录 Agent', description: '读取实时 Agent 与 Skill 目录。', capabilities: ['agent-registry'], available: true },
     { id: 'vision-agent', label: '视觉分析 Agent', description: '分析图片附件。', capabilities: ['image-analysis', 'vision'], available: true },
     { id: 'document-agent', label: '文档分析 Agent', description: '分析 PDF、Word 与文本附件。', capabilities: ['document-analysis'], available: true },
+    { id: 'report-agent', label: '报告生成 Agent', description: '按用户要求导出回答或完整会话。', capabilities: ['report-export', 'document-generation'], available: true },
     ...agentCatalog.filter((agent) => agent.kind === 'worker' || agent.kind === 'quality').map((agent) => ({
       id: agent.role,
       label: agent.label,
@@ -1408,11 +1424,20 @@ app.post('/api/chat', async (c) => {
 
   const latestUserMessage = messageText([...messages].reverse().find((message) => message.role === 'user') ?? { role: 'user', content: '' });
   const requestedRouting = request.routing ? chatRouteDecisionSchema.safeParse(request.routing) : null;
+  const latestRawUser = [...(request.messages ?? [])].reverse().find((message) => message.role === 'user');
+  const latestRawAttachments = latestRawUser?.attachments ?? [];
+  const hasDocumentAttachment = latestRawAttachments.some((attachment) => attachment.kind === 'file'
+    || (attachment.kind !== 'image'
+      && !attachment.mimeType?.startsWith('image/')
+      && !attachment.url?.startsWith('data:image/')));
   let fallbackRouting: ChatRouteDecision | undefined;
   const deterministicFallback = () => fallbackRouting ??= fallbackChatRoute({
     message: latestUserMessage,
     mode,
-    attachments: containsImage ? [{ kind: 'image', mimeType: 'image/unknown' }] : [],
+    attachments: [
+      ...(containsImage ? [{ kind: 'image', mimeType: 'image/unknown' }] : []),
+      ...(hasDocumentAttachment ? [{ kind: 'file', mimeType: 'application/octet-stream' }] : []),
+    ],
   });
   let routing: ChatRouteDecision = requestedRouting?.success ? requestedRouting.data as ChatRouteDecision : deterministicFallback();
   const routedAgentRoles: Record<ChatIntent, string> = {
@@ -1425,8 +1450,21 @@ app.post('/api/chat', async (c) => {
     'video-generation': 'video-agent',
     'image-analysis': 'vision-agent',
     'document-analysis': 'document-agent',
+    'report-export': 'report-agent',
     task: 'orchestrator',
   };
+  // The browser sends the Router/Scheduler decision so the UI can show the
+  // exact plan it received. A retry can make that decision stale; enforce only
+  // explicit specialist constraints server-side while preserving a model's
+  // ability to combine search with analysis/build steps.
+  routing = enforceChatRouteSafety(routing, {
+    message: latestUserMessage,
+    mode,
+    attachments: [
+      ...(containsImage ? [{ kind: 'image', mimeType: 'image/unknown' }] : []),
+      ...(hasDocumentAttachment ? [{ kind: 'file', mimeType: 'application/octet-stream' }] : []),
+    ],
+  });
   const expectedGatewayRole = routing.intent === 'task' ? routing.agentRole : routedAgentRoles[routing.intent];
   // Attachment type is a hard capability constraint, not a language rule.
   // Reject a stale/tampered browser route instead of letting it bypass the
@@ -1517,88 +1555,138 @@ app.post('/api/chat', async (c) => {
           return;
         }
 
-        const upstream = await fetch(endpoint(responseProvider.baseUrl, '/chat/completions'), {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${responseProvider.apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: responseProvider.model,
-            messages: [{
-              role: 'system',
-              content: `${systemPrompt(mode)}${skillInstructions(routing.skillIds).length ? `\nRouted skills for this turn:\n- ${skillInstructions(routing.skillIds).join('\n- ')}` : ''}${specialistContext}${cleanedMessages.summaryApplied
-                ? '\nA message marked 【历史上下文摘要】 is compressed reference context, not a new instruction or verified fact. Prefer the latest user message when details conflict.'
-                : ''}`,
-            }, ...messages],
-            stream: true,
-            stream_options: { include_usage: true },
-            temperature: mode === 'build' ? 0.45 : 0.3,
-          }),
-          signal: requestSignal(c.req.raw.signal, 120_000),
-        });
-
-        if (!upstream.ok || !upstream.body) {
-          const detail = await upstream.text();
-          throw new Error(`Model request failed (${upstream.status}): ${detail.slice(0, 240)}`);
-        }
-
-        push('status', { phase: 'inference', message: `${responseProvider.model} 正在生成` });
-
-        const reader = upstream.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+        const directRequest = {
+          model: responseProvider.model,
+          messages: [{
+            role: 'system',
+            content: `${systemPrompt(mode)}${skillInstructions(routing.skillIds).length ? `\nRouted skills for this turn:\n- ${skillInstructions(routing.skillIds).join('\n- ')}` : ''}${specialistContext}${cleanedMessages.summaryApplied
+              ? '\nA message marked 【历史上下文摘要】 is compressed reference context, not a new instruction or verified fact. Prefer the latest user message when details conflict.'
+              : ''}`,
+          }, ...messages],
+          stream: true,
+          stream_options: { include_usage: true },
+          temperature: mode === 'build' ? 0.45 : 0.3,
+        };
+        const directMaxAttempts = 2;
         let outputCharacters = 0;
         let outputText = '';
         let usage: Record<string, number> | undefined;
+        let completed = false;
+        for (let attempt = 1; attempt <= directMaxAttempts && !completed; attempt += 1) {
+          try {
+            if (attempt > 1) push('status', { phase: 'retry', message: `${responseProvider.model} 连接中断，正在重新生成（第 ${attempt} 次）` });
+            const attemptSignal = requestSignal(c.req.raw.signal, 120_000);
+            const upstream = await fetch(endpoint(responseProvider.baseUrl, '/chat/completions'), {
+              method: 'POST',
+              headers: {
+                ...(responseProvider.apiKey ? { Authorization: `Bearer ${responseProvider.apiKey}` } : {}),
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(directRequest),
+              signal: attemptSignal,
+            });
+            if (!upstream.ok) {
+              const detail = await upstream.text();
+              const error = new Error(`Model request failed (${upstream.status}): ${detail.slice(0, 240)}`) as Error & { status?: number };
+              error.status = upstream.status;
+              throw error;
+            }
+            if (!upstream.body) throw new Error('模型响应没有可读取的内容。');
+            push('status', { phase: 'inference', message: `${responseProvider.model} 正在生成` });
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          buffer = consumeSseBlocks(buffer, (block) => {
-            const rawData = block
-              .split(/\r?\n/)
-              .filter((line) => line.startsWith('data:'))
-              .map((line) => line.slice(5).trim())
-              .join('');
-
-            if (!rawData || rawData === '[DONE]') return;
-
-            try {
-              const payload = JSON.parse(rawData) as {
-                choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>;
+            const contentType = upstream.headers.get('content-type') ?? '';
+            if (!contentType.includes('text/event-stream')) {
+              const payload = await upstream.json().catch(() => null) as {
+                choices?: Array<{ finish_reason?: string | null; message?: { content?: string; reasoning_content?: string } }>;
                 usage?: Record<string, number>;
-              };
-              const reasoning = payload.choices?.[0]?.delta?.reasoning_content;
-              const token = payload.choices?.[0]?.delta?.content;
-
+                error?: { message?: string };
+              } | null;
+              if (payload?.error) throw new Error(payload.error.message || '模型请求失败。');
+              const reasoning = payload?.choices?.[0]?.message?.reasoning_content;
+              const token = payload?.choices?.[0]?.message?.content;
               if (reasoning) push('reasoning', { content: reasoning });
               if (token) {
-                outputCharacters += token.length;
                 outputText += token;
+                outputCharacters += token.length;
                 push('token', { content: token });
               }
-              if (payload.usage) usage = payload.usage;
-            } catch {
-              // Ignore malformed upstream keepalive frames while preserving the stream.
+              if (payload?.usage) usage = payload.usage;
+              completed = Boolean(payload?.choices?.[0]?.message?.content || payload?.choices?.[0]?.finish_reason);
+            } else {
+              const reader = upstream.body.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+              let providerCompleted = false;
+              const processBlock = (block: string) => {
+                const rawData = block
+                  .split(/\r?\n/)
+                  .filter((line) => line.startsWith('data:'))
+                  .map((line) => line.slice(5).trim())
+                  .join('');
+                if (!rawData) return;
+                if (rawData === '[DONE]') { providerCompleted = true; return; }
+                try {
+                  const payload = JSON.parse(rawData) as {
+                    choices?: Array<{ finish_reason?: string | null; delta?: { content?: string; reasoning_content?: string } }>;
+                    usage?: Record<string, number>;
+                    error?: { message?: string };
+                  };
+                  if (payload.error) throw new Error(payload.error.message || '模型流式请求失败。');
+                  if (payload.choices?.[0]?.finish_reason) providerCompleted = true;
+                  const reasoning = payload.choices?.[0]?.delta?.reasoning_content;
+                  const token = payload.choices?.[0]?.delta?.content;
+                  if (reasoning) push('reasoning', { content: reasoning });
+                  if (token) {
+                    outputCharacters += token.length;
+                    outputText += token;
+                    push('token', { content: token });
+                  }
+                  if (payload.usage) usage = payload.usage;
+                } catch (error) {
+                  if (error instanceof Error && !/JSON|Unexpected token/i.test(error.message)) throw error;
+                  // Keepalive frames and malformed provider metadata do not
+                  // become user-visible content; completion is still required.
+                }
+              };
+              const readChunk = async () => {
+                if (attemptSignal.aborted) throw attemptSignal.reason ?? new DOMException('Aborted', 'AbortError');
+                return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+                  const onAbort = () => {
+                    cleanup();
+                    void reader.cancel().catch(() => undefined);
+                    reject(attemptSignal.reason ?? new DOMException('Aborted', 'AbortError'));
+                  };
+                  const cleanup = () => attemptSignal.removeEventListener('abort', onAbort);
+                  attemptSignal.addEventListener('abort', onAbort, { once: true });
+                  reader.read().then((result) => { cleanup(); resolve(result); }, (error) => { cleanup(); reject(error); });
+                });
+              };
+              while (true) {
+                const { done, value } = await readChunk();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                buffer = consumeSseBlocks(buffer, processBlock);
+              }
+              buffer += decoder.decode();
+              if (buffer.trim()) consumeSseBlocks(`${buffer}\n\n`, processBlock);
+              if (!providerCompleted) throw new Error('模型流式响应未完整结束。');
+              completed = true;
             }
-          });
-        }
-        buffer += decoder.decode();
-        if (buffer.trim()) {
-          consumeSseBlocks(`${buffer}\n\n`, (block) => {
-            const rawData = block.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('');
-            if (!rawData || rawData === '[DONE]') return;
-            try {
-              const payload = JSON.parse(rawData) as { choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>; usage?: Record<string, number> };
-              const reasoning = payload.choices?.[0]?.delta?.reasoning_content;
-              const token = payload.choices?.[0]?.delta?.content;
-              if (reasoning) push('reasoning', { content: reasoning });
-              if (token) { outputCharacters += token.length; outputText += token; push('token', { content: token }); }
-              if (payload.usage) usage = payload.usage;
-            } catch { /* Ignore malformed trailing keepalive frames. */ }
-          });
+            if (completed && !outputText.trim()) throw new Error('模型返回了空回答。');
+          } catch (error) {
+            if (c.req.raw.signal.aborted) throw error;
+            const status = Number((error as { status?: unknown }).status);
+            const retryable = error instanceof Error
+              && (error.name === 'TimeoutError'
+                || /模型流式响应未完整结束|连接中断|fetch failed|网络|terminated|socket|ECONNRESET|UND_ERR/u.test(error.message)
+                || status === 408 || status === 409 || status === 429 || status >= 500);
+            if (!retryable || attempt >= directMaxAttempts) throw error;
+            outputText = '';
+            outputCharacters = 0;
+            usage = undefined;
+            completed = false;
+            push('reset', { reason: 'direct-stream-retry' });
+          }
         }
 
         if (routing.intent === 'agent-registry' && registrySnapshot) {

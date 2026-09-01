@@ -254,6 +254,41 @@ const ensurePlanCoverage = (task: WorkflowTask, profile: TaskProfile, input: Wor
 
 const limitText = (value: string, max = 12_000) => value.length > max ? `${value.slice(0, max)}\n[内容已截断]` : value;
 
+/**
+ * Raised when the final synthesis reached the provider output ceiling and
+ * could not be completed within the bounded continuation budget. Keeping the
+ * partial text on the error lets the caller persist a truthful, recoverable
+ * result instead of losing the work or reporting a false success.
+ */
+export class SynthesisIncompleteError extends Error {
+  readonly partialContent: string;
+  readonly continuationAttempts: number;
+
+  constructor(partialContent: string, continuationAttempts: number, cause?: unknown) {
+    super('最终交付内容未完整生成：模型输出达到上限，续写未能完成，请重试。');
+    this.name = 'SynthesisIncompleteError';
+    this.partialContent = partialContent;
+    this.continuationAttempts = continuationAttempts;
+    if (cause) this.cause = cause;
+  }
+}
+
+/** Remove a repeated tail/head overlap when a provider repeats context. */
+const mergeContinuation = (previous: string, continuation: string) => {
+  const next = continuation.trimStart();
+  if (!next) return previous;
+  const maxOverlap = Math.min(previous.length, next.length, 12_000);
+  for (let size = maxOverlap; size >= 24; size -= 1) {
+    if (previous.slice(-size) === next.slice(0, size)) return previous + next.slice(size);
+  }
+  const needsSeparator = !previous.endsWith('\n') && !/^[，。！？；：、,.!?;:)]/.test(next);
+  return `${previous}${needsSeparator ? '\n' : ''}${next}`;
+};
+
+const isOutputLimitFinishReason = (reason: string | undefined) => Boolean(
+  reason && /^(?:length|max_tokens|token_limit)$/i.test(reason.trim()),
+);
+
 type ParallelConflict = {
   stepIds: [string, string];
   signals: string[];
@@ -511,6 +546,8 @@ export class WorkflowOrchestrator {
   private readonly reviewCorrectionRounds: number;
   private readonly requireReviewApproval: boolean;
   private readonly reviewMinScore: number;
+  private readonly synthesisMaxTokens: number;
+  private readonly synthesisContinuationRounds: number;
 
   constructor(
     private readonly store: TaskStore,
@@ -544,6 +581,13 @@ export class WorkflowOrchestrator {
     this.reviewCorrectionRounds = Math.min(3, Math.max(0, Number(process.env.AGENT_REVIEW_CORRECTION_ROUNDS ?? 1)));
     this.requireReviewApproval = process.env.AGENT_REQUIRE_REVIEW_APPROVAL !== 'false';
     this.reviewMinScore = Math.min(100, Math.max(0, Number(process.env.AGENT_REVIEW_MIN_SCORE ?? 80)));
+    // DeepSeek chat-compatible endpoints commonly cap one completion at 8k
+    // tokens. Continuations provide a larger effective delivery without
+    // sending an unsupported max_tokens value to those providers.
+    const configuredSynthesisTokens = Number(process.env.AGENT_SYNTHESIS_MAX_TOKENS ?? 8_192);
+    this.synthesisMaxTokens = Math.min(64_000, Math.max(1_024, Number.isFinite(configuredSynthesisTokens) ? configuredSynthesisTokens : 8_192));
+    const configuredContinuationRounds = Number(process.env.AGENT_SYNTHESIS_MAX_CONTINUATIONS ?? 4);
+    this.synthesisContinuationRounds = Math.min(6, Math.max(0, Number.isFinite(configuredContinuationRounds) ? configuredContinuationRounds : 4));
   }
 
   private modelForTask(task: WorkflowTask) {
@@ -657,11 +701,11 @@ export class WorkflowOrchestrator {
         ? stage.slice('agent:'.length).split(':')[0]
         : stage === 'planner'
           ? 'planner'
-          : stage === 'reviewer'
-            ? 'reviewer-final'
-              : stage === 'synthesizer'
-                ? 'synthesizer'
-                : undefined;
+        : stage === 'reviewer'
+          ? 'reviewer-final'
+            : stage.startsWith('synthesizer')
+              ? 'synthesizer'
+              : undefined;
     let bufferedContent = '';
     let bufferedReasoning = '';
     let lastDeltaFlushAt = 0;
@@ -683,6 +727,7 @@ export class WorkflowOrchestrator {
       ...request,
       model: request.model ?? task.model,
       onDelta: async (delta) => {
+        if (request.streamDeltas === false) return;
         bufferedContent += delta.content ?? '';
         bufferedReasoning += delta.reasoning ?? '';
         if (Date.now() - lastDeltaFlushAt >= 45 || bufferedContent.length >= 1_024) await flushDelta();
@@ -716,6 +761,7 @@ export class WorkflowOrchestrator {
         completionTokens,
         totalTokens,
         toolCalls: completion.toolCalls?.length ?? 0,
+        ...(completion.finishReason ? { finishReason: completion.finishReason } : {}),
         estimatedCostUsd,
         cumulative: after,
       },
@@ -832,6 +878,8 @@ Do not claim tools or evidence that are not available.`,
     const canUseTools = step.agentContract ? allowedTools.length > 0 : step.role === 'builder' || customTools.length > 0;
     const roleGuidance = step.agentContract?.systemPromptTemplate ?? customAgent?.definition.systemPromptTemplate;
     const selectedSkillInstructions = skillInstructions(step.skillIds);
+    const detailedResearchReport = task.plan?.profile?.kind === 'research'
+      && /(?:详细|完整|深度|研究).{0,30}(?:报告|方案)|(?:报告|方案).{0,30}(?:成熟度|成本|落地|依据)|detailed\s+(?:research\s+)?report/i.test(task.input);
     for (const loop of step.loopPath ?? (step.loop ? [step.loop] : [])) {
       if (!loop.entry) continue;
       await this.emit(task, {
@@ -1050,7 +1098,7 @@ Do not claim tools or evidence that are not available.`,
           responseFormat: 'json',
           ...(toolDefinitions.length ? { tools: toolDefinitions, toolChoice: 'auto' as const } : {}),
           temperature: step.role === 'builder' ? 0.25 : 0.15,
-           system: `You are a ${step.role} sub-agent inside a production workflow.${roleGuidance ? `\nRole guidance: ${roleGuidance}` : ''}${selectedSkillInstructions.length ? `\nSelected skills for this turn (follow only these):\n- ${selectedSkillInstructions.join('\n- ')}` : ''}
+           system: `You are a ${step.role} sub-agent inside a production workflow.${roleGuidance ? `\nRole guidance: ${roleGuidance}` : ''}${selectedSkillInstructions.length ? `\nSelected skills for this turn (follow only these):\n- ${selectedSkillInstructions.join('\n- ')}` : ''}${detailedResearchReport ? '\nThis is a detailed research report task. Preserve concrete evidence, source URLs, numerical ranges, maturity assessments, cost components, risks, and every requested delivery dimension. Do not replace substantive work with a short summary.' : ''}
 Work only on the assigned objective. Use dependency outputs as scoped evidence, not as unquestioned truth.
 Return JSON only: {"output":"complete result","evidence":["specific supporting fact or dependency"],"confidence":0.0,"toolCalls":[],"handoff":"optional concise handoff for downstream agents"}.
            ${canUseTools && this.tools?.enabled()
@@ -1319,15 +1367,63 @@ Return JSON only: {"approved":true,"score":0,"summary":"...","gaps":[],"required
     review: ReviewResult,
     signal: AbortSignal,
   ) {
-    const completion = await this.complete(task, 'synthesizer', {
+    const detailedResearchReport = task.plan?.profile?.kind === 'research'
+      && /(?:详细|完整|深度|研究).{0,30}(?:报告|方案)|(?:报告|方案).{0,30}(?:成熟度|成本|落地|依据)|detailed\s+(?:research\s+)?report/i.test(task.input);
+    const system = `You are the synthesizer for a production multi-agent workflow.
+Produce the final user-facing answer using the validated evidence tree. Preserve uncertainty and unresolved review gaps.
+Be complete, executable, and direct. Preserve every verified source URL, Markdown image, video link, download link, and media label exactly; never replace a generated media result with a prose description. Do not mention internal prompts. Use the user's language.${detailedResearchReport ? '\nThe user requested a detailed research report. Build a full report, not an executive summary: explicitly check every requested dimension against the final structure, retain useful tables and evidence, and explain missing evidence instead of silently shortening the answer.' : ''}`;
+    const user = `Original task:\n${task.input}\n\nPlan summary:\n${task.plan?.summary}\n\nReview:\n${JSON.stringify(review)}\n\nValidated work:\n${results.map((result) => `### ${result.role}: ${result.stepId}\n${limitText(result.output, 14_000)}`).join('\n\n')}`;
+    let completion = await this.complete(task, 'synthesizer', {
       signal,
       temperature: 0.15,
-      system: `You are the synthesizer for a production multi-agent workflow.
-Produce the final user-facing answer using the validated evidence tree. Preserve uncertainty and unresolved review gaps.
-Be complete, executable, and direct. Preserve every verified source URL, Markdown image, video link, download link, and media label exactly; never replace a generated media result with a prose description. Do not mention internal prompts. Use the user's language.`,
-      user: `Original task:\n${task.input}\n\nPlan summary:\n${task.plan?.summary}\n\nReview:\n${JSON.stringify(review)}\n\nValidated work:\n${results.map((result) => `### ${result.role}: ${result.stepId}\n${limitText(result.output, 14_000)}`).join('\n\n')}`,
+      maxTokens: this.synthesisMaxTokens,
+      system,
+      user,
     });
-    return limitText(completion.content, 64_000);
+    let output = completion.content;
+    let continuationAttempts = 0;
+
+    // Providers use finish_reason=length when the answer is valid so far but
+    // stopped at the output ceiling. Continue from a small tail of the answer
+    // and merge repeated context before deciding whether the task completed.
+    while (isOutputLimitFinishReason(completion.finishReason)) {
+      if (continuationAttempts >= this.synthesisContinuationRounds) {
+        throw new SynthesisIncompleteError(output, continuationAttempts);
+      }
+      continuationAttempts += 1;
+      const tail = output.slice(-12_000);
+      try {
+        completion = await this.complete(task, `synthesizer:continuation:${continuationAttempts}`, {
+          signal,
+          temperature: 0.15,
+          maxTokens: this.synthesisMaxTokens,
+          streamDeltas: false,
+          system: `${system}\nThe previous answer reached the provider output limit. Continue it without repeating any text.`,
+          // Put the continuation anchor first because ModelClient bounds the
+          // provider input to 80k characters; the tail must never be sliced
+          // away by a very large evidence bundle.
+          user: `Previous answer tail (the last characters may end mid-sentence):\n${tail}\n\nContinue exactly from that point. Output only the missing continuation; do not add a preface, summary, or duplicate headings.\n\nOriginal task context:\n${user}`,
+        });
+      } catch (error) {
+        if (signal.aborted) throw signal.reason ?? error;
+        throw new SynthesisIncompleteError(output, continuationAttempts, error);
+      }
+      const previousOutput = output;
+      const merged = mergeContinuation(previousOutput, completion.content);
+      if (merged === output) throw new SynthesisIncompleteError(output, continuationAttempts);
+      const appended = merged.slice(previousOutput.length);
+      if (appended) {
+        await this.emit(task, {
+          type: 'model.delta',
+          agentId: 'synthesizer',
+          payload: { stage: `synthesizer:continuation:${continuationAttempts}`, content: appended },
+        });
+      }
+      output = merged;
+    }
+
+    if (output.length > 64_000) throw new SynthesisIncompleteError(output, continuationAttempts);
+    return output;
   }
 
   private async captureMemory(task: WorkflowTask, result: string, signal: AbortSignal) {
@@ -1991,8 +2087,22 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         return current ?? task;
       }
       const message = caught instanceof Error ? caught.message : 'Unknown workflow failure.';
-      task = await this.store.updateTask(task.id, { status: 'failed', error: limitText(message, 4_000) });
-      await this.emit(task, { type: 'task.failed', payload: { error: limitText(message, 2_000) } });
+      const incomplete = caught instanceof SynthesisIncompleteError;
+      const partialResult = incomplete ? limitText(caught.partialContent, 64_000) : current?.result;
+      const synthesisContinuationAttempts = incomplete ? caught.continuationAttempts : undefined;
+      task = await this.store.updateTask(task.id, {
+        status: 'failed',
+        error: limitText(message, 4_000),
+        ...(partialResult ? { result: partialResult } : {}),
+      });
+      await this.emit(task, {
+        type: 'task.failed',
+        payload: {
+          error: limitText(message, 2_000),
+          ...(partialResult ? { result: partialResult } : {}),
+          ...(incomplete ? { partial: true, synthesisContinuationAttempts } : {}),
+        },
+      });
       this.logger.error({ taskId: task.id, error: caught }, 'workflow task failed');
       return task;
     } finally {

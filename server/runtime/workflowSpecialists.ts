@@ -136,6 +136,7 @@ const executeSearch = async (agentId: WorkflowSpecialistAgent['id'], prompt: str
   });
   if (!response.ok) throw new Error(`搜索 Agent 请求失败 (${response.status})。`);
   let text = '';
+  let providerCompleted = false;
   if ((response.headers.get('content-type') ?? '').includes('text/event-stream') && response.body) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -147,7 +148,7 @@ const executeSearch = async (agentId: WorkflowSpecialistAgent['id'], prompt: str
       if (!event || !rawData) return;
       const payload = JSON.parse(rawData) as { delta?: string; error?: { message?: string } };
       if (event === 'response.output_text.delta' && payload.delta) text += payload.delta;
-      if (event === 'response.completed') completed = true;
+      if (event === 'response.completed') { completed = true; providerCompleted = true; }
       if (event === 'response.failed') throw new Error(payload.error?.message || '搜索 Agent 请求失败。');
     };
     while (true) {
@@ -161,8 +162,17 @@ const executeSearch = async (agentId: WorkflowSpecialistAgent['id'], prompt: str
     if (!completed) throw new Error('搜索 Agent 流式响应未完整结束。');
   } else {
     text = outputText(await response.json().catch(() => null));
+    providerCompleted = true;
   }
-  if (!text.trim()) throw new Error('搜索 Agent 没有返回可用结果。');
+  if (!text.trim() && providerCompleted) {
+    return {
+      output: '本轮检索已正常结束，但没有找到可核验的结果。建议下游 Agent 缩小主题、补充英文关键词或调整时间范围；不得把零结果解释为已验证的否定结论。',
+      evidence: [],
+      confidence: 0.2,
+      model: provider.model,
+    };
+  }
+  if (!text.trim()) throw new Error('搜索 Agent 返回了空响应，无法确认检索是否完成。');
   return { output: text, evidence: ['DeepSeek web_search 检索结果'], confidence: 0.82, model: provider.model };
 };
 

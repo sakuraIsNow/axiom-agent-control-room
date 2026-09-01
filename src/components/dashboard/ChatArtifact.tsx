@@ -58,6 +58,11 @@ export function ChatArtifact({ kind, content, name = '对话内容' }: { kind: C
 
 export function ChatFileArtifact({ attachment }: { attachment: FileAttachment }) {
   const kind = artifactKindForFile(attachment.name, attachment.mimeType);
+  if (attachment.dataUrl) return <a className="dash-chat-file-attachment downloadable" href={attachment.dataUrl} download={attachment.name}>
+    <FileText size={14} />
+    <span><strong>{attachment.name}</strong><small>{attachment.size > 0 ? `${Math.max(1, Math.round(attachment.size / 1024))} KB` : '报告文件'}</small></span>
+    <Download size={14} />
+  </a>;
   if (!kind || !attachment.text) return <span className="dash-chat-file-attachment"><FileText size={14} /><span>{attachment.name}</span></span>;
   return <ChatArtifact kind={kind} content={attachment.text} name={attachment.name} />;
 }

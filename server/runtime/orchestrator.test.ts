@@ -87,6 +87,37 @@ class FakeModel implements ModelClient {
   }
 }
 
+class SynthesisContinuationModel extends FakeModel {
+  synthesisCalls = 0;
+
+  async complete(request: ModelCompletionRequest) {
+    if (!request.system.includes('synthesizer')) return super.complete(request);
+    this.synthesisCalls += 1;
+    const content = this.synthesisCalls === 1
+      ? '第一段交付内容在这里，已经完成了前置验证和范围确认，但最后一句尚未结束'
+      : '第一段交付内容在这里，已经完成了前置验证和范围确认，但最后一句尚未结束，续写已经接上并完整结束。';
+    await request.onDelta?.({ content });
+    return {
+      content,
+      finishReason: this.synthesisCalls === 1 ? 'length' : 'stop',
+      attempts: 1,
+      durationMs: 1,
+    };
+  }
+}
+
+class AlwaysTruncatedSynthesisModel extends FakeModel {
+  synthesisCalls = 0;
+
+  async complete(request: ModelCompletionRequest) {
+    if (!request.system.includes('synthesizer')) return super.complete(request);
+    this.synthesisCalls += 1;
+    const content = this.synthesisCalls === 1 ? '已生成但被截断的部分' : '仍然没有结束';
+    await request.onDelta?.({ content });
+    return { content, finishReason: 'length', attempts: 1, durationMs: 1 };
+  }
+}
+
 class MinimalPlanModel extends FakeModel {
   async complete(request: ModelCompletionRequest) {
     if (!request.system.includes('planner in a production')) return super.complete(request);
@@ -603,6 +634,51 @@ describe('WorkflowOrchestrator', () => {
       assert.ok(events.some((event) => event.type === 'loop.completed'));
       assert.equal(events.at(-1)?.type, 'task.completed');
       assert.ok(events.filter((event) => event.type === 'review.completed').length === 2);
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('continues a synthesized answer after the provider reports finish_reason=length', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await createTask(store, 'synthesis continuation');
+      const model = new SynthesisContinuationModel();
+      const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }))
+        .run(task, new AbortController().signal);
+      assert.equal(result.status, 'completed', result.error);
+      assert.equal(model.synthesisCalls, 2);
+      assert.equal(result.result, '第一段交付内容在这里，已经完成了前置验证和范围确认，但最后一句尚未结束，续写已经接上并完整结束。');
+      const events = await store.getEvents(task.id);
+      const synthesisEvents = events.filter((event) => event.type === 'model.completed' && String(event.payload.stage).startsWith('synthesizer'));
+      assert.equal(synthesisEvents[0]?.payload.finishReason, 'length');
+      assert.equal(synthesisEvents[1]?.payload.finishReason, 'stop');
+      const continuationDelta = events.find((event) => event.type === 'model.delta' && event.payload.stage === 'synthesizer:continuation:1');
+      assert.equal(continuationDelta?.payload.content, '，续写已经接上并完整结束。');
+      assert.equal(events.at(-1)?.type, 'task.completed');
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('keeps partial synthesis visible and fails transparently when continuations are exhausted', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await createTask(store, 'synthesis exhaustion');
+      const model = new AlwaysTruncatedSynthesisModel();
+      const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }))
+        .run(task, new AbortController().signal);
+      assert.equal(result.status, 'failed');
+      assert.match(result.error ?? '', /输出达到上限/);
+      assert.ok(result.result?.includes('已生成但被截断的部分'));
+      const events = await store.getEvents(task.id);
+      const failed = events.at(-1);
+      assert.equal(failed?.type, 'task.failed');
+      assert.equal(failed?.payload.partial, true);
+      assert.equal(typeof failed?.payload.result, 'string');
+      assert.equal(events.some((event) => event.type === 'task.completed'), false);
     } finally {
       await store.close();
     }

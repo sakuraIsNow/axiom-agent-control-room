@@ -11,6 +11,7 @@ const checks = [
   ['生产构建', 'build'],
   ['运行时 SSE 与 Artifact', 'qa:runtime'],
   ['聊天与多模态', 'qa:chat'],
+  ['直达聊天流式重试', 'qa:direct-stream'],
   ['原生搜索 Agent', 'qa:search-agent'],
   ['会话路由', 'qa:session-routing'],
   ['会话持久化', 'qa:session-persistence'],

@@ -25,6 +25,7 @@ import { workflowSpecialistCatalog } from './workflowSpecialists.js';
 import { runtimeSkillCatalog } from './skillCatalog.js';
 import { verifyWebhookRequest } from './webhookSecurity.js';
 import { chatRouteDecisionSchema, workflowPlanFromChatRoute } from './chatRouter.js';
+import { generateReport } from './reportExport.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -83,6 +84,15 @@ const createTaskSchema = z.object({
   /** Validated output of the per-turn Router and Scheduler Agents. */
   routing: chatRouteDecisionSchema.optional(),
 });
+
+const reportExportSchema = z.object({
+  sessionId: z.string().min(1).max(160),
+  scope: z.enum(['last-answer', 'conversation']),
+  format: z.enum(['md', 'docx', 'tex', 'pdf']),
+  instruction: z.string().min(1).max(8_000),
+  title: z.string().min(1).max(120).optional(),
+  modelCredentialId: z.string().uuid().optional(),
+}).strict();
 
 const templateDefinitionSchema = z.object({
   mode: z.enum(['analyze', 'build', 'decide']),
@@ -550,6 +560,7 @@ export const createTaskApi = (dependencies: {
   artifactStore?: import('./artifactStore.js').ArtifactStore | null;
   artifactCatalog?: ArtifactCatalog | null;
   model?: OpenAICompatibleModelClient;
+  reportModelFactory?: (credentialId: string | undefined, tenantId: string, userId: string) => ModelClient | Promise<ModelClient>;
   pluginModelFactory?: (provider?: z.infer<typeof pluginAgentProviderSchema>, tenantId?: string, userId?: string) => ModelClient | Promise<ModelClient>;
   templates?: TemplateStore;
   plugins?: PluginStore;
@@ -1203,7 +1214,7 @@ export const createTaskApi = (dependencies: {
         mode: plugin.definition.mode,
         model: plugin.definition.model,
         policy: parsed.data.policy,
-      }, principal.tenantId, principal.userId, { source: 'plugin', pluginId: plugin.id, pluginVersion: plugin.version }, undefined, templateAccess(principal));
+      }, principal.tenantId, principal.userId, { source: 'plugin', pluginId: plugin.id, pluginVersion: plugin.version }, c.req.header('idempotency-key'), templateAccess(principal));
       return c.json({ ...result, pluginId: plugin.id, pluginVersion: plugin.version }, 202);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Plugin run failed.';
@@ -2031,6 +2042,43 @@ export const createTaskApi = (dependencies: {
       deletedSessionIds: deletedIds,
       persistence: process.env.DATABASE_URL ? 'postgresql' : 'sqlite',
     });
+  });
+
+  api.post('/reports/export', async (c) => {
+    const parsed = reportExportSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '报告导出参数不完整或格式不受支持。', details: parsed.error.flatten() }, 400);
+    const principal = identity(c.req.raw.headers);
+    const session = (await store.listSessions(principal.tenantId, principal.userId, 100))
+      .find((candidate) => candidate.id === parsed.data.sessionId);
+    if (!session) return c.json({ error: '会话不存在，或当前用户无权导出该会话。' }, 404);
+    let reportModel: ModelClient | undefined;
+    try {
+      reportModel = dependencies.reportModelFactory
+        ? await dependencies.reportModelFactory(parsed.data.modelCredentialId, principal.tenantId, principal.userId)
+        : model;
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '报告生成模型配置不可用。' }, 400);
+    }
+    if (!reportModel) return c.json({ error: '报告生成 Agent 的文本模型尚未配置。' }, 503);
+    try {
+      const signal = AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(240_000)]);
+      const report = await generateReport(reportModel, session, parsed.data, signal);
+      const asciiName = `axiom-report.${parsed.data.format}`;
+      return new Response(new Uint8Array(report.bytes), {
+        status: 200,
+        headers: {
+          'Content-Type': report.mimeType,
+          'Content-Length': String(report.bytes.byteLength),
+          'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(report.fileName)}`,
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'X-Axiom-Report-Agent': 'report-agent',
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '报告生成失败。';
+      return c.json({ error: message }, /没有可导出|还没有可导出/.test(message) ? 409 : 502);
+    }
   });
 
   api.put('/sessions/:sessionId', async (c) => {

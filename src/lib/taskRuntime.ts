@@ -9,13 +9,18 @@ export async function createWorkflowTask(input: {
   mode: AgentMode;
   templateId?: string;
   modelCredentialId?: string;
+  /** Stable per-turn key so a browser/network retry cannot create a duplicate task. */
+  idempotencyKey?: string;
   signal: AbortSignal;
   policy?: Partial<ExecutionPolicy>;
   routing?: ChatRouteDecision;
 }) {
   const response = await fetch('/api/tasks', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(input.idempotencyKey?.trim() ? { 'Idempotency-Key': input.idempotencyKey.trim().slice(0, 160) } : {}),
+    },
     body: JSON.stringify({
       sessionId: input.sessionId,
       title: input.title,

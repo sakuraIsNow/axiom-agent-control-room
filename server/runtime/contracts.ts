@@ -37,6 +37,11 @@ export type TurnRoutingDecision = {
   candidateSkillIds: string[];
   confidence: number;
   rationale: string;
+  reportExport?: {
+    scope: 'last-answer' | 'conversation';
+    format: 'md' | 'docx' | 'tex' | 'pdf';
+    title?: string;
+  };
 };
 
 export type TurnSchedulingStep = {

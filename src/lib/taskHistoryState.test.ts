@@ -28,6 +28,17 @@ test('only executable task states restore a pending assistant response', () => {
   }
 });
 
+test('failed tasks keep a durable partial result visible in conversation history', () => {
+  const failed = task('failed');
+  failed.result = '已生成的前半部分';
+  failed.error = '最终交付内容未完整生成：模型输出达到上限，续写未能完成，请重试。';
+  const state = taskHistoryState(failed);
+  assert.equal(state.pending, false);
+  assert.match(state.content, /已生成的前半部分/);
+  assert.match(state.content, /未完整结束/);
+  assert.match(state.content, /输出达到上限/);
+});
+
 test('a review gate is presented as waiting for confirmation instead of execution', () => {
   const waiting = task('waiting_for_human');
   waiting.review = { approved: false, score: 75, summary: '证据不足', gaps: [], requiredCorrections: [] };

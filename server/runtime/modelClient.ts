@@ -9,6 +9,8 @@ export type ModelCompletionRequest = {
   responseFormat?: 'text' | 'json';
   tools?: ModelToolDefinition[];
   toolChoice?: 'auto' | 'none' | 'required';
+  /** Internal runtime control for continuations that must be de-duplicated before streaming. */
+  streamDeltas?: boolean;
   signal: AbortSignal;
   onDelta?: (delta: { content?: string; reasoning?: string }) => void | Promise<void>;
   onRetry?: (nextAttempt: number) => void | Promise<void>;
@@ -34,6 +36,8 @@ export type ModelCompletion = {
   reasoning?: string;
   usage?: Record<string, number>;
   toolCalls?: ModelToolCall[];
+  /** Provider termination reason (for example `stop` or `length`). */
+  finishReason?: string;
   attempts: number;
   durationMs: number;
 };
@@ -141,6 +145,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
         let content = '';
         let reasoning = '';
         let usage: Record<string, number> | undefined;
+        let finishReason: string | undefined;
         const streamedToolCalls = new Map<number, { id?: string; name: string; arguments: string }>();
         if (contentType.includes('text/event-stream') && response.body) {
           const reader = response.body.getReader();
@@ -181,7 +186,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
                 .join('');
               if (!rawData || rawData === '[DONE]') continue;
               const payload = JSON.parse(rawData) as {
-                choices?: Array<{ delta?: {
+                choices?: Array<{ finish_reason?: string | null; delta?: {
                   content?: string;
                   reasoning_content?: string;
                   tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>;
@@ -194,6 +199,8 @@ export class OpenAICompatibleModelClient implements ModelClient {
                 error.status = response.status;
                 throw error;
               }
+              const providerFinishReason = payload.choices?.[0]?.finish_reason;
+              if (providerFinishReason) finishReason = providerFinishReason;
               const delta = payload.choices?.[0]?.delta;
               if (delta?.content) {
                 content += delta.content;
@@ -226,7 +233,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
                 .join('');
               if (!rawData || rawData === '[DONE]') continue;
               const payload = JSON.parse(rawData) as {
-                choices?: Array<{ delta?: {
+                choices?: Array<{ finish_reason?: string | null; delta?: {
                   content?: string;
                   reasoning_content?: string;
                   tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>;
@@ -236,6 +243,8 @@ export class OpenAICompatibleModelClient implements ModelClient {
               if ((payload as { error?: { message?: string } }).error) {
                 throw new Error((payload as { error?: { message?: string } }).error?.message ?? 'Model stream failed.');
               }
+              const providerFinishReason = payload.choices?.[0]?.finish_reason;
+              if (providerFinishReason) finishReason = providerFinishReason;
               const delta = payload.choices?.[0]?.delta;
               if (delta?.content) { content += delta.content; await request.onDelta?.({ content: delta.content }); }
               if (delta?.reasoning_content) { reasoning += delta.reasoning_content; await request.onDelta?.({ reasoning: delta.reasoning_content }); }
@@ -249,7 +258,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
           }
         } else {
           const payload = await response.json().catch(() => null) as {
-            choices?: Array<{ message?: {
+            choices?: Array<{ finish_reason?: string | null; message?: {
               content?: string;
               reasoning_content?: string;
               tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
@@ -257,6 +266,8 @@ export class OpenAICompatibleModelClient implements ModelClient {
             usage?: Record<string, number>;
             error?: { message?: string };
           } | null;
+          const providerFinishReason = payload?.choices?.[0]?.finish_reason;
+          if (providerFinishReason) finishReason = providerFinishReason;
           if (payload?.choices?.[0]?.message?.content) {
             content = payload.choices[0].message.content;
             reasoning = payload.choices[0].message.reasoning_content ?? '';
@@ -302,6 +313,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
           reasoning: reasoning || undefined,
           usage,
           toolCalls: toolCalls.length ? toolCalls : undefined,
+          finishReason,
           attempts: attempt,
           durationMs: Date.now() - startedAt,
         };
