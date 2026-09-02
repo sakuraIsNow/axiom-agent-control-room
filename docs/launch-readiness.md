@@ -10,7 +10,7 @@
 
 ## 最新本机验证（2026-09-02）
 
-在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1290.18 RPS / P95 11.29ms`、Readiness `1350.02 RPS / P95 7.86ms`、运行观测 `1412.09 RPS / P95 8.87ms`、任务列表 `1918.68 RPS / P95 7.03ms`。标准门禁的单元测试为 `320/320`；本次 `npm run qa:all` 结果为 `24 passed / 0 failed / 4 skipped`。跳过项分别是未配置正式 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令。原生搜索、会话路由、本轮复杂 Runtime、Checkpoint、持久摘要、运行观测告警和视觉回归均通过；复杂 Runtime 产生 800 个连续事件、717 个可见流式增量和 24,686 Token，并正常交付 Artifact。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
+在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1290.18 RPS / P95 11.29ms`、Readiness `1350.02 RPS / P95 7.86ms`、运行观测 `1412.09 RPS / P95 8.87ms`、任务列表 `1918.68 RPS / P95 7.03ms`。标准门禁的单元测试为 `320/320`；本次 `npm run qa:all` 结果为 `24 passed / 0 failed / 4 skipped`。跳过项分别是未配置正式 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令。原生搜索、会话路由、本轮复杂 Runtime、Checkpoint、持久摘要、运行观测告警和视觉回归均通过；本次复杂 Runtime 产生 673 个连续事件、579 个可见流式增量和 20,906 Token，并正常交付 Artifact。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 
