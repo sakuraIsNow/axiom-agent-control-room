@@ -359,6 +359,11 @@ const noteSchema = z.object({
   message: z.string().min(1).max(8_000),
 });
 
+const guidanceSchema = z.object({
+  message: z.string().min(1).max(8_000),
+  behavior: z.enum(['continue', 'replan']).default('continue'),
+}).strict();
+
 const memoryAgentScopeSchema = z.object({
   agentId: z.string().min(1).max(160),
   sessionId: z.string().min(1).max(160).optional(),
@@ -2468,6 +2473,74 @@ export const createTaskApi = (dependencies: {
     hub.publish(event);
     coordinator.nudge();
     return c.json({ note: event, taskId }, 202);
+  });
+
+  api.post('/tasks/:taskId/guidance', async (c) => {
+    const taskId = c.req.param('taskId');
+    const principal = identity(c.req.raw.headers);
+    const task = await store.getTask(taskId, principal.tenantId);
+    if (!task) return c.json({ error: 'Task not found.' }, 404);
+    if (principal.role !== 'owner' && principal.role !== 'admin' && task.userId !== principal.userId) {
+      return c.json({ error: '只有任务创建者或租户管理员可以追加执行要求。' }, 403);
+    }
+    if (terminalStatuses.has(task.status)) return c.json({ error: '任务已经结束，无法再追加执行要求。' }, 409);
+    const parsed = guidanceSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '请输入有效的补充要求。' }, 400);
+
+    const guidanceId = randomUUID();
+    const message = parsed.data.message.trim();
+    const behavior = parsed.data.behavior;
+    const delegated = await harnessBridge?.steer(task.id, behavior === 'replan' ? `请重新规划当前任务，并应用以下要求：${message}` : message);
+    if (delegated && !delegated.accepted) {
+      return c.json({
+        error: delegated.reason || '外部 Harness 未接受实时引导。',
+        capabilities: delegated.capabilities,
+        status: 'unavailable',
+      }, harnessCommandFailureStatus(delegated));
+    }
+
+    const delivery = delegated ? 'external-harness' : 'builtin-next-safe-point';
+    const accepted = await store.appendEvent(task, {
+      type: 'human.guidance_accepted',
+      payload: { guidanceId, message, behavior, author: principal.userId, delivery },
+    });
+    hub.publish(accepted);
+
+    if (delegated) {
+      const applied = await store.appendEvent(task, {
+        type: 'human.guidance_applied',
+        payload: {
+          guidanceId,
+          acceptedSequence: accepted.sequence,
+          behavior,
+          delivery,
+          applicationPoint: 'external-harness-control-plane',
+        },
+      });
+      hub.publish(applied);
+      return c.json({ taskId, guidanceId, status: 'applied', delivery, accepted, applied }, 202);
+    }
+
+    if (behavior === 'replan') {
+      if (task.status === 'running' || task.status === 'reviewing' || task.status === 'planning') coordinator.abort(task.id);
+      const replanned = await store.updateTask(task.id, {
+        status: 'queued',
+        plan: null,
+        planVersion: (task.planVersion ?? 0) + 1,
+        review: null,
+        result: null,
+        error: null,
+        cancelRequested: false,
+      });
+      const event = await store.appendEvent(replanned, {
+        type: 'plan.replanned',
+        agentId: 'planner',
+        payload: { guidanceId, instruction: message, preserveCompleted: true, requestedBy: principal.userId },
+      });
+      hub.publish(event);
+    }
+    coordinator.nudge();
+    return c.json({ taskId, guidanceId, status: 'accepted', delivery, accepted }, 202);
   });
 
   api.post('/tasks/:taskId/pause', async (c) => {

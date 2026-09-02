@@ -666,3 +666,21 @@ npm run qa:search-agent
 2. [ ] 日程健康回顾 Agent：按运行历史识别长期失败、成本异常、结果质量下降和不再需要的日程，只给出可确认的调整建议，不自行改频率或删除日程。
 3. [ ] 月/周日历视图与冲突提示：在不暴露 cron 的前提下展示未来执行窗口，并提示大量高成本日程在同一时间集中触发的容量风险。
 4. [ ] 运行结果联动：允许把一个日程的已验证 Artifact 作为后续日程的输入，同时保留来源、版本和租户边界，形成可审计的周期性 Agent 流程。
+
+### 2026-09-02 执行中实时引导与路由交互
+
+- [x] 新增统一 `POST /api/tasks/:taskId/guidance`：校验租户、任务创建者和终态边界，区分继续执行与显式重规划；旧 `/notes` 继续服务审批备注，不混用语义。
+- [x] 新增 `human.guidance_accepted` / `human.guidance_applied` 持久事件。Builtin Runtime 只在下一个安全执行点消费一次，并记录应用阶段、目标 Agent 和原始事件序号，后续 Loop、Reviewer 与 Synthesizer 不重复注入。
+- [x] 外部 DeepSeek Harness / Codex transport 仅在任务存在活动 Thread 且 adapter 真实接受 `steer` 时返回成功；不支持或不可用时明确返回 409/503，不把备注入库伪装成已发送。
+- [x] 默认对话页和任务首页在持久任务执行中允许输入“补充要求”；暂停、停止与追加要求使用独立按钮。快速直答没有可恢复任务时保持只读，避免误建第二个任务。
+- [x] 补充要求写入当前会话上下文，并显示“已接收 / 已应用”单向状态；修复 SSE `applied` 先于 POST 响应时状态退回 `accepted` 的竞态。
+- [x] 对话顶部增加紧凑“本轮路径”，展示真实 Router/Scheduler 的路由、实际 Agent、Skill 与置信度；历史任务从持久计划恢复，不使用静态演示数据。
+- [x] 新增租户/用户隔离、终态拒绝、Builtin 一次性消费、Harness steer 成功/不可用、客户端请求和 `qa:live-guidance` 浏览器回归；当前 `npm test` 为 308/308，浏览器回归确认未创建第二任务且控制台零错误。
+
+### Runtime 下一步
+
+1. [ ] Checkpoint 分支与版本冲突保护：同一任务并行人工操作使用显式 revision，支持从检查点派生分支、比较差异和选择合并，拒绝静默覆盖。
+2. [ ] 大结果引用与 Prompt Cache：工具输出、文档和搜索结果改用 `result_ref`/Artifact 引用，按模型能力复用稳定前缀，减少重复 Token 和超长上下文。
+3. [ ] 持久化上下文摘要版本：记录摘要覆盖范围、来源消息、Artifact、审批与未完成事项，恢复时可验证摘要没有遗漏关键约束。
+4. [ ] HarnessEval-W 业务评测扩展：增加执行中改需求、跨轮新增/跳过 Agent、外部 Harness 不支持 steer、长结果引用和恢复一致性用例。
+5. [ ] DeepSeek ACP / Codex sidecar 现场验收：固定版本、workspace、审批策略与故障注入，在真实部署中验证 steer、断流回放和跨 Worker 接管。

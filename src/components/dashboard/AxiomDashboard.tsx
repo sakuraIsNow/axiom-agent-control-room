@@ -32,7 +32,7 @@ const modeLabel: Record<DashboardProps['mode'], string> = { analyze: '分析', b
 export function AxiomDashboard(props: DashboardProps) {
   const {
     phase, mode, onModeChange, draft, onDraftChange, onSend, onNewTask, onOpenSettings, onRefreshTemplates,
-    templateWorkspace, onOpenPlugins, pluginWorkspace, onOpenReadiness, onStop, onPause, onResume, isRunning, agentActivity, agents, graph,
+    templateWorkspace, onOpenPlugins, pluginWorkspace, onOpenReadiness, onStop, onPause, onResume, isRunning, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, agentActivity, agents, graph,
     selectedNodeId, onSelectAgent, taskProfile, reviewResult, reviewApprovalTaskId, reviewNote, reviewActionBusy,
     onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, sessionId,
     sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, textModelCredentialId, theme, onThemeChange, principalUserId: principalUserIdProp,
@@ -139,7 +139,11 @@ export function AxiomDashboard(props: DashboardProps) {
     setNav('chat');
   };
   const sendFromDashboard = () => {
-    if (!draft.trim() || isRunning) return;
+    if (!draft.trim()) return;
+    if (isRunning) {
+      if (canGuide && !guidanceBusy) onGuidance();
+      return;
+    }
     setNav('chat');
     onSend();
   };
@@ -199,6 +203,11 @@ export function AxiomDashboard(props: DashboardProps) {
           onStop={onStop}
           onPause={onPause}
           onResume={onResume}
+          canGuide={canGuide}
+          guidanceBusy={guidanceBusy}
+          guidanceState={guidanceState}
+          onGuidance={onGuidance}
+          routeInsight={routeInsight}
           onNewTask={openNewConversation}
           onSelectSession={onSelectSession}
           onDeleteSession={(id) => setPendingDelete({ kind: 'session', id })}
@@ -221,10 +230,13 @@ export function AxiomDashboard(props: DashboardProps) {
           <StatCards stats={stats} tasks={taskCatalog} />
           <TokenTrendSparkline points={dailyStats} />
           <div className="dash-command">
-            <textarea value={draft} rows={1} disabled={isRunning} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendFromDashboard(); } }} placeholder={isRunning ? 'Agent 正在执行当前目标…' : '输入目标，提交给运行时'} />
-            <div className="dash-command-mode">{(['analyze', 'build', 'decide'] as const).map((item) => <button type="button" key={item} className={item === mode ? 'active' : ''} onClick={() => onModeChange(item)}>{modeLabel[item]}</button>)}</div>
-            <button type="button" className="dash-send" onClick={isRunning ? onStop : sendFromDashboard} disabled={!isRunning && !draft.trim()}><MorphIcon icon={isRunning ? commandStopIcon : commandSendIcon} size={16} strokeWidth={2} spring="snappy" reducedMotion="user" /></button>
-            {isRunning ? <button type="button" onClick={onPause}><Pause size={13} />暂停</button> : <button type="button" onClick={onResume} disabled><Play size={13} />继续</button>}
+            <div className="dash-command-copy">
+              <textarea value={draft} rows={1} disabled={(isRunning && !canGuide) || guidanceBusy} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendFromDashboard(); } }} placeholder={isRunning ? (canGuide ? '补充要求，将在下一步骤应用' : '当前快速回答完成后可继续提问') : '输入目标，提交给运行时'} />
+              {isRunning && guidanceState && <span className={`dash-guidance-feedback ${guidanceState.status}`}><i />{guidanceState.status === 'accepted' ? '已接收，等待下一步骤' : guidanceState.delivery === 'external-harness' ? '已送达当前执行器' : '已应用到当前任务'}</span>}
+            </div>
+            <div className="dash-command-mode">{(['analyze', 'build', 'decide'] as const).map((item) => <button type="button" key={item} className={item === mode ? 'active' : ''} disabled={isRunning} onClick={() => onModeChange(item)}>{modeLabel[item]}</button>)}</div>
+            <button type="button" className="dash-send" title={isRunning ? '加入当前任务' : '发送'} aria-label={isRunning ? '加入当前任务' : '发送'} onClick={sendFromDashboard} disabled={!draft.trim() || (isRunning && (!canGuide || guidanceBusy))}><MorphIcon icon={commandSendIcon} size={16} strokeWidth={2} spring="snappy" reducedMotion="user" /></button>
+            {isRunning ? <div className="dash-command-controls"><button type="button" onClick={onPause}><Pause size={13} />暂停</button><button type="button" className="stop" onClick={onStop}><MorphIcon icon={commandStopIcon} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" />停止</button></div> : <button type="button" onClick={onResume} disabled><Play size={13} />继续</button>}
           </div>
           <div className="dash-board-row">
             <TaskBoard tasks={taskCatalog} graph={graph} selectedTaskId={focusedTaskId} currentUserId={principalUserId} onSelectTask={(id) => { useDashboardStore.getState().selectTask(id); onOpenTask(id); }} onDeleteTask={(id, taskIds) => setPendingDelete({ kind: 'task', id, taskIds })} />

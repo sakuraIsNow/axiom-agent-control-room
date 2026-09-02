@@ -39,7 +39,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { streamAgentResponse } from './lib/agentStream';
 import { generateImage, readImageAsDataUrl } from './lib/imageGeneration';
-import { approveWorkflowPlan, approveWorkflowReview, approveWorkflowTool, cancelWorkflowTask, controlWorkflowNode, createWorkflowTask, deleteWorkflowTask, getWorkflowArtifact, getWorkflowTask, listWorkflowTasks, pauseWorkflowTask, rejectWorkflowPlan, rejectWorkflowReview, rejectWorkflowTool, replanWorkflowTask, resumeWorkflowTask, retryWorkflowTask, sendTaskNote, streamWorkflowEvents } from './lib/taskRuntime';
+import { approveWorkflowPlan, approveWorkflowReview, approveWorkflowTool, cancelWorkflowTask, controlWorkflowNode, createWorkflowTask, deleteWorkflowTask, getWorkflowArtifact, getWorkflowTask, listWorkflowTasks, pauseWorkflowTask, rejectWorkflowPlan, rejectWorkflowReview, rejectWorkflowTool, replanWorkflowTask, resumeWorkflowTask, retryWorkflowTask, sendTaskGuidance, sendTaskNote, streamWorkflowEvents } from './lib/taskRuntime';
 import { createTemplateFromCatalog, exportWorkflowTemplate, importWorkflowTemplate, listBuiltInTemplates, listWorkflowTemplates, publishWorkflowTemplate, shareWorkflowTemplate } from './lib/templateRuntime';
 import { createPlugin, deletePlugin as deleteUserPluginRequest, listPlugins, runPlugin, streamPluginWithAgent, updatePlugin } from './lib/pluginRuntime';
 import { loadUiTheme, type UiTheme } from './lib/uiTheme';
@@ -293,6 +293,8 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'budget.exceeded': '任务执行预算已达到上限',
     'budget.constrained': '预算接近上限，已压缩并行步骤',
     'human.note': '操作员指令已加入下一轮上下文',
+    'human.guidance_accepted': '补充要求已接收，等待下一个安全执行点',
+    'human.guidance_applied': '补充要求已应用到当前任务',
     'artifact.created': '结果 Artifact 已生成',
     'task.completed': '复杂任务工作流已完成',
     'task.failed': '任务在重试后仍然失败',
@@ -698,6 +700,22 @@ function App() {
   const [inspectorView, setInspectorView] = useState<'topology' | 'graph' | 'collab'>('topology');
   const [operatorNote, setOperatorNote] = useState('');
   const [isSendingNote, setIsSendingNote] = useState(false);
+  const [guidanceBusy, setGuidanceBusy] = useState(false);
+  const [guidanceState, setGuidanceState] = useState<{
+    guidanceId: string;
+    status: 'accepted' | 'applied';
+    delivery: 'builtin-next-safe-point' | 'external-harness';
+    message: string;
+    applicationPoint?: string;
+  } | null>(null);
+  const [routeInsight, setRouteInsight] = useState<{
+    route: string;
+    reason: string;
+    confidence?: number;
+    agentIds: string[];
+    skillIds: string[];
+    source?: string;
+  } | null>(null);
   const [pausedTaskId, setPausedTaskId] = useState<string | null>(null);
   const [pausedAssistantId, setPausedAssistantId] = useState<string | null>(null);
   const [readinessOpen, setReadinessOpen] = useState(false);
@@ -1077,6 +1095,9 @@ function App() {
     setToolApproval(null);
     setPlanApproval(null);
     setReviewApproval(null);
+    setGuidanceBusy(false);
+    setGuidanceState(null);
+    setRouteInsight(null);
     setTaskProfile(null);
     setReviewResult(null);
     agentGraphRef.current = null;
@@ -1470,6 +1491,13 @@ function App() {
       stepId: 'direct-response',
       output: latestAssistant?.content || undefined,
     }] : []);
+    setRouteInsight(latestAssistant ? {
+      route: latestAssistant.route ?? 'direct',
+      reason: '该轮由一个专注 Agent 直接完成。',
+      agentIds: [role],
+      skillIds: [],
+      source: 'session-history',
+    } : null);
     setPhase(latestAssistant?.pending ? 'inference' : hasAnswer ? 'complete' : 'idle');
     setInspectorView(session.agentGraph ? 'graph' : 'topology');
   }, [resetSessionRuntime]);
@@ -1529,6 +1557,16 @@ function App() {
       }
       setTaskProfile(task.plan?.profile ?? null);
       setReviewResult(task.review ?? null);
+      const routingDecision = task.plan?.routingDecision;
+      const schedulingDecision = task.plan?.schedulingDecision;
+      setRouteInsight(task.plan ? {
+        route: schedulingDecision?.route ?? task.plan.profile?.route ?? 'full-workflow',
+        reason: schedulingDecision?.reason ?? routingDecision?.rationale ?? task.plan.routingReason ?? '',
+        confidence: routingDecision?.confidence ?? task.plan.routerConfidence,
+        agentIds: schedulingDecision?.activeAgentIds ?? (task.plan.steps ?? []).map((step) => step.role),
+        skillIds: schedulingDecision?.selectedSkillIds ?? [...new Set((task.plan.steps ?? []).flatMap((step) => step.skillIds ?? []))],
+        source: task.plan.routerModel,
+      } : null);
       const taskGraph = restoreTaskGraph(task);
       const restoredGraph = existing?.agentGraph
         ? taskGraph && !terminal
@@ -1885,7 +1923,27 @@ function App() {
       if (isDirectRoute) setSequencedGraph(null);
     }
     if (event.type === 'routing.started') upsertAgent({ id: 'router-agent', label: agentDisplayName('router-agent'), role: 'router-agent', status: 'running' });
-    if (event.type === 'routing.decided') upsertAgent({ id: 'router-agent', label: agentDisplayName('router-agent'), role: 'router-agent', status: 'completed' });
+    if (event.type === 'routing.decided') {
+      upsertAgent({ id: 'router-agent', label: agentDisplayName('router-agent'), role: 'router-agent', status: 'completed' });
+      setRouteInsight((current) => ({
+        route: current?.route ?? String((event.payload.profile as { route?: unknown } | undefined)?.route ?? 'direct'),
+        reason: String(event.payload.rationale ?? current?.reason ?? ''),
+        confidence: Number.isFinite(Number(event.payload.confidence)) ? Number(event.payload.confidence) : current?.confidence,
+        agentIds: Array.isArray(event.payload.candidateAgentIds) ? event.payload.candidateAgentIds.filter((value): value is string => typeof value === 'string') : (current?.agentIds ?? []),
+        skillIds: Array.isArray(event.payload.candidateSkillIds) ? event.payload.candidateSkillIds.filter((value): value is string => typeof value === 'string') : (current?.skillIds ?? []),
+        source: typeof event.payload.routerModel === 'string' ? event.payload.routerModel : current?.source,
+      }));
+    }
+    if (event.type === 'scheduling.decided') {
+      setRouteInsight((current) => ({
+        route: String(event.payload.route ?? (event.payload.profile as { route?: unknown } | undefined)?.route ?? current?.route ?? 'direct'),
+        reason: String(event.payload.reason ?? current?.reason ?? ''),
+        confidence: current?.confidence,
+        agentIds: Array.isArray(event.payload.activeAgentIds) ? event.payload.activeAgentIds.filter((value): value is string => typeof value === 'string') : (current?.agentIds ?? []),
+        skillIds: Array.isArray(event.payload.selectedSkillIds) ? event.payload.selectedSkillIds.filter((value): value is string => typeof value === 'string') : (current?.skillIds ?? []),
+        source: current?.source,
+      }));
+    }
     if (event.type === 'scheduling.started') upsertAgent({ id: 'scheduler-agent', label: agentDisplayName('scheduler-agent'), role: 'scheduler-agent', status: 'running' });
     if (event.type === 'scheduling.decided') upsertAgent({ id: 'scheduler-agent', label: agentDisplayName('scheduler-agent'), role: 'scheduler-agent', status: 'completed' });
     if (event.type === 'plan.approval_requested') {
@@ -2044,7 +2102,35 @@ function App() {
     if (event.type === 'human.note') {
       setError(null);
     }
+    if (event.type === 'human.guidance_accepted') {
+      const guidanceId = String(event.payload.guidanceId ?? '');
+      const delivery = event.payload.delivery === 'external-harness' ? 'external-harness' : 'builtin-next-safe-point';
+      if (guidanceId) {
+        setGuidanceState({
+          guidanceId,
+          status: 'accepted',
+          delivery,
+          message: String(event.payload.message ?? ''),
+        });
+      }
+      setError(null);
+    }
+    if (event.type === 'human.guidance_applied') {
+      const guidanceId = String(event.payload.guidanceId ?? '');
+      const delivery = event.payload.delivery === 'external-harness' ? 'external-harness' : 'builtin-next-safe-point';
+      if (guidanceId) {
+        setGuidanceState((current) => ({
+          guidanceId,
+          status: 'applied',
+          delivery,
+          message: current?.guidanceId === guidanceId ? current.message : '',
+          applicationPoint: typeof event.payload.applicationPoint === 'string' ? event.payload.applicationPoint : undefined,
+        }));
+      }
+      setError(null);
+    }
     if (event.type === 'task.completed') {
+      setGuidanceState(null);
       setFailedTaskId(null);
       const result = String(event.payload.result ?? '任务已完成，但没有返回文本结果。');
       const partialFailures = Array.isArray(event.payload.failures)
@@ -2067,6 +2153,7 @@ function App() {
       }));
     }
     if (event.type === 'task.failed') {
+      setGuidanceState(null);
       const message = userFacingError(String(event.payload.error ?? ''), 'Agent 工作流执行失败。');
       const partialResult = typeof event.payload.result === 'string' ? event.payload.result : '';
       setError(message);
@@ -2082,6 +2169,7 @@ function App() {
       }));
     }
     if (event.type === 'task.cancelled') {
+      setGuidanceState(null);
       setFailedTaskId(null);
       updateSession(sessionId, (session) => ({
         ...session,
@@ -2260,6 +2348,47 @@ function App() {
       setIsSendingNote(false);
     }
   }, [activeTaskId, addRunEvent, isSendingNote, operatorNote, pausedTaskId]);
+
+  const submitLiveGuidance = useCallback(async () => {
+    const taskId = activeTaskId ?? activeSession.activeTaskId;
+    const message = draft.trim();
+    if (!taskId || !message || guidanceBusy) return;
+    setGuidanceBusy(true);
+    try {
+      const receipt = await sendTaskGuidance(taskId, message);
+      const guidanceMessage: ChatMessage = {
+        id: `guidance:${receipt.guidanceId}`,
+        role: 'user',
+        content: `补充要求：${message}`,
+        createdAt: Date.now(),
+      };
+      setDraft('');
+      setGuidanceState((current) => current?.guidanceId === receipt.guidanceId && current.status === 'applied'
+        ? { ...current, message: current.message || message }
+        : {
+            guidanceId: receipt.guidanceId,
+            status: receipt.status,
+            delivery: receipt.delivery,
+            message,
+            applicationPoint: typeof receipt.applied?.payload.applicationPoint === 'string' ? receipt.applied.payload.applicationPoint : undefined,
+          });
+      updateSession(activeSession.id, (session) => {
+        if (session.messages.some((item) => item.id === guidanceMessage.id)) return session;
+        const assistantId = session.activeAssistantId;
+        const assistantIndex = assistantId ? session.messages.findIndex((item) => item.id === assistantId) : -1;
+        const messages = [...session.messages];
+        if (assistantIndex >= 0) messages.splice(assistantIndex, 0, guidanceMessage);
+        else messages.push(guidanceMessage);
+        return { ...session, messages, updatedAt: Date.now() };
+      });
+      addRunEvent('context', receipt.status === 'applied' ? '补充要求已送达当前执行器' : '补充要求已接收，等待下一个安全执行点');
+      setError(null);
+    } catch (caught) {
+      setError(userFacingError(caught, '补充要求发送失败。'));
+    } finally {
+      setGuidanceBusy(false);
+    }
+  }, [activeSession.activeTaskId, activeSession.id, activeTaskId, addRunEvent, draft, guidanceBusy, updateSession]);
 
   const continueControlledTask = useCallback((taskId: string, afterSequence = 0) => {
     const assistantId = pausedAssistantId ?? activeSession.activeAssistantId;
@@ -2470,6 +2599,8 @@ function App() {
       setLoopState({ id: '', iteration: 0, maxIterations: 0, readySteps: [], completedSteps: [], phase: 'idle' });
       setTaskProfile(null);
       setReviewResult(null);
+      setGuidanceState(null);
+      setRouteInsight(null);
       setIsRunning(true);
       addRunEvent('routing', '语义路由正在识别任务类型');
 
@@ -2555,6 +2686,14 @@ function App() {
         const routing = await routeChatMessage(content, mode, outgoingAttachments, providerSettings.text, controller.signal, {
           messages: requestMessages,
           graph: agentGraphRef.current ?? sessionGraphRef.current,
+        });
+        setRouteInsight({
+          route: routing.scheduler.route,
+          reason: routing.scheduler.reason || routing.router.rationale || routing.reason,
+          confidence: routing.router.confidence,
+          agentIds: routing.scheduler.activeAgentIds,
+          skillIds: routing.scheduler.selectedSkillIds,
+          source: routing.source,
         });
         // A saved credential can be bound to a durable workflow task. A
         // one-time API key cannot be persisted safely, so those requests stay
@@ -3236,6 +3375,11 @@ function App() {
             onPause={() => void pauseRun()}
             onResume={() => void resumeRun()}
             isRunning={isRunning}
+            canGuide={Boolean(activeTaskId ?? activeSession.activeTaskId)}
+            guidanceBusy={guidanceBusy}
+            guidanceState={guidanceState}
+            onGuidance={() => { void submitLiveGuidance(); }}
+            routeInsight={routeInsight}
             agentActivity={agentActivity}
             theme={uiTheme}
             agents={topologyAgents}

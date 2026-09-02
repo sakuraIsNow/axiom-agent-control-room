@@ -71,6 +71,8 @@ class ApiHarnessAdapter implements HarnessAdapter {
   active = true;
   configured = true;
   compatible = true;
+  steerAccepted = true;
+  readonly steered: string[] = [];
 
   constructor(kind: 'deepseek' | 'codex' = 'deepseek') {
     this.kind = kind;
@@ -112,8 +114,9 @@ class ApiHarnessAdapter implements HarnessAdapter {
     return { accepted: true, delegated: true, command: 'approve' };
   }
 
-  async steer(): Promise<HarnessCommandResult> {
-    return { accepted: true, delegated: true, command: 'steer' };
+  async steer(_threadId: string, note: string): Promise<HarnessCommandResult> {
+    this.steered.push(note);
+    return { accepted: this.steerAccepted, delegated: true, command: 'steer', ...(this.steerAccepted ? {} : { reason: 'steer unavailable' }) };
   }
 
   async *subscribe(_threadId: string, _afterSequence = 0, signal?: AbortSignal): AsyncIterable<HarnessEvent> {
@@ -202,6 +205,101 @@ test('Harness delegation APIs enforce availability, ownership, pause state, and 
     const finalInterrupt = await request(api, `/tasks/${paused.id}/harness/interrupt`, { method: 'POST', headers });
     assert.equal(finalInterrupt.status, 202);
     assert.equal((await store.getTask(paused.id, 'local'))?.status, 'paused');
+  } finally {
+    await store.close();
+  }
+});
+
+test('live guidance enforces identity boundaries and rejects terminal tasks', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  await store.initialize();
+  let nudges = 0;
+  const api = createTaskApi({
+    store,
+    hub: new EventHub(),
+    coordinator: { nudge() { nudges += 1; }, abort() {} } as never,
+  });
+  const ownerHeaders = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'local', 'x-axiom-user-id': 'operator' };
+  try {
+    const running = await seedTask(store, 'running');
+    const accepted = await request(api, `/tasks/${running.id}/guidance`, {
+      method: 'POST', headers: ownerHeaders, body: JSON.stringify({ message: '先补充回归测试，再继续交付。' }),
+    });
+    assert.equal(accepted.status, 202);
+    const body = await accepted.json() as { status: string; guidanceId: string; delivery: string };
+    assert.equal(body.status, 'accepted');
+    assert.equal(body.delivery, 'builtin-next-safe-point');
+    assert.ok(body.guidanceId);
+    assert.equal(nudges, 1);
+    const events = await store.getEvents(running.id);
+    assert.equal(events.filter((event) => event.type === 'human.guidance_accepted').length, 1);
+    assert.equal(events.some((event) => event.type === 'human.guidance_applied'), false);
+
+    const forbidden = await request(api, `/tasks/${running.id}/guidance`, {
+      method: 'POST',
+      headers: { ...ownerHeaders, 'x-axiom-user-id': 'another-user' },
+      body: JSON.stringify({ message: '越权修改' }),
+    });
+    assert.equal(forbidden.status, 403);
+
+    const hidden = await request(api, `/tasks/${running.id}/guidance`, {
+      method: 'POST',
+      headers: { ...ownerHeaders, 'x-axiom-tenant-id': 'another-tenant' },
+      body: JSON.stringify({ message: '跨租户修改' }),
+    });
+    assert.equal(hidden.status, 404);
+
+    const completed = await seedTask(store, 'completed');
+    const terminal = await request(api, `/tasks/${completed.id}/guidance`, {
+      method: 'POST', headers: ownerHeaders, body: JSON.stringify({ message: '结束后追加' }),
+    });
+    assert.equal(terminal.status, 409);
+  } finally {
+    await store.close();
+  }
+});
+
+test('live guidance uses real Harness steering and reports unavailable steering honestly', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  await store.initialize();
+  const adapter = new ApiHarnessAdapter('codex');
+  const api = createTaskApi({
+    store,
+    hub: new EventHub(),
+    coordinator: { nudge() {}, abort() {} } as never,
+    harnessAdapter: adapter,
+  });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'local', 'x-axiom-user-id': 'operator' };
+  try {
+    const delegated = await seedTask(store, 'paused');
+    const started = await request(api, `/tasks/${delegated.id}/harness/start`, {
+      method: 'POST', headers, body: JSON.stringify({ input: '由 Codex Harness 执行' }),
+    });
+    assert.equal(started.status, 202);
+
+    const guided = await request(api, `/tasks/${delegated.id}/guidance`, {
+      method: 'POST', headers, body: JSON.stringify({ message: '同时检查移动端布局。' }),
+    });
+    assert.equal(guided.status, 202);
+    const guidedBody = await guided.json() as { status: string; delivery: string };
+    assert.equal(guidedBody.status, 'applied');
+    assert.equal(guidedBody.delivery, 'external-harness');
+    assert.deepEqual(adapter.steered, ['同时检查移动端布局。']);
+    const appliedEvents = await store.getEvents(delegated.id);
+    assert.equal(appliedEvents.filter((event) => event.type === 'human.guidance_accepted').length, 1);
+    assert.equal(appliedEvents.filter((event) => event.type === 'human.guidance_applied').length, 1);
+
+    const unavailable = await seedTask(store, 'paused');
+    const unavailableStart = await request(api, `/tasks/${unavailable.id}/harness/start`, {
+      method: 'POST', headers, body: JSON.stringify({ input: '第二个外部任务' }),
+    });
+    assert.equal(unavailableStart.status, 202);
+    adapter.steerAccepted = false;
+    const rejected = await request(api, `/tasks/${unavailable.id}/guidance`, {
+      method: 'POST', headers, body: JSON.stringify({ message: '这条不能伪装成已发送。' }),
+    });
+    assert.equal(rejected.status, 409);
+    assert.equal((await store.getEvents(unavailable.id)).some((event) => event.type === 'human.guidance_accepted'), false);
   } finally {
     await store.close();
   }

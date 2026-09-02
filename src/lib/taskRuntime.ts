@@ -226,6 +226,28 @@ export async function sendTaskNote(taskId: string, message: string) {
   return body.note;
 }
 
+export type TaskGuidanceReceipt = {
+  taskId: string;
+  guidanceId: string;
+  status: 'accepted' | 'applied';
+  delivery: 'builtin-next-safe-point' | 'external-harness';
+  accepted: WorkflowEvent;
+  applied?: WorkflowEvent;
+};
+
+export async function sendTaskGuidance(taskId: string, message: string, behavior: 'continue' | 'replan' = 'continue') {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/guidance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, behavior }),
+  });
+  const body = await response.json().catch(() => null) as (Partial<TaskGuidanceReceipt> & { error?: string }) | null;
+  if (!response.ok || !body?.guidanceId || !body.accepted || !body.status || !body.delivery) {
+    throw new Error(body?.error ?? `Task guidance returned ${response.status}.`);
+  }
+  return body as TaskGuidanceReceipt;
+}
+
 export async function retryWorkflowTask(taskId: string) {
   const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' });
   const body = await response.json().catch(() => null) as { task?: WorkflowTask; error?: string } | null;

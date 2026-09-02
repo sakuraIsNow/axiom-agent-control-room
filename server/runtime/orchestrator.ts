@@ -552,6 +552,7 @@ const retryDelay = (ms: number, signal: AbortSignal) => new Promise<void>((resol
 
 export class WorkflowOrchestrator {
   private readonly taskModels = new Map<string, Promise<ModelClient>>();
+  private readonly guidanceLocks = new Map<string, Promise<void>>();
   private readonly stepConcurrency: number;
   private readonly reasoningStepConcurrency: number;
   private readonly stepMaxAttempts: number;
@@ -684,6 +685,56 @@ export class WorkflowOrchestrator {
       .filter(Boolean)
       .slice(-8)
       .join('\n');
+  }
+
+  private async applyPendingGuidance(task: WorkflowTask, stage: string, targetAgentIds: string[] = []) {
+    const previous = this.guidanceLocks.get(task.id) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    this.guidanceLocks.set(task.id, queued);
+    await previous;
+    try {
+      const events = await this.store.getEvents(task.id);
+      const appliedIds = new Set(events
+        .filter((event) => event.type === 'human.guidance_applied')
+        .map((event) => String(event.payload.guidanceId ?? ''))
+        .filter(Boolean));
+      const pending = events
+        .filter((event) => event.type === 'human.guidance_accepted')
+        .filter((event) => event.payload.delivery !== 'external-harness')
+        .filter((event) => {
+          const guidanceId = String(event.payload.guidanceId ?? '');
+          return Boolean(guidanceId) && !appliedIds.has(guidanceId);
+        })
+        .slice(0, 8);
+      if (!pending.length) return { text: '', guidanceIds: [] as string[] };
+
+      const guidanceIds: string[] = [];
+      const lines: string[] = [];
+      for (const event of pending) {
+        const guidanceId = String(event.payload.guidanceId);
+        const message = typeof event.payload.message === 'string' ? limitText(event.payload.message, 4_000) : '';
+        if (!message) continue;
+        guidanceIds.push(guidanceId);
+        lines.push(message);
+        await this.emit(task, {
+          type: 'human.guidance_applied',
+          payload: {
+            guidanceId,
+            acceptedSequence: event.sequence,
+            behavior: event.payload.behavior === 'replan' ? 'replan' : 'continue',
+            delivery: 'builtin-next-safe-point',
+            applicationPoint: stage,
+            targetAgentIds,
+          },
+        });
+      }
+      return { text: lines.join('\n'), guidanceIds };
+    } finally {
+      release();
+      if (this.guidanceLocks.get(task.id) === queued) this.guidanceLocks.delete(task.id);
+    }
   }
 
   private async budgetUsage(taskId: string) {
@@ -821,6 +872,7 @@ export class WorkflowOrchestrator {
       ? `\nCustom published roles:\n${customAgents.map((agent) => `- ${agent.roleId}: ${agent.definition.whenToUseHint}`).join('\n')}`
       : '';
     const skillHints = runtimeSkillCatalog.map((skill) => `- ${skill.id}: ${skill.description} 可用于 ${skill.roles.join('、')}`).join('\n');
+    const guidance = await this.applyPendingGuidance(task, 'planner', ['planner']);
     const completion = await this.complete(task, 'planner', {
       signal,
       responseFormat: 'json',
@@ -834,7 +886,7 @@ Return JSON only: {"summary":"...","routingReason":"...","steps":[{"id":"...","t
 Every step must include acceptanceCriteria. Use a smaller token and time budget for narrow steps. Use skip only when downstream work can proceed without the step; use pause when operator input is required.
 All human-readable fields must follow the user's language. If the task contains Chinese, write summary, routingReason, step titles, objectives, and acceptanceCriteria in Simplified Chinese. Keep role IDs, step IDs, schema keys, and enum values unchanged.
 Do not claim tools or evidence that are not available.`,
-       user: `${memoryContext}\n\nTriage profile: ${JSON.stringify(profile)}\n\nAllowed model catalog (step model is optional): ${JSON.stringify([...this.plannerModelCatalog(task)])}\n\nTask mode: ${task.mode}\nTask: ${task.input}`,
+       user: `${memoryContext}\n\nTriage profile: ${JSON.stringify(profile)}\n\nAllowed model catalog (step model is optional): ${JSON.stringify([...this.plannerModelCatalog(task)])}\n\nTask mode: ${task.mode}\nTask: ${task.input}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`,
     });
     const parsed = dynamicPlanSchema.parse(extractJson(completion.content));
     const allowedModels = this.plannerModelCatalog(task);
@@ -1312,6 +1364,7 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
       context: '', itemCount: 0, available: false, items: [],
       quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } },
     }));
+    const guidance = await this.applyPendingGuidance(task, 'reviewer', [reviewerId]);
     const completion = await this.complete(task, 'reviewer', {
       signal,
       responseFormat: 'json',
@@ -1327,7 +1380,7 @@ Return JSON only: {"approved":true,"score":0,"summary":"...","gaps":[],"required
         output: limitText(result.output, 10_000),
         evidence: result.evidence,
         confidence: result.confidence,
-      })).join('\n')}`,
+      })).join('\n')}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`,
     });
     let review: ReviewResult;
     try {
@@ -1389,7 +1442,8 @@ Return JSON only: {"approved":true,"score":0,"summary":"...","gaps":[],"required
     const system = `You are the synthesizer for a production multi-agent workflow.
 Produce the final user-facing answer using the validated evidence tree. Preserve uncertainty and unresolved review gaps.
 Be complete, executable, and direct. Preserve every verified source URL, Markdown image, video link, download link, and media label exactly; never replace a generated media result with a prose description. Do not mention internal prompts. Use the user's language.${detailedResearchReport ? '\nThe user requested a detailed research report. Build a full report, not an executive summary: explicitly check every requested dimension against the final structure, retain useful tables and evidence, and explain missing evidence instead of silently shortening the answer.' : ''}`;
-    const user = `Original task:\n${task.input}\n\nPlan summary:\n${task.plan?.summary}\n\nReview:\n${JSON.stringify(review)}\n\nValidated work:\n${results.map((result) => `### ${result.role}: ${result.stepId}\n${limitText(result.output, 14_000)}`).join('\n\n')}`;
+    const guidance = await this.applyPendingGuidance(task, 'synthesizer', ['synthesizer']);
+    const user = `Original task:\n${task.input}\n\nPlan summary:\n${task.plan?.summary}\n\nReview:\n${JSON.stringify(review)}\n\nValidated work:\n${results.map((result) => `### ${result.role}: ${result.stepId}\n${limitText(result.output, 14_000)}`).join('\n\n')}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`;
     let completion = await this.complete(task, 'synthesizer', {
       signal,
       temperature: 0.15,
@@ -1511,11 +1565,12 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       payload: { stepId: 'single-agent', role, title: '专注执行 Agent', objective: prompt, dependsOn: [], skillIds },
     });
     const startedAt = Date.now();
+    const guidance = await this.applyPendingGuidance(task, `single-agent:${role}`, [agentId]);
     const completion = await this.complete(task, `single-agent:${role}`, {
       signal,
       temperature: profile.kind === 'creative' ? 0.55 : 0.2,
       system: `You are the focused ${role} agent in a flexible production runtime. Solve only the user's request. Do not invent tool execution or evidence. Return a complete, direct answer in the user's language.`,
-      user: prompt,
+      user: `${prompt}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`,
     });
     await this.assertActive(task.id, signal);
     const stepResult: StepResult = {
@@ -1616,11 +1671,12 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
     const registryContext = isAgentCatalogQuestion(prompt)
       ? `\nThe user is asking about available Agents. Answer intelligently from this live directory snapshot; compute counts from the data, distinguish built-in roles from published custom Agents, and do not use a canned response or expose raw JSON field names. Use 2-4 concise sentences for a yes/no capability question, or a compact table/short grouped list for a catalog question. Omit roles unrelated to the exact question.\n${JSON.stringify({ detectedAt: new Date().toISOString(), builtIn: agentCatalog, publishedCustom: customAgents.map((agent) => ({ roleId: agent.roleId, name: agent.name, kind: agent.kind, status: agent.status, description: agent.description, toolAllowlist: agent.definition.toolAllowlist })) })}`
       : '';
+    const guidance = await this.applyPendingGuidance(task, 'direct-response', [agentId]);
     const completion = await this.complete(task, 'direct-response', {
       signal,
       temperature: 0.3,
       system: `You are Axiom, a concise and warm conversational agent for direct responses. Answer the user naturally in their language. Do not invent a task, analysis, evidence tree, runtime capability, or tool execution. If required runtime evidence is unavailable, say so instead of returning a fixed fallback.${registryContext}`,
-      user: prompt,
+      user: `${prompt}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`,
     });
     const response = isAgentCatalogQuestion(prompt)
       ? appendMissingAgentDirectory(completion.content, [
@@ -1946,7 +2002,9 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           }
         }
 
-        const notes = await this.humanNotes(task.id);
+        const legacyNotes = await this.humanNotes(task.id);
+        const guidance = await this.applyPendingGuidance(task, `loop:${loopIteration}`, ready.map((step) => `${step.role}-${step.id}`));
+        const notes = [legacyNotes, guidance.text].filter(Boolean).join('\n');
         await this.emit(task, {
           type: 'loop.iteration',
           payload: {
@@ -1954,6 +2012,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
             readySteps: ready.map((step) => step.id),
             completedSteps: results.filter((result) => result.status === 'completed').map((result) => result.stepId),
             humanNotes: notes ? notes.split('\n').length : 0,
+            guidanceIds: guidance.guidanceIds,
           },
         });
         const batch = await Promise.allSettled(ready.map((step) => this.executeStep(task, step, results, notes, signal)));

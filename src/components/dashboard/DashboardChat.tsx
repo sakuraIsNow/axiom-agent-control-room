@@ -1,8 +1,8 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
-import { Bot, Check, Copy, FileText, MessageSquareText, Paperclip, Pause, Play, Plus, RotateCcw, Trash2, UserCheck, X } from 'lucide-react';
+import { Bot, Check, Copy, FileText, MessageSquareText, Paperclip, Pause, Play, Plus, Route, RotateCcw, Trash2, UserCheck, X } from 'lucide-react';
 import { MorphIcon } from 'morphicons/react';
 import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, Session, TopologyAgent } from '../../types';
-import type { ReviewResultState } from './dashboardTypes';
+import type { GuidanceState, ReviewResultState, RouteInsightState } from './dashboardTypes';
 import { AgentSignalGraph } from './AgentSignalGraph';
 import { InferenceOrb } from './InferenceOrb';
 import { ChatFileArtifact, ChatMessageMarkdown } from './ChatArtifact';
@@ -12,7 +12,6 @@ const phaseLabel: Record<AgentPhase, string> = {
   idle: '待命', routing: '任务路由', context: '整理上下文', inference: 'Agent 执行', complete: '已完成', error: '执行异常',
 };
 const sendIcon = 'M5 12h14M13 6l6 6-6 6';
-const stopIcon = 'M7 7h10v10H7Z';
 
 const formatLastConversation = (timestamp: number) => {
   const value = new Date(timestamp);
@@ -33,6 +32,11 @@ type Props = {
   mode: AgentMode;
   draft: string;
   isRunning: boolean;
+  canGuide: boolean;
+  guidanceBusy: boolean;
+  guidanceState: GuidanceState | null;
+  onGuidance: () => void;
+  routeInsight: RouteInsightState | null;
   agentActivity: string;
   error: string | null;
   onDraftChange: (value: string) => void;
@@ -62,7 +66,7 @@ type Props = {
 export function DashboardChat(props: Props) {
   const {
     sessions, activeSession, provider, phase, mode, draft, isRunning, agentActivity, error, onDraftChange, onModeChange,
-    onSend, onStop, onPause, onResume, onNewTask, onSelectSession, onDeleteSession, attachments, onAddAttachments, onRemoveAttachment,
+    onSend, onStop, onPause, onResume, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, onNewTask, onSelectSession, onDeleteSession, attachments, onAddAttachments, onRemoveAttachment,
     agents, graph, selectedNodeId, onSelectAgent, reviewResult, reviewNote, reviewBusy, onReviewNoteChange, onRequestApprove, onRequestReject,
   } = props;
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -124,6 +128,16 @@ export function DashboardChat(props: Props) {
         <span className="dash-current-model"><Bot size={13} />当前模型 <strong>{provider}</strong></span>
       </header>
 
+      <div className={`dash-route-insight ${routeInsight ? '' : 'empty'}`} title={routeInsight?.reason} aria-hidden={!routeInsight}>
+        {routeInsight && <>
+          <span><Route size={13} />本轮路径</span>
+          <strong>{routeInsight.route === 'direct' ? '直接回答' : routeInsight.route === 'single-agent' ? '单 Agent' : routeInsight.route === 'team' ? 'Agent 小组' : '完整工作流'}</strong>
+          <em>{routeInsight.agentIds.slice(0, 4).map((id) => id === 'direct-responder' ? '对话 Agent' : id === 'researcher' ? '研究员' : id === 'analyst' ? '分析员' : id === 'builder' ? '工程师' : id === 'reviewer' ? '审查员' : id === 'synthesizer' ? '综合 Agent' : id).join(' → ')}</em>
+          {routeInsight.skillIds.length > 0 && <small>{routeInsight.skillIds.slice(0, 3).map((id) => ({ 'architecture-design': '架构设计', implementation: '实现', 'quality-review': '质量审查', 'web-research': '联网检索', 'evidence-research': '证据核验', 'visual-generation': '视觉生成', 'document-analysis': '文档分析', 'report-authoring': '报告制作' }[id] ?? id)).join(' · ')}</small>}
+          {typeof routeInsight.confidence === 'number' && routeInsight.confidence > 0 && <b>{Math.round(routeInsight.confidence * 100)}%</b>}
+        </>}
+      </div>
+
       <div ref={messageListRef} className="dash-chat-messages">
         {activeSession.messages.length === 0 && <div className="dash-chat-empty"><MessageSquareText size={22} /><strong>开始对话</strong></div>}
         {activeSession.messages.map((message) => <article key={message.id} className={`dash-chat-message ${message.role} ${message.pending ? 'pending' : ''}`}>
@@ -167,20 +181,21 @@ export function DashboardChat(props: Props) {
 
       <footer className="dash-chat-composer">
         {attachments.length > 0 && <div className="dash-chat-pending-attachments">{attachments.map((attachment) => <span key={attachment.id}><FileText size={12} />{'url' in attachment ? attachment.alt : attachment.name}<button type="button" title="移除附件" onClick={() => onRemoveAttachment(attachment.id)}><X size={11} /></button></span>)}</div>}
+        {isRunning && guidanceState && <span className={`dash-guidance-feedback ${guidanceState.status}`} role="status"><i />{guidanceState.status === 'accepted' ? '补充要求已接收，将在下一步骤应用' : guidanceState.delivery === 'external-harness' ? '补充要求已送达当前执行器' : '补充要求已应用到当前任务'}</span>}
         <textarea
           value={draft}
           rows={2}
-          disabled={isRunning}
+          disabled={(isRunning && !canGuide) || guidanceBusy}
           onChange={(event) => onDraftChange(event.target.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); onSend(); } }}
-          placeholder={isRunning ? 'Agent 正在处理当前消息…' : '输入消息，Enter 发送，Shift + Enter 换行'}
+          onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (isRunning) onGuidance(); else onSend(); } }}
+          placeholder={isRunning ? (canGuide ? '补充要求，将在下一步骤应用' : '当前快速回答完成后可继续提问') : '输入消息，Enter 发送，Shift + Enter 换行'}
         />
         <div className="dash-chat-composer-foot">
           <div className="dash-chat-modes">{(['analyze', 'build', 'decide'] as AgentMode[]).map((item) => <button key={item} type="button" className={item === mode ? 'active' : ''} disabled={isRunning} onClick={() => onModeChange(item)}>{modeLabel[item]}</button>)}</div>
           <div className="dash-chat-controls">
-            <label className="dash-chat-attach" title="添加图片或文件"><Paperclip size={15} /><input type="file" hidden multiple accept="image/*,.txt,.md,.markdown,.svg,.html,.htm,.pdf,.doc,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(event) => { onAddAttachments(event.target.files); event.target.value = ''; }} /></label>
+            <label className={`dash-chat-attach ${isRunning ? 'disabled' : ''}`} title={isRunning ? '任务执行中暂不支持追加附件' : '添加图片或文件'}><Paperclip size={15} /><input type="file" hidden disabled={isRunning} multiple accept="image/*,.txt,.md,.markdown,.svg,.html,.htm,.pdf,.doc,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(event) => { onAddAttachments(event.target.files); event.target.value = ''; }} /></label>
             {isRunning ? <><button type="button" onClick={onPause}><Pause size={13} />暂停</button><button type="button" className="stop" onClick={onStop}>停止</button></> : <button type="button" onClick={onResume} disabled><Play size={13} />继续</button>}
-            <button type="button" className="send" onClick={isRunning ? onStop : onSend} disabled={!isRunning && !draft.trim()} aria-label={isRunning ? '停止生成' : '发送消息'}><MorphIcon icon={isRunning ? stopIcon : sendIcon} size={17} strokeWidth={2} spring="snappy" reducedMotion="user" /></button>
+            <button type="button" className="send" onClick={isRunning ? onGuidance : onSend} disabled={!draft.trim() || (isRunning && (!canGuide || guidanceBusy))} aria-label={isRunning ? '加入当前任务' : '发送消息'} title={isRunning ? '加入当前任务' : '发送消息'}><MorphIcon icon={sendIcon} size={17} strokeWidth={2} spring="snappy" reducedMotion="user" /></button>
           </div>
         </div>
       </footer>

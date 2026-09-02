@@ -18,6 +18,7 @@ const checks = [
   ['租户隔离', 'qa:data-isolation'],
   ['任务删除', 'qa:task-delete'],
   ['人工审核', 'qa:human-review'],
+  ['执行中实时引导', 'qa:live-guidance'],
   ['运营观测', 'qa:operations'],
   ['Agent Nexus 工作流', 'qa:workflow'],
   ['工作流历史', 'qa:workflow-history'],

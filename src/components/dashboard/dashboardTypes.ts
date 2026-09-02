@@ -3,6 +3,21 @@ import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment
 import type { UiTheme } from '../../lib/uiTheme';
 
 export type ReviewResultState = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
+export type GuidanceState = {
+  guidanceId: string;
+  status: 'accepted' | 'applied';
+  delivery: 'builtin-next-safe-point' | 'external-harness';
+  message: string;
+  applicationPoint?: string;
+};
+export type RouteInsightState = {
+  route: string;
+  reason: string;
+  confidence?: number;
+  agentIds: string[];
+  skillIds: string[];
+  source?: string;
+};
 
 export type DashboardProps = {
   phase: AgentPhase;
@@ -22,6 +37,11 @@ export type DashboardProps = {
   onPause: () => void;
   onResume: () => void;
   isRunning: boolean;
+  canGuide: boolean;
+  guidanceBusy: boolean;
+  guidanceState: GuidanceState | null;
+  onGuidance: () => void;
+  routeInsight: RouteInsightState | null;
   /** Latest user-facing activity derived from a real gateway or workflow event. */
   agentActivity: string;
   theme: UiTheme;

@@ -248,6 +248,28 @@ export class HarnessTaskBridge {
     return this.adapter.approve(requestId, decision, note);
   }
 
+  /**
+   * Steer only a task currently owned by this bridge. `undefined` means the
+   * built-in runtime owns the task; a rejected result means an external
+   * Harness is active but did not accept live steering.
+   */
+  async steer(taskId: string, note: string) {
+    const delegation = this.active.get(taskId);
+    if (!delegation) return undefined;
+    const capabilities = await this.adapter.handshake();
+    if (!capabilities.configured || !capabilities.compatible || !capabilities.active) {
+      return {
+        accepted: false,
+        delegated: true,
+        command: 'steer' as const,
+        reason: capabilities.reason || '外部 Harness 当前不可用。',
+        capabilities,
+      };
+    }
+    const result = await this.adapter.steer(delegation.thread.threadId, note);
+    return { ...result, capabilities };
+  }
+
   async stop(taskId: string) {
     const delegation = this.active.get(taskId);
     if (!delegation) return;

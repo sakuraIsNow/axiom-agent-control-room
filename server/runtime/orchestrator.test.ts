@@ -138,6 +138,15 @@ class MinimalPlanModel extends FakeModel {
   }
 }
 
+class GuidanceCaptureModel extends FakeModel {
+  readonly guidanceRequests: ModelCompletionRequest[] = [];
+
+  async complete(request: ModelCompletionRequest) {
+    if (request.user.includes('先校验迁移兼容性，再继续实现。')) this.guidanceRequests.push(request);
+    return super.complete(request);
+  }
+}
+
 class ConditionalWorkflowModel extends FakeModel {
   async complete(request: ModelCompletionRequest) {
     if (request.system.includes('You are a analyst sub-agent') && request.user.includes('decide approval')) {
@@ -453,6 +462,55 @@ describe('WorkflowOrchestrator', () => {
       assert.ok(events.some((event) => event.type === 'graph.extended'));
       assert.ok(events.some((event) => event.type === 'task.planning' && event.agentId === 'scheduler-agent'));
       assert.equal(events.some((event) => event.type === 'task.planning' && event.agentId === 'planner'), false);
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('applies each live guidance event once at the next safe execution point', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await store.createTask({
+        tenantId: 'tenant-guidance',
+        userId: 'user-guidance',
+        sessionId: 'session-guidance',
+        title: 'guidance-once',
+        input: '完成数据库迁移方案和上线检查。',
+        mode: 'build',
+        plan: {
+          summary: '顺序完成分析与交付。',
+          routingReason: '第二步依赖第一步。',
+          profile: { kind: 'implementation', difficulty: 'moderate', route: 'team', score: 3, reasons: ['test'], maxSteps: 2, requiresReview: false },
+          steps: [
+            { id: 'analyze', title: '分析迁移', role: 'analyst', objective: '分析迁移风险。', dependsOn: [], acceptanceCriteria: ['风险明确'], skillIds: ['architecture-design'] },
+            { id: 'deliver', title: '形成方案', role: 'builder', objective: '形成上线方案。', dependsOn: ['analyze'], acceptanceCriteria: ['步骤可执行'], skillIds: ['implementation'] },
+          ],
+          approvalStatus: 'approved',
+          version: 1,
+        },
+      });
+      const accepted = await store.appendEvent(task, {
+        type: 'human.guidance_accepted',
+        payload: {
+          guidanceId: 'guidance-once-1',
+          message: '先校验迁移兼容性，再继续实现。',
+          behavior: 'continue',
+          author: 'user-guidance',
+          delivery: 'builtin-next-safe-point',
+        },
+      });
+      const model = new GuidanceCaptureModel();
+      const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }))
+        .run(task, new AbortController().signal);
+      assert.equal(result.status, 'completed');
+      assert.equal(model.guidanceRequests.length, 1, 'guidance must not leak into later steps or synthesis');
+      assert.match(model.guidanceRequests[0]!.user, /Human operator notes:[\s\S]*先校验迁移兼容性/);
+      const applied = (await store.getEvents(task.id)).filter((event) => event.type === 'human.guidance_applied');
+      assert.equal(applied.length, 1);
+      assert.equal(applied[0]?.payload.guidanceId, 'guidance-once-1');
+      assert.equal(applied[0]?.payload.acceptedSequence, accepted.sequence);
+      assert.equal(Array.isArray(applied[0]?.payload.targetAgentIds), true);
     } finally {
       await store.close();
     }

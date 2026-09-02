@@ -24,6 +24,7 @@
     "qa:session-persistence": "node qa/session-persistence-regression.mjs",
     "qa:task-delete": "node qa/task-delete-regression.mjs",
     "qa:human-review": "node qa/human-review-controls-smoke.mjs",
+    "qa:live-guidance": "node qa/live-guidance-controls-smoke.mjs",
     "qa:review-delivery": "node qa/review-delivery-result-regression.mjs",
     "qa:operations": "node qa/operations-console-smoke.mjs",
     "qa:workflow": "node qa/workflow-studio-smoke.mjs",

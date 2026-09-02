@@ -354,6 +354,8 @@ export type WorkflowEventType =
   | 'budget.exceeded'
   | 'budget.constrained'
   | 'human.note'
+  | 'human.guidance_accepted'
+  | 'human.guidance_applied'
   | 'artifact.created'
   | 'task.completed'
   | 'task.failed'
