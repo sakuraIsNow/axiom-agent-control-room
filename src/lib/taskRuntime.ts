@@ -1,4 +1,4 @@
-import type { AgentMode, ChatRouteDecision, OperationsSnapshot, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
+import type { AgentMode, ChatRouteDecision, OperationsAlertsSnapshot, OperationsSnapshot, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
 import type { ExecutionPolicy } from '../types';
 import { consumeSseBlocks } from './sse';
 
@@ -65,6 +65,16 @@ export async function getOperationsSnapshot(hours = 24, signal?: AbortSignal): P
   const body = await response.json().catch(() => null) as (OperationsSnapshot & { error?: string }) | null;
   if (!response.ok || !body?.generatedAt || !body.queue || !body.workers || !body.sla) {
     throw new Error(body?.error ?? `Operations snapshot returned ${response.status}.`);
+  }
+  return body;
+}
+
+export async function getOperationsAlerts(hours = 24, signal?: AbortSignal): Promise<OperationsAlertsSnapshot> {
+  const safeHours = Math.min(168, Math.max(1, Math.floor(hours)));
+  const response = await fetch(`/api/runtime/alerts?hours=${safeHours}`, { signal });
+  const body = await response.json().catch(() => null) as (OperationsAlertsSnapshot & { error?: string }) | null;
+  if (!response.ok || !body?.generatedAt || !body.summary || !Array.isArray(body.alerts)) {
+    throw new Error(body?.error ?? `Runtime alerts returned ${response.status}.`);
   }
   return body;
 }

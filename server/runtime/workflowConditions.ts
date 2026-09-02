@@ -39,15 +39,54 @@ export const evaluateWorkflowConditions = (
   resultsByStepId: ReadonlyMap<string, StepResult>,
 ) => {
   if (!conditions?.length) return { ready: true, selected: true, missing: [] as string[] };
-  const missing = conditions
-    .map((condition) => condition.sourceStepId)
-    .filter((stepId) => !resultsByStepId.has(stepId));
+  const evaluations = explainWorkflowConditions(conditions, resultsByStepId);
+  const missing = evaluations.filter((evaluation) => !evaluation.sourceAvailable).map((evaluation) => evaluation.sourceStepId);
   if (missing.length) return { ready: false, selected: false, missing: [...new Set(missing)] };
-  const selected = conditions.every((condition) => {
-    const source = resultsByStepId.get(condition.sourceStepId);
-    if (!source) return false;
-    const matches = evaluateWorkflowCondition(condition.expression, source);
-    return condition.branch === 'true' ? matches : !matches;
-  });
+  const selected = evaluations.every((evaluation) => evaluation.selected);
   return { ready: true, selected, missing: [] as string[] };
 };
+
+export type WorkflowConditionEvaluation = {
+  sourceStepId: string;
+  expression: string;
+  branch: 'true' | 'false';
+  sourceAvailable: boolean;
+  sourceStatus?: StepResult['status'];
+  sourceConfidence?: number;
+  sourceOutputChars?: number;
+  predicateMatched?: boolean;
+  selected: boolean;
+};
+
+/**
+ * Return bounded, non-executable evidence for a branch decision. This is
+ * persisted with runtime events so the UI can explain why an Agent ran or was
+ * skipped without exposing the entire upstream output.
+ */
+export const explainWorkflowConditions = (
+  conditions: WorkflowStepCondition[] | undefined,
+  resultsByStepId: ReadonlyMap<string, StepResult>,
+): WorkflowConditionEvaluation[] => (conditions ?? []).map((condition) => {
+  const source = resultsByStepId.get(condition.sourceStepId);
+  if (!source) {
+    return {
+      sourceStepId: condition.sourceStepId,
+      expression: condition.expression,
+      branch: condition.branch,
+      sourceAvailable: false,
+      selected: false,
+    };
+  }
+  const predicateMatched = evaluateWorkflowCondition(condition.expression, source);
+  return {
+    sourceStepId: condition.sourceStepId,
+    expression: condition.expression,
+    branch: condition.branch,
+    sourceAvailable: true,
+    sourceStatus: source.status,
+    sourceConfidence: source.confidence,
+    sourceOutputChars: source.output.length,
+    predicateMatched,
+    selected: condition.branch === 'true' ? predicateMatched : !predicateMatched,
+  };
+});

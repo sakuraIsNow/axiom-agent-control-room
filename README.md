@@ -91,7 +91,7 @@ Synthesizer：只汇总已验证的结果
 
 ```text
 npm run check       通过
-npm test            315 passed / 0 failed
+npm test            320 passed / 0 failed
 npm run build       通过
 npm run qa:search-agent
                     通过
@@ -137,6 +137,7 @@ npm run perf:smoke
 - 🧱 **插件小程序**：创建天气、咨询、小游戏等独立插件，在平台内打开使用。
 - 🧑‍💻 **人工接管**：高风险或需要确认的步骤会停下来，等你批准后继续。
 - 📡 **实时可见**：任务进度、Agent Graph、事件流和最终交付状态都会实时更新。
+- 🚦 **异常会主动提示**：运行观测会根据真实队列、Worker 租约、模型/工具失败、Artifact 清理和 Readiness 状态生成告警，不需要盯着数字猜问题。
 - ✍️ **边做边改**：复杂任务执行中可以继续补充要求，页面会告诉你 Agent 已接收还是已经应用。
 
 ## 🗓️ Agent 日程
@@ -298,6 +299,7 @@ npm run qa:visual   # 浏览器界面验收
 npm run qa:business # 分段业务闭环评测
 npm run qa:context-summary # 持久摘要 API 回归
 npm run qa:harness-live # 已配置 sidecar 的真实能力握手
+npm run qa:object-storage # 已配置 MinIO/S3/COS 时验证跨 Worker Artifact
 npm run qa:all      # 生产门禁回归
 ```
 

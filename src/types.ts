@@ -598,6 +598,25 @@ export type OperationsSnapshot = {
   sla: { terminalTasks: number; completed: number; failed: number; cancelled: number; successRate: number | null; p50DurationMs: number; p95DurationMs: number };
 };
 
+export type OperationsAlertSeverity = 'critical' | 'warning' | 'info';
+export type OperationsAlert = {
+  id: string;
+  severity: OperationsAlertSeverity;
+  title: string;
+  detail: string;
+  metric: string;
+  value: number | string;
+  threshold?: number | string;
+  source: 'queue' | 'worker' | 'model' | 'tool' | 'review' | 'artifact' | 'readiness';
+};
+export type OperationsAlertsSnapshot = {
+  generatedAt: string;
+  windowHours: number;
+  readinessState?: 'ready' | 'degraded' | 'blocked';
+  summary: { critical: number; warning: number; info: number };
+  alerts: OperationsAlert[];
+};
+
 export type ScheduleCadence =
   | { kind: 'once'; runAt: string; timezone: string }
   | { kind: 'interval'; intervalSeconds: number; timezone: string }

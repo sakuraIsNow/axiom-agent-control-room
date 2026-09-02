@@ -1,7 +1,7 @@
-import { Activity, Bot, CheckCircle2, Clock3, Database, Gauge, Layers3, RefreshCw, ShieldAlert, Trash2, Wrench, XCircle } from 'lucide-react';
+import { Activity, AlertTriangle, Bot, CheckCircle2, Clock3, Database, Gauge, Layers3, RefreshCw, ShieldAlert, Siren, Trash2, Wrench, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { cleanupArtifacts, getOperationsSnapshot } from '../../lib/taskRuntime';
-import type { OperationsSnapshot } from '../../types';
+import { cleanupArtifacts, getOperationsAlerts, getOperationsSnapshot } from '../../lib/taskRuntime';
+import type { OperationsAlert, OperationsAlertsSnapshot, OperationsSnapshot } from '../../types';
 
 const formatDuration = (ms: number) => {
   if (!ms) return '—';
@@ -13,9 +13,11 @@ const formatDuration = (ms: number) => {
 const formatNumber = (value: number) => new Intl.NumberFormat('zh-CN', { notation: value > 9_999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value);
 const healthLabel = (health: OperationsSnapshot['models'][number]['health']) => health === 'healthy' ? '稳定' : health === 'degraded' ? '需关注' : '暂无数据';
 const healthClass = (health: OperationsSnapshot['models'][number]['health']) => `ops-health-${health}`;
+const alertLabel = (severity: OperationsAlert['severity']) => severity === 'critical' ? '立即处理' : severity === 'warning' ? '需要关注' : '提示';
 
 export function OperationsConsole() {
   const [snapshot, setSnapshot] = useState<OperationsSnapshot | null>(null);
+  const [alerts, setAlerts] = useState<OperationsAlertsSnapshot | null>(null);
   const [hours, setHours] = useState(24);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,8 +32,11 @@ export function OperationsConsole() {
     const load = async () => {
       setLoading(true);
       try {
-        const next = await getOperationsSnapshot(hours, controller.signal);
-        if (!disposed) { setSnapshot(next); setError(null); setUpdatedAt(Date.now()); }
+        const [next, nextAlerts] = await Promise.all([
+          getOperationsSnapshot(hours, controller.signal),
+          getOperationsAlerts(hours, controller.signal),
+        ]);
+        if (!disposed) { setSnapshot(next); setAlerts(nextAlerts); setError(null); setUpdatedAt(Date.now()); }
       } catch (caught) {
         if (!disposed && !(caught instanceof DOMException && caught.name === 'AbortError')) setError(caught instanceof Error ? caught.message : '运行观测暂时不可用。');
       } finally {
@@ -70,6 +75,7 @@ export function OperationsConsole() {
         <article className="ops-kpi"><span><Clock3 size={15} />P95 完成时长</span><strong>{formatDuration(snapshot.sla.p95DurationMs)}</strong><small>P50 {formatDuration(snapshot.sla.p50DurationMs)}</small></article>
       </div>
       <div className="ops-grid">
+        {alerts && <article className="ops-panel ops-alert-panel"><header><div><Siren size={15} /><strong>需要处理</strong></div><span>{alerts.alerts.length ? `${alerts.alerts.length} 条提醒` : '运行正常'}</span></header>{alerts.alerts.length ? <div className="ops-alert-list">{alerts.alerts.slice(0, 8).map((alert) => <div className={`ops-alert-row severity-${alert.severity}`} key={alert.id}><span className="ops-alert-icon">{alert.severity === 'critical' ? <AlertTriangle size={14} /> : <ShieldAlert size={14} />}</span><div><strong>{alert.title}</strong><p>{alert.detail}</p><small>{alertLabel(alert.severity)} · {alert.metric}</small></div></div>)}</div> : <div className="ops-alert-clear"><CheckCircle2 size={18} /><span>当前窗口没有需要处理的运行异常。</span></div>}<div className="ops-alert-summary"><span className="severity-critical">严重 {alerts.summary.critical}</span><span className="severity-warning">关注 {alerts.summary.warning}</span><span className="severity-info">提示 {alerts.summary.info}</span></div></article>}
         <article className="ops-panel ops-queue-panel"><header><div><Layers3 size={15} /><strong>队列与租约</strong></div><span>{queueTotal} 个活动任务</span></header><div className="ops-queue-list">{queueRows.map(([label, value, tone]) => <div className="ops-queue-row" key={label}><span>{label}</span><div><i className={`ops-queue-bar tone-${tone}`} style={{ width: `${queueTotal ? Math.max(4, value / queueTotal * 100) : 0}%` }} /></div><b>{value}</b></div>)}</div>{snapshot.workers.leases.length > 0 ? <div className="ops-lease-list">{snapshot.workers.leases.map((lease) => <div key={lease.workerId}><span>{lease.workerId}</span><b>{lease.taskCount} 个任务</b><small>{lease.leaseExpiresAt ? `到期 ${new Date(lease.leaseExpiresAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '无到期时间'}</small></div>)}</div> : <p className="ops-empty">当前没有持有租约的 Worker。</p>}</article>
         <article className="ops-panel"><header><div><Database size={15} /><strong>模型表现</strong></div><span>{snapshot.models.length} 个模型</span></header>{snapshot.models.length ? <div className="ops-table-wrap"><table className="ops-table"><thead><tr><th>模型</th><th>调用</th><th>成功率</th><th>延迟</th><th>Token</th><th>状态</th></tr></thead><tbody>{snapshot.models.map((model) => <tr key={model.model}><td title={model.model}>{model.model}</td><td>{model.calls}</td><td>{model.successRate === null ? '—' : `${model.successRate}%`}</td><td>{formatDuration(model.averageLatencyMs)}</td><td>{formatNumber(model.totalTokens)}</td><td><em className={healthClass(model.health)}>{healthLabel(model.health)}</em></td></tr>)}</tbody></table></div> : <p className="ops-empty">这段时间还没有模型调用。</p>}</article>
         <article className="ops-panel"><header><div><Wrench size={15} /><strong>工具失败分布</strong></div><span>{snapshot.tools.length} 个工具</span></header>{snapshot.tools.length ? <div className="ops-table-wrap"><table className="ops-table"><thead><tr><th>工具</th><th>调用</th><th>成功</th><th>失败</th><th>失败率</th></tr></thead><tbody>{snapshot.tools.map((tool) => <tr key={tool.name}><td title={tool.name}>{tool.name}</td><td>{tool.calls}</td><td>{tool.successes}</td><td className={tool.failures ? 'ops-danger' : ''}>{tool.failures}</td><td>{tool.failureRate}%</td></tr>)}</tbody></table></div> : <p className="ops-empty">这段时间没有工具调用。</p>}</article>

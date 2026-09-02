@@ -54,6 +54,8 @@ Every server-side model call emits `model.completed` with prompt, completion, to
 
 `GET /api/runtime/operations?hours=24` returns a tenant-scoped operational view built from durable `tasks` and `task_events` records. It includes active and expired Worker leases, queue depth by lifecycle state, model calls/latency/tokens/cost and event-derived health, tool failure distribution, Agent success rates, Reviewer approval and human-takeover counts, and terminal-task success plus P50/P95 duration. The window can be 1-168 hours and defaults to 24. The Dashboard's `运行观测` page polls this endpoint every 20 seconds; it does not use browser timers to invent task or Worker state.
 
+`GET /api/runtime/alerts?hours=24` uses the same durable snapshot together with the real Readiness probe to produce actionable `critical`/`warning`/`info` records. Queue backlog, stale leases, model/tool failures, human approvals, Artifact cleanup and missing production dependencies are all represented by stable alert IDs and metrics; thresholds are configured with `AXIOM_ALERT_*` variables. The endpoint is intentionally side-effect free so it can be scraped by an external alerting system without duplicating task state.
+
 ## Tool Registry
 
 The built-in registry is intentionally small and auditable:

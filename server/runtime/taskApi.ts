@@ -31,6 +31,7 @@ import { nextRunAtForCadence, scheduleCadenceSchema } from './scheduleCadence.js
 import { fallbackScheduleDraft, parseScheduleDraft, scheduleAgentPrompt } from './scheduleAgent.js';
 import { checkpointsFromEvents, diffCheckpointToTask, mergeCheckpointBranch } from './checkpointRuntime.js';
 import { attachPersistedContextMetadata, buildPersistedContextSummary, type DurableContextSourceMessage } from './contextSummary.js';
+import { buildOperationsAlerts } from './operationsAlerts.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -1729,6 +1730,20 @@ export const createTaskApi = (dependencies: {
     const hours = Number.isFinite(requestedHours) ? Math.min(168, Math.max(1, Math.floor(requestedHours))) : 24;
     const snapshot = await store.getOperationsSnapshot(tenantId, hours);
     return c.json({ ...snapshot, ...(artifactCatalog ? { artifacts: await artifactCatalog.stats(tenantId) } : {}) });
+  });
+
+  api.get('/runtime/alerts', async (c) => {
+    const { tenantId } = identity(c.req.raw.headers);
+    const requestedHours = Number(c.req.query('hours') ?? 24);
+    const hours = Number.isFinite(requestedHours) ? Math.min(168, Math.max(1, Math.floor(requestedHours))) : 24;
+    const [baseSnapshot, readiness] = await Promise.all([
+      store.getOperationsSnapshot(tenantId, hours),
+      getRuntimeReadiness(readinessDependencies),
+    ]);
+    const snapshot = artifactCatalog
+      ? { ...baseSnapshot, artifacts: await artifactCatalog.stats(tenantId) }
+      : baseSnapshot;
+    return c.json(buildOperationsAlerts(snapshot, readiness));
   });
 
   api.get('/runtime/artifacts', async (c) => {

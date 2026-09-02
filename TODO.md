@@ -569,7 +569,9 @@ npm run qa:search-agent
 - [x] DeepSeek Harness ACP Thread/Turn/Subscribe transport，并接入任务委托与断点恢复：ACP JSON-RPC stdio、统一事件、审批回放、Artifact/任务关联、断流暂停和跨重启恢复已通过 fake sidecar；HTTP capability discovery 仅用于兼容探测，真实 sidecar 现场验收仍需部署配置。
 - [x] Codex app-server JSON-RPC stdio/sidecar transport，固定 commit、workspace 和审批策略：协议 transport 与边界测试已完成，部署固定项待现场配置。
 - [x] Agent Nexus 条件分支、多 Loop、嵌套 Loop、节点级局部恢复和单节点重跑：已完成受限条件 DSL、最多 256 步展开、稳定 Loop 路径、分支事件和 rerun 检查点。
+- [x] Agent Nexus 分支可解释性第一阶段：`branch.selected`/`branch.skipped` 事件记录表达式、来源 Agent 状态、置信度、输出字符数和命中结果；不持久化完整上游正文，便于 UI/运营审计而不扩大事件体积。
 - [ ] OpenTelemetry、Prometheus、日志关联、队列/Worker 指标和跨重启持久化。
+- [x] 运行观测告警第一阶段：新增 `GET /api/runtime/alerts`，从持久化队列、Worker 租约、模型/工具失败、人工待确认、Artifact 清理和 Readiness 生成严重/关注/提示三级告警；阈值可由环境变量调整，前端运行观测已展示。
 - [ ] 插件签名、兼容性检查、版本回滚、权限声明和插件市场。
 - [ ] Provider 精确 tokenizer 与压缩质量评估；摘要版本、覆盖范围、来源 digest 和关键引用持久化已完成。
 - [ ] 登录开屏、3D Graph 降级视图、移动端节点抽屉、长日志虚拟滚动和场景按需分包。
@@ -675,7 +677,7 @@ npm run qa:search-agent
 - [x] 默认对话页和任务首页在持久任务执行中允许输入“补充要求”；暂停、停止与追加要求使用独立按钮。快速直答没有可恢复任务时保持只读，避免误建第二个任务。
 - [x] 补充要求写入当前会话上下文，并显示“已接收 / 已应用”单向状态；修复 SSE `applied` 先于 POST 响应时状态退回 `accepted` 的竞态。
 - [x] 对话顶部增加紧凑“本轮路径”，展示真实 Router/Scheduler 的路由、实际 Agent、Skill 与置信度；历史任务从持久计划恢复，不使用静态演示数据。
-- [x] 新增租户/用户隔离、终态拒绝、Builtin 一次性消费、Harness steer 成功/不可用、客户端请求和 `qa:live-guidance` 浏览器回归；当前 `npm test` 为 315/315，浏览器回归确认未创建第二任务且控制台零错误。
+- [x] 新增租户/用户隔离、终态拒绝、Builtin 一次性消费、Harness steer 成功/不可用、客户端请求和 `qa:live-guidance` 浏览器回归；当前 `npm test` 为 320/320，浏览器回归确认未创建第二任务且控制台零错误。
 
 ### Runtime 下一步
 
@@ -684,4 +686,4 @@ npm run qa:search-agent
 3. [x] 持久化上下文摘要版本：SQLite/PostgreSQL 保存摘要版本、覆盖消息 ID、来源 digest、Artifact、审批、人工要求和未完成事项；追加消息增量升版，已覆盖消息变化时拒绝旧摘要并重建。`qa:context-summary` 与跨重启 TaskStore 回归已通过。
 4. [x] HarnessEval-W 业务评测扩展：`qa:business` 改为分段评测，持续保存 metadata、partial progress 和 artifact validation；覆盖按难度路由、跨轮新增/跳过 Agent、Skill 漂移、人工要求单次应用、Harness steer 真实状态、长结果引用/存储故障、摘要恢复和 Checkpoint 冲突。当前 6/6 分段通过。
 5. [ ] DeepSeek ACP / Codex sidecar 现场验收：2026-09-02 已用本机 Codex CLI `0.149.1` 完成真实 app-server v2 stdio 握手，协议、版本、Thread/Turn/steer/审批/回放能力识别通过；DeepSeek rc.8 源码包需要 Node >=22.19 与 pnpm。仍需在目标部署固定版本、workspace、审批策略并完成真实任务 steer、断流回放、故障注入和跨 Worker 接管，不能用协议 fake sidecar 或单次握手代替。
-6. [x] 本批发布门禁：`npm run check`、`npm test`（315/315）、`npm run build` 和 `npm run qa:all` 全部通过；生产门禁为 24 passed / 0 failed / 4 skipped，跳过项均为未配置的外部服务现场验收。Checkpoint 非法 ID 统一返回 400，人工审核浏览器回归不再产生 PostgreSQL UUID 500。
+6. [x] 本批发布门禁：`npm run check`、`npm test`（320/320）、`npm run build` 和 `npm run qa:all` 全部通过；生产门禁为 24 passed / 0 failed / 4 skipped，跳过项均为未配置的外部服务现场验收。Checkpoint 非法 ID 统一返回 400，人工审核浏览器回归不再产生 PostgreSQL UUID 500。

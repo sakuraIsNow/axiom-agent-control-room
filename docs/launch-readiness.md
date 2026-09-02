@@ -10,7 +10,7 @@
 
 ## 最新本机验证（2026-09-02）
 
-在当前 Windows 单节点、PostgreSQL 数据规模和 10 并发条件下，50 次请求全部返回 HTTP 200：health `1765.74 RPS / P95 8.78ms`，Readiness `2055.90 RPS / P95 5.36ms`，运行观测 `888.16 RPS / P95 24.06ms`，任务列表 `2358.48 RPS / P95 4.93ms`。标准门禁的单元测试为 `315/315`；本次 `npm run qa:all` 结果为 `24 passed / 0 failed / 4 skipped`。跳过项分别是未配置正式 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令。原生搜索、会话路由、本轮复杂 Runtime、Checkpoint、持久摘要和 118 项视觉断言均通过；复杂 Runtime 产生 800 个连续事件、717 个可见流式增量和 24,686 Token，并正常交付 Artifact。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
+在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1290.18 RPS / P95 11.29ms`、Readiness `1350.02 RPS / P95 7.86ms`、运行观测 `1412.09 RPS / P95 8.87ms`、任务列表 `1918.68 RPS / P95 7.03ms`。标准门禁的单元测试为 `320/320`；本次 `npm run qa:all` 结果为 `24 passed / 0 failed / 4 skipped`。跳过项分别是未配置正式 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令。原生搜索、会话路由、本轮复杂 Runtime、Checkpoint、持久摘要、运行观测告警和视觉回归均通过；复杂 Runtime 产生 800 个连续事件、717 个可见流式增量和 24,686 Token，并正常交付 Artifact。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 
@@ -26,11 +26,12 @@
 | 多实例 Artifact | 生命周期目录已接入，外部存储部署未验收 | `artifact_records`/`artifact_references` 持久化来源、保留期、引用和清理状态；S3 兼容 Put/Get/Delete、租户作用域 key、超时和 `HeadBucket` 探测已接入；`npm run qa:object-storage` 可在配置 endpoint 后验证双 Worker 读写、租户隔离、删除和大对象回读；当前仍使用本地目录，需配置 MinIO/S3/COS 并完成真实验收 |
 | 多实例触发器 | 基础可用 | 配置 `DATABASE_URL` 时使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 调度和租约；Webhook 已有 HMAC、幂等、指数退避和死信恢复，仍需外部告警与多实例压测 |
 | 用户与租户隔离 | 仅有边界 | HMAC principal 已实现，但本地未启用；公网不能信任客户端租户 header |
-| 可观测性 | 基础可用 | Prometheus 文本指标已启用；进程内 counters 重启清零，OTel exporter 尚未接入 |
+| 可观测性 | 基础可用 | Prometheus 文本指标、持久任务/事件运营快照和告警 API 已启用；进程内 counters 重启清零，OTel exporter 尚未接入 |
 | Harness/Codex transport | 协议级完成，现场接入待配置 | DeepSeek ACP 与 Codex app-server v2 JSON-RPC stdio、Thread/Turn/Item 事件、审批回放、断点恢复和断流补偿已通过 fake sidecar；真实 sidecar 需固定版本和 workspace |
 | Agent Nexus 控制流 | 已可用 | 条件 DSL、多 Loop/嵌套 Loop（最多 256 步）、分支事件、DAG 展开和节点级局部重跑已通过单元/API 回归 |
 | Checkpoint 分支与合并 | 已可用 | revision 原子冲突检测、幂等分支、差异比较和三方合并已通过单元/API/浏览器回归；冲突策略必须显式选择 |
 | 长结果与上下文恢复 | 已可用，外部对象存储待现场配置 | 大步骤输出使用 `result_ref`，普通 Agent 只接收预览，Reviewer/Synthesizer 有界回读；持久摘要带来源 digest，漂移后自动重建；对象存储故障时数据库保留全文 |
+| 运行告警 | 已可用 | `GET /api/runtime/alerts` 根据队列积压、租约过期、模型/工具失败、Artifact 清理和 Readiness 生成带严重级别的告警；阈值由环境变量控制 |
 
 ## 上线前必须补齐
 
@@ -64,6 +65,7 @@
 
 - `npm run qa:business` 已按 HarnessEval-W 的分段思路保存 metadata、partial progress 和 artifact validation，覆盖按难度路由、跨轮 Agent/Skill 漂移、执行中改需求、Harness steer 真实状态、长结果边界、摘要恢复和 Checkpoint 冲突。下一步继续增加真实行业任务集、引用正确率、证据树和跨模型/跨版本质量基线；当前 6 个控制流分段不能代表所有真实业务准确率。
 - 记录每个模型请求的 trace/span、token、成本、重试、队列等待和人工接管率；把内存 counters 外置到 Prometheus/OTel。
+- 将 `GET /api/runtime/alerts` 接入通知渠道或 Grafana Alerting，并按租户配置告警阈值；当前接口只负责计算和展示，不直接发送外部通知。
 - 对高风险输出增加引用、证据来源、置信度和“未验证假设”字段，并建立线上反馈闭环。
 
 ## 相对常见产品的差异

@@ -1685,6 +1685,25 @@
 .ops-panel > header svg { color: var(--dash-accent); }
 .ops-panel > header strong { color: var(--dash-ink); font-size: 12px; font-weight: 620; }
 .ops-panel > header > span { color: var(--dash-muted); font-size: 9px; }
+.ops-alert-panel { grid-column: 1 / -1; min-height: 0; }
+.ops-alert-list { display: grid; gap: 8px; padding-top: 12px; }
+.ops-alert-row { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 9px; align-items: start; padding: 10px 11px; border: 1px solid var(--dash-line); border-left: 2px solid var(--dash-muted); border-radius: 7px; background: rgb(255 255 255 / 3%); }
+.ops-alert-row.severity-critical { border-left-color: #ee7d86; background: rgb(154 46 57 / 12%); }
+.ops-alert-row.severity-warning { border-left-color: #d9b362; background: rgb(157 115 40 / 10%); }
+.ops-alert-row.severity-info { border-left-color: var(--dash-accent); }
+.ops-alert-icon { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid var(--dash-line); border-radius: 6px; color: var(--dash-accent); background: rgb(255 255 255 / 4%); }
+.severity-critical .ops-alert-icon { color: #ee7d86; }
+.severity-warning .ops-alert-icon { color: #d9b362; }
+.ops-alert-row strong { display: block; color: var(--dash-ink); font-size: 11px; font-weight: 620; }
+.ops-alert-row p { margin: 3px 0 0; color: var(--dash-soft); font-size: 10px; line-height: 1.45; }
+.ops-alert-row small { display: block; margin-top: 5px; color: var(--dash-muted); font-size: 9px; }
+.ops-alert-clear { display: flex; align-items: center; gap: 9px; min-height: 64px; padding-top: 10px; color: var(--dash-muted); font-size: 10px; }
+.ops-alert-clear svg { color: var(--dash-accent); }
+.ops-alert-summary { display: flex; gap: 14px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--dash-line); color: var(--dash-muted); font-size: 9px; }
+.ops-alert-summary span { display: inline-flex; align-items: center; gap: 4px; }
+.ops-alert-summary .severity-critical { color: #ee7d86; }
+.ops-alert-summary .severity-warning { color: #d9b362; }
+.ops-alert-summary .severity-info { color: var(--dash-accent); }
 .ops-inline-action { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--dash-line); border-radius: 999px; padding: 5px 8px; background: color-mix(in srgb, var(--dash-accent) 8%, transparent); color: var(--dash-ink); font-size: 10px; cursor: pointer; }
 .ops-inline-action:disabled { cursor: wait; opacity: .55; }
 .ops-artifact-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding-top: 14px; }

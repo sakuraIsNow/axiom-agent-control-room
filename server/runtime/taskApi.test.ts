@@ -478,6 +478,27 @@ test('checkpoint APIs reject malformed task and checkpoint identifiers with 400 
   }
 });
 
+test('runtime alerts combine durable operations with readiness without fabricating task state', async () => {
+  const { store, api } = await createHarness();
+  try {
+    const response = await request(api, '/runtime/alerts?hours=72');
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      windowHours: number;
+      summary: { critical: number; warning: number; info: number };
+      alerts: Array<{ source: string; metric: string }>;
+      readinessState?: string;
+    };
+    assert.equal(body.windowHours, 72);
+    assert.ok(body.summary && Number.isInteger(body.summary.warning));
+    assert.ok(Array.isArray(body.alerts));
+    assert.equal(body.alerts.some((alert) => alert.source === 'queue' && alert.metric === 'queue.queued'), false);
+    assert.ok(['ready', 'degraded', 'blocked'].includes(body.readinessState ?? 'degraded'));
+  } finally {
+    await store.close();
+  }
+});
+
 test('runtime readiness reports the selected Codex transport instead of a stale DeepSeek probe', async () => {
   const store = new SqliteTaskStore(':memory:');
   await store.initialize();

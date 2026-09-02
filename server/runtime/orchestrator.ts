@@ -27,7 +27,7 @@ import { agentCatalog, appendMissingAgentDirectory } from './agentCatalog.js';
 import { ToolApprovalRequiredError, ToolRegistry, type ToolExecution } from './toolRegistry.js';
 import { executeWorkflowSpecialist, isWorkflowSpecialist } from './workflowSpecialists.js';
 import { routeSkillIds, runtimeSkillCatalog, skillInstructions } from './skillCatalog.js';
-import { evaluateWorkflowConditions } from './workflowConditions.js';
+import { evaluateWorkflowConditions, explainWorkflowConditions } from './workflowConditions.js';
 import { analyzeWorkflowDag, workflowDagIssueText } from './workflowDag.js';
 import { summarizeCompletionEvidence } from './completionEvidence.js';
 import { selectNonConflictingSteps } from './workflowConcurrency.js';
@@ -2054,14 +2054,16 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         const executableCandidates: WorkflowStep[] = [];
         for (const step of readyCandidates) {
           const decision = evaluateWorkflowConditions(step.conditions, resultsByStepId);
+          const conditionEvidence = explainWorkflowConditions(step.conditions, resultsByStepId);
           if (!decision.ready) continue;
           if (!step.conditions?.length || decision.selected) {
             if (step.conditions?.length) {
               for (const condition of step.conditions) {
+                const evidence = conditionEvidence.find((candidate) => candidate.sourceStepId === condition.sourceStepId && candidate.expression === condition.expression && candidate.branch === condition.branch);
                 await this.emit(task, {
                   type: 'branch.selected',
                   agentId: `${step.role}-${step.id}`,
-                  payload: { stepId: step.id, sourceStepId: condition.sourceStepId, expression: condition.expression, branch: condition.branch },
+                  payload: { stepId: step.id, sourceStepId: condition.sourceStepId, expression: condition.expression, branch: condition.branch, evaluation: evidence },
                 });
               }
             }
@@ -2089,6 +2091,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
             payload: {
               stepId: step.id,
               conditions: step.conditions,
+              evaluations: conditionEvidence,
               reason: 'condition-not-matched',
             },
           });
