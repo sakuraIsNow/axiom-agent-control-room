@@ -64,6 +64,7 @@ export type DashboardProps = {
    * grouped card so the visible card disappears in one user action.
    */
   onDeleteTask: (taskId: string, taskIds?: string[]) => Promise<boolean>;
+  onRefreshTasks: () => Promise<void>;
   sessionId: string;
   sessions: Session[];
   activeSession: Session;

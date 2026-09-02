@@ -4,6 +4,7 @@ import { latestUserInput } from '../../lib/conversationInput';
 import { taskStatusLabels } from '../../lib/graphPresentation';
 import { canHumanReviewTask } from '../../lib/humanReviewState';
 import { localizeRuntimeText, taskDifficultyLabel, taskKindLabel, taskReasonLabel, taskRouteLabel, taskStageLabel } from '../../lib/taskPresentation';
+import { CheckpointPanel } from './CheckpointPanel';
 
 type ReviewResult = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
 
@@ -27,6 +28,7 @@ export function TaskDetailPanel({
   onRequestReject,
   onResubmit,
   onDeleteTask,
+  onCheckpointTaskCreated,
 }: {
   task: WorkflowTaskSummary | null;
   sessionTopic: string | null;
@@ -40,6 +42,7 @@ export function TaskDetailPanel({
   onRequestReject: () => void;
   onResubmit: (input: string) => void;
   onDeleteTask: (taskId: string) => void;
+  onCheckpointTaskCreated: (taskId: string) => Promise<void>;
 }) {
   if (!task && !taskProfile) {
     return <aside className="dash-detail-panel dash-empty"><Compass size={18} /><span>选择或提交一个任务查看详情</span></aside>;
@@ -91,6 +94,7 @@ export function TaskDetailPanel({
         {['completed', 'failed', 'cancelled'].includes(task.status) && <button type="button" className="dash-detail-delete" onClick={() => onDeleteTask(task.id)}><Trash2 size={13} />删除</button>}
       </div>
     </div>}
+    {task && <CheckpointPanel task={task} onTaskCreated={onCheckpointTaskCreated} />}
     <div className="dash-detail-section">
       <div className="dash-detail-head"><Compass size={14} /><span>路由依据</span></div>
       {effectiveProfile && effectiveProfile.reasons.length > 0

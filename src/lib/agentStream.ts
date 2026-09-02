@@ -27,7 +27,7 @@ export async function streamAgentResponse(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      messages: messages.map(({ role, content, attachments }) => ({ role, content, attachments })),
+      messages: messages.map(({ id, role, content, taskId, attachments }) => ({ id, role, content, taskId, attachments })),
       mode,
       sessionId,
       provider: provider?.useCustom

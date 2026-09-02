@@ -1,4 +1,5 @@
 import type { Logger } from 'pino';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type {
   ReviewResult,
@@ -12,6 +13,7 @@ import type {
   AgentGraphNode,
   AgentGraphEdge,
   AgentMessage,
+  ArtifactRef,
   WorkflowPlan,
   WorkflowStep,
   WorkflowTask,
@@ -562,6 +564,8 @@ export class WorkflowOrchestrator {
   private readonly reviewMinScore: number;
   private readonly synthesisMaxTokens: number;
   private readonly synthesisContinuationRounds: number;
+  private readonly stepResultArtifactThreshold: number;
+  private readonly stepResultPreviewChars: number;
 
   constructor(
     private readonly store: TaskStore,
@@ -602,6 +606,10 @@ export class WorkflowOrchestrator {
     this.synthesisMaxTokens = Math.min(64_000, Math.max(1_024, Number.isFinite(configuredSynthesisTokens) ? configuredSynthesisTokens : 8_192));
     const configuredContinuationRounds = Number(process.env.AGENT_SYNTHESIS_MAX_CONTINUATIONS ?? 4);
     this.synthesisContinuationRounds = Math.min(6, Math.max(0, Number.isFinite(configuredContinuationRounds) ? configuredContinuationRounds : 4));
+    const configuredArtifactThreshold = Number(process.env.AGENT_STEP_RESULT_ARTIFACT_THRESHOLD ?? 12_000);
+    this.stepResultArtifactThreshold = Math.min(120_000, Math.max(2_000, Number.isFinite(configuredArtifactThreshold) ? configuredArtifactThreshold : 12_000));
+    const configuredPreviewChars = Number(process.env.AGENT_STEP_RESULT_PREVIEW_CHARS ?? 4_000);
+    this.stepResultPreviewChars = Math.min(this.stepResultArtifactThreshold, Math.max(1_000, Number.isFinite(configuredPreviewChars) ? configuredPreviewChars : 4_000));
   }
 
   private modelForTask(task: WorkflowTask) {
@@ -657,6 +665,105 @@ export class WorkflowOrchestrator {
     }
   }
 
+  private async materializeStepResult(
+    task: WorkflowTask,
+    result: StepResult,
+    fullOutput: string,
+    handoff?: string,
+  ): Promise<StepResult> {
+    const outputChars = fullOutput.length;
+    if (outputChars <= this.stepResultArtifactThreshold) return { ...result, output: fullOutput, outputChars };
+
+    // External storage is an optimization. Without it, keep the complete
+    // bounded model output in the durable task row so no successful Agent
+    // result disappears because an optional dependency is unavailable.
+    if (!this.artifactStore) return { ...result, output: fullOutput, outputChars };
+
+    const digest = createHash('sha256').update(fullOutput, 'utf8').digest('hex').slice(0, 20);
+    const artifactId = `step-result:${task.id}:${result.stepId}:${digest}`;
+    try {
+      const stored = await this.artifactStore.put(artifactId, fullOutput, task.tenantId);
+      const resultRef: ArtifactRef = {
+        id: artifactId,
+        kind: 'step-output',
+        name: `${result.stepId}.md`,
+        key: stored.key,
+        bytes: stored.bytes,
+        mimeType: 'text/markdown',
+        sourceStepId: result.stepId,
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        await this.artifactCatalog?.register({
+          id: artifactId,
+          tenantId: task.tenantId,
+          taskId: task.id,
+          source: 'result',
+          storageKey: stored.key,
+          bytes: stored.bytes,
+          mimeType: 'text/markdown',
+          referenceKey: `step:${result.stepId}:${digest}`,
+        });
+      } catch (error) {
+        this.logger.warn({ taskId: task.id, stepId: result.stepId, artifactId, error }, 'step result Artifact catalog registration failed');
+      }
+      const existingArtifacts = (result.artifacts ?? []).filter((artifact) => artifact.id !== artifactId);
+      const previewSource = handoff?.trim() || fullOutput;
+      const preview = `${limitText(previewSource, this.stepResultPreviewChars)}\n\n[完整结果已保存为 Artifact：${artifactId}，共 ${outputChars} 字符]`;
+      await this.emit(task, {
+        type: 'artifact.created',
+        agentId: result.agentId,
+        payload: { ...resultRef, artifactId, storage: { kind: this.artifactStore.kind, key: stored.key, bytes: stored.bytes } },
+      });
+      return {
+        ...result,
+        output: preview,
+        outputChars,
+        outputTruncated: true,
+        resultRef,
+        artifacts: [...existingArtifacts, resultRef],
+      };
+    } catch (error) {
+      this.logger.warn({ taskId: task.id, stepId: result.stepId, artifactId, error }, 'step result Artifact storage failed; database output remains authoritative');
+      return { ...result, output: fullOutput, outputChars };
+    }
+  }
+
+  private async buildResultContext(
+    task: WorkflowTask,
+    results: StepResult[],
+    options: { maxPerResult: number; maxTotal: number; dereference: boolean },
+  ) {
+    let remaining = Math.max(1_000, options.maxTotal);
+    const sections: string[] = [];
+    const artifactRefs: string[] = [];
+    for (const result of results) {
+      if (remaining <= 0) break;
+      let output = result.output;
+      let dereferenced = false;
+      if (options.dereference && result.resultRef && this.artifactStore) {
+        try {
+          const stored = await this.artifactStore.get(result.resultRef.id, task.tenantId);
+          if (stored !== null) {
+            output = stored;
+            dereferenced = true;
+            artifactRefs.push(result.resultRef.id);
+          }
+        } catch (error) {
+          this.logger.warn({ taskId: task.id, stepId: result.stepId, artifactId: result.resultRef.id, error }, 'step result Artifact read failed; using durable preview');
+        }
+      }
+      const allowance = Math.min(options.maxPerResult, remaining);
+      const body = limitText(output, allowance);
+      const reference = result.resultRef
+        ? `\nresult_ref: ${result.resultRef.id}${dereferenced ? '（本次已受控读取）' : ''}`
+        : '';
+      sections.push(`### ${result.stepId} (${result.role})\n${body}${reference}\nEvidence: ${JSON.stringify(result.evidence)}\nConfidence: ${result.confidence}`);
+      remaining -= body.length + reference.length;
+    }
+    return { text: sections.join('\n\n'), artifactRefs: [...new Set(artifactRefs)] };
+  }
+
   private async emit(
     task: Pick<WorkflowTask, 'id' | 'runId'>,
     event: Omit<RuntimeEvent, 'id' | 'taskId' | 'runId' | 'sequence' | 'timestamp' | 'version'>,
@@ -664,6 +771,28 @@ export class WorkflowOrchestrator {
     const persisted = await this.store.appendEvent(task, event);
     this.hub.publish(persisted);
     return persisted;
+  }
+
+  private async saveCheckpoint(task: WorkflowTask, results: StepResult[], stage: string, totalSteps: number) {
+    return this.emit(task, {
+      type: 'checkpoint.saved',
+      payload: {
+        checkpointId: randomUUID(),
+        stage,
+        revision: task.revision,
+        planVersion: task.planVersion ?? 0,
+        graphRevision: task.plan?.graph?.revision ?? 0,
+        completedSteps: results.filter((result) => result.status === 'completed' || result.skipped).length,
+        failedSteps: results.filter((result) => result.status === 'failed' && !result.skipped).length,
+        totalSteps,
+        snapshot: {
+          plan: task.plan ?? null,
+          stepResults: results,
+          review: task.review ?? null,
+          result: task.result ?? null,
+        },
+      },
+    });
   }
 
   private async assertActive(taskId: string, signal: AbortSignal) {
@@ -809,9 +938,18 @@ export class WorkflowOrchestrator {
     const promptTokens = Number(completion.usage?.prompt_tokens ?? completion.usage?.input_tokens ?? 0);
     const completionTokens = Number(completion.usage?.completion_tokens ?? completion.usage?.output_tokens ?? 0);
     const totalTokens = Number(completion.usage?.total_tokens ?? promptTokens + completionTokens);
+    const promptCacheHitTokens = Math.max(0, Number(completion.usage?.prompt_cache_hit_tokens ?? 0));
+    const promptCacheMissTokens = Math.max(0, Number(completion.usage?.prompt_cache_miss_tokens ?? 0));
+    const promptCacheMeasuredTokens = promptCacheHitTokens + promptCacheMissTokens;
+    const cacheNamespace = request.cacheNamespace ?? `axiom:${stage.replace(/:[^:]+(?:$|:attempt:\d+$)/, '')}`;
+    const cacheKey = request.cacheKey ?? createHash('sha256').update(request.system, 'utf8').digest('hex').slice(0, 24);
     const inputRate = Number(process.env.AGENT_INPUT_COST_PER_1K_USD ?? 0);
+    const cacheHitInputRate = Number(process.env.AGENT_CACHE_HIT_INPUT_COST_PER_1K_USD ?? inputRate);
     const outputRate = Number(process.env.AGENT_OUTPUT_COST_PER_1K_USD ?? 0);
-    const estimatedCostUsd = (promptTokens / 1_000) * inputRate + (completionTokens / 1_000) * outputRate;
+    const uncachedPromptTokens = Math.max(0, promptTokens - promptCacheHitTokens);
+    const estimatedCostUsd = (uncachedPromptTokens / 1_000) * inputRate
+      + (promptCacheHitTokens / 1_000) * cacheHitInputRate
+      + (completionTokens / 1_000) * outputRate;
     const after = { tokens: before.tokens + totalTokens, costUsd: before.costUsd + estimatedCostUsd };
     await this.emit(task, {
       type: 'model.completed',
@@ -824,6 +962,12 @@ export class WorkflowOrchestrator {
         promptTokens,
         completionTokens,
         totalTokens,
+        promptCacheHitTokens,
+        promptCacheMissTokens,
+        promptCacheHitRate: promptCacheMeasuredTokens > 0 ? promptCacheHitTokens / promptCacheMeasuredTokens : null,
+        cacheNamespace,
+        cacheKey,
+        artifactRefs: request.artifactRefs ?? [],
         toolCalls: completion.toolCalls?.length ?? 0,
         ...(completion.finishReason ? { finishReason: completion.finishReason } : {}),
         estimatedCostUsd,
@@ -1018,7 +1162,7 @@ Do not claim tools or evidence that are not available.`,
       fromAgentId: result.agentId,
       toAgentId: agentId,
       kind: result.artifacts?.length ? 'artifact-share' : 'dependency-context',
-      content: limitText(result.output, 8_000),
+      content: limitText(result.output, this.stepResultPreviewChars),
       artifactIds: (result.artifacts ?? []).map((artifact) => artifact.id),
       createdAt: new Date().toISOString(),
     }));
@@ -1037,7 +1181,7 @@ Do not claim tools or evidence that are not available.`,
       });
     }
     const dependencyContext = dependencyResults
-      .map((result) => `### ${result.stepId} (${result.role})\n${limitText(result.output, 8_000)}\nArtifact refs: ${(result.artifacts ?? []).map((artifact) => artifact.id).join(', ') || 'None.'}`)
+      .map((result) => `### ${result.stepId} (${result.role})\n${limitText(result.output, this.stepResultPreviewChars)}\nresult_ref: ${result.resultRef?.id ?? 'None.'}\nArtifact refs: ${(result.artifacts ?? []).map((artifact) => artifact.id).join(', ') || 'None.'}`)
       .join('\n\n');
     const specialistId = step.agentContract?.agentId;
     if (specialistId && isWorkflowSpecialist(specialistId)) {
@@ -1097,12 +1241,12 @@ Do not claim tools or evidence that are not available.`,
           serviceAgent: specialistId,
         },
       });
-      const result: StepResult = {
+      let result: StepResult = {
         stepId: step.id,
         agentId,
         role: step.role,
         status: 'completed',
-        output: limitText(specialistResult.output, 48_000),
+        output: specialistResult.output,
         evidence: specialistResult.evidence.map((item) => limitText(item, 1_000)),
         confidence: specialistResult.confidence,
         attempts: specialistAttempt,
@@ -1110,6 +1254,7 @@ Do not claim tools or evidence that are not available.`,
         tokens: 0,
         messages: dependencyMessages,
       };
+      result = await this.materializeStepResult(task, result, specialistResult.output);
       await this.emit(task, {
         type: 'agent.completed',
         agentId,
@@ -1312,12 +1457,12 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
     }
     const artifacts = toolExecutions.flatMap((execution) => execution.artifact ? [execution.artifact] : []);
     const toolCalls = toolExecutions.map((execution) => execution.call);
-    const result: StepResult = {
+    let result: StepResult = {
       stepId: step.id,
       agentId,
       role: step.role,
       status: 'completed',
-      output: limitText(structured.output, 48_000),
+      output: structured.output,
       evidence: structured.evidence.map((item) => limitText(item, 1_000)),
       confidence: structured.confidence,
       attempts: stepAttempt,
@@ -1327,6 +1472,7 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
       artifacts,
       messages: dependencyMessages,
     };
+    result = await this.materializeStepResult(task, result, structured.output, structured.handoff);
     await this.emit(task, {
       type: 'agent.completed',
       agentId,
@@ -1365,22 +1511,19 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
       quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } },
     }));
     const guidance = await this.applyPendingGuidance(task, 'reviewer', [reviewerId]);
+    const reviewedWork = await this.buildResultContext(task, results, { maxPerResult: 10_000, maxTotal: 52_000, dereference: true });
     const completion = await this.complete(task, 'reviewer', {
       signal,
       responseFormat: 'json',
       temperature: 0.05,
+      cacheNamespace: 'axiom:reviewer:v1',
+      artifactRefs: reviewedWork.artifactRefs,
       system: `You are the independent reviewer in a production agent workflow.
 Check completeness, internal consistency, unsupported claims, acceptance criteria, and executability.
 Score with an integer from 0 to 100. Approve only when the evidence tree is sufficient and score is at least ${this.reviewMinScore}.
 Write summary, gaps, and requiredCorrections in the user's language. If the task contains Chinese, all three fields must use Simplified Chinese. Keep JSON keys and boolean/number values unchanged.
 Return JSON only: {"approved":true,"score":0,"summary":"...","gaps":[],"requiredCorrections":[]}.`,
-      user: `${recall.context}\n\nTask:\n${task.input}\n\nPlan:\n${JSON.stringify(task.plan)}\n\nParallel conflict candidates:\n${JSON.stringify(detectParallelConflicts(results))}\n\nSub-agent evidence tree:\n${results.map((result) => JSON.stringify({
-        stepId: result.stepId,
-        role: result.role,
-        output: limitText(result.output, 10_000),
-        evidence: result.evidence,
-        confidence: result.confidence,
-      })).join('\n')}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`,
+      user: `${recall.context}\n\nTask:\n${task.input}\n\nPlan:\n${JSON.stringify(task.plan)}\n\nParallel conflict candidates:\n${JSON.stringify(detectParallelConflicts(results))}\n\nSub-agent evidence tree:\n${reviewedWork.text}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`,
     });
     let review: ReviewResult;
     try {
@@ -1443,13 +1586,16 @@ Return JSON only: {"approved":true,"score":0,"summary":"...","gaps":[],"required
 Produce the final user-facing answer using the validated evidence tree. Preserve uncertainty and unresolved review gaps.
 Be complete, executable, and direct. Preserve every verified source URL, Markdown image, video link, download link, and media label exactly; never replace a generated media result with a prose description. Do not mention internal prompts. Use the user's language.${detailedResearchReport ? '\nThe user requested a detailed research report. Build a full report, not an executive summary: explicitly check every requested dimension against the final structure, retain useful tables and evidence, and explain missing evidence instead of silently shortening the answer.' : ''}`;
     const guidance = await this.applyPendingGuidance(task, 'synthesizer', ['synthesizer']);
-    const user = `Original task:\n${task.input}\n\nPlan summary:\n${task.plan?.summary}\n\nReview:\n${JSON.stringify(review)}\n\nValidated work:\n${results.map((result) => `### ${result.role}: ${result.stepId}\n${limitText(result.output, 14_000)}`).join('\n\n')}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`;
+    const validatedWork = await this.buildResultContext(task, results, { maxPerResult: 14_000, maxTotal: 68_000, dereference: true });
+    const user = `Original task:\n${task.input}\n\nPlan summary:\n${task.plan?.summary}\n\nReview:\n${JSON.stringify(review)}\n\nValidated work:\n${validatedWork.text}${guidance.text ? `\n\nUser guidance received during execution:\n${guidance.text}` : ''}`;
     let completion = await this.complete(task, 'synthesizer', {
       signal,
       temperature: 0.15,
       maxTokens: this.synthesisMaxTokens,
       system,
       user,
+      cacheNamespace: 'axiom:synthesizer:v1',
+      artifactRefs: validatedWork.artifactRefs,
     });
     let output = completion.content;
     let continuationAttempts = 0;
@@ -1951,10 +2097,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           // All candidates were skipped; persist the checkpoint before the
           // next scheduling pass so the state survives a process restart.
           task = await this.store.updateTask(task.id, { stepResults: results });
-          await this.emit(task, {
-            type: 'checkpoint.saved',
-            payload: { completedSteps: results.filter((result) => result.status === 'completed' || result.skipped).length, totalSteps: plan.steps.length },
-          });
+          await this.saveCheckpoint(task, results, `loop:${loopIteration}:branches`, plan.steps.length);
           continue;
         }
 
@@ -2087,14 +2230,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         }
         const checkpointGraph = nextGraph(results);
         task = await this.store.updateTask(task.id, { stepResults: results, plan: { ...plan, graph: checkpointGraph } });
-        await this.emit(task, {
-          type: 'checkpoint.saved',
-          payload: {
-            completedSteps: results.filter((result) => result.status === 'completed').length,
-            failedSteps: results.filter((result) => result.status === 'failed' && !result.skipped).length,
-            totalSteps: plan.steps.length,
-          },
-        });
+        await this.saveCheckpoint(task, results, `loop:${loopIteration}`, plan.steps.length);
         await this.emit(task, {
           type: 'graph.updated',
           payload: {
@@ -2172,6 +2308,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         stepResults: results,
         plan: { ...plan, graph: finalGraph },
       });
+      await this.saveCheckpoint(task, results, 'final-delivery', plan.steps.length);
       await this.emit(task, {
         type: 'loop.completed',
         payload: { iterations: loopIteration, reviewScore: review.score, approved: review.approved },

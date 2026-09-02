@@ -15,10 +15,12 @@ const checks = [
   ['原生搜索 Agent', 'qa:search-agent'],
   ['会话路由', 'qa:session-routing'],
   ['会话持久化', 'qa:session-persistence'],
+  ['持久上下文摘要', 'qa:context-summary'],
   ['租户隔离', 'qa:data-isolation'],
   ['任务删除', 'qa:task-delete'],
   ['人工审核', 'qa:human-review'],
   ['执行中实时引导', 'qa:live-guidance'],
+  ['检查点分支与合并', 'qa:checkpoint'],
   ['运营观测', 'qa:operations'],
   ['Agent Nexus 工作流', 'qa:workflow'],
   ['工作流历史', 'qa:workflow-history'],
@@ -109,6 +111,23 @@ if (objectStorageEndpoint) {
     script: 'qa:object-storage',
     status: 'skipped',
     reason: 'AXIOM_OBJECT_STORAGE_ENDPOINT 未配置',
+  });
+}
+
+const harnessSidecarConfigured = Boolean(
+  process.env.DEEPSEEK_HARNESS_COMMAND?.trim()
+  || process.env.DEEPSEEK_HARNESS_COMMAND_JSON?.trim()
+  || process.env.CODEX_APP_SERVER_COMMAND?.trim()
+  || process.env.CODEX_APP_SERVER_COMMAND_JSON?.trim(),
+);
+if (harnessSidecarConfigured) {
+  results.push(await run('Harness sidecar 真实能力握手', 'qa:harness-live'));
+} else {
+  results.push({
+    name: 'Harness sidecar 真实能力握手',
+    script: 'qa:harness-live',
+    status: 'skipped',
+    reason: '未配置 DeepSeek ACP 或 Codex app-server 可执行命令',
   });
 }
 

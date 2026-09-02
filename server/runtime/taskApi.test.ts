@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -300,6 +301,178 @@ test('live guidance uses real Harness steering and reports unavailable steering 
     });
     assert.equal(rejected.status, 409);
     assert.equal((await store.getEvents(unavailable.id)).some((event) => event.type === 'human.guidance_accepted'), false);
+  } finally {
+    await store.close();
+  }
+});
+
+test('checkpoint branches are idempotent, reject stale revisions, and merge explicit conflicts', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  await store.initialize();
+  let nudges = 0;
+  const api = createTaskApi({
+    store,
+    hub: new EventHub(),
+    coordinator: { nudge() { nudges += 1; }, abort() {} } as never,
+  });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'local', 'x-axiom-user-id': 'operator' };
+  try {
+    const seeded = await seedTask(store, 'completed');
+    const baseResult = {
+      stepId: 'step-1', agentId: 'analyst-step-1', role: 'analyst' as const, status: 'completed' as const,
+      output: '基础结果', evidence: ['基础证据'], confidence: 0.8, attempts: 1, durationMs: 10,
+    };
+    const source = await store.updateTask(seeded.id, { stepResults: [baseResult] });
+    const checkpointId = randomUUID();
+    await store.appendEvent(source, {
+      type: 'checkpoint.saved',
+      payload: {
+        checkpointId,
+        stage: 'loop:1',
+        revision: source.revision,
+        planVersion: source.planVersion ?? 0,
+        graphRevision: source.plan?.graph?.revision ?? 0,
+        completedSteps: 1,
+        failedSteps: 0,
+        totalSteps: 1,
+        snapshot: { plan: source.plan, stepResults: source.stepResults, review: source.review, result: source.result ?? null },
+      },
+    });
+
+    const listed = await request(api, `/tasks/${source.id}/checkpoints`, { headers });
+    assert.equal(listed.status, 200);
+    const listedBody = await listed.json() as { currentRevision: number; checkpoints: Array<{ checkpointId: string; restorable: boolean }> };
+    assert.equal(listedBody.currentRevision, source.revision);
+    assert.equal(listedBody.checkpoints.length, 1);
+    assert.equal(listedBody.checkpoints[0]?.checkpointId, checkpointId);
+    assert.equal(listedBody.checkpoints[0]?.restorable, true);
+
+    const operationId = randomUUID();
+    const branchRequest = {
+      expectedRevision: source.revision,
+      operationId,
+      instruction: '增加移动端验收。',
+      behavior: 'continue',
+    };
+    const branched = await request(api, `/tasks/${source.id}/checkpoints/${checkpointId}/branch`, {
+      method: 'POST', headers, body: JSON.stringify(branchRequest),
+    });
+    assert.equal(branched.status, 202);
+    const branchedBody = await branched.json() as { task: WorkflowTask };
+    assert.notEqual(branchedBody.task.id, source.id);
+    assert.equal(branchedBody.task.stepResults[0]?.output, '基础结果');
+    const branchEvents = await store.getEvents(branchedBody.task.id);
+    assert.ok(branchEvents.some((event) => event.type === 'checkpoint.branch_created'));
+    assert.ok(branchEvents.some((event) => event.type === 'human.guidance_accepted' && event.payload.message === '增加移动端验收。'));
+
+    const idempotentRetry = await request(api, `/tasks/${source.id}/checkpoints/${checkpointId}/branch`, {
+      method: 'POST', headers, body: JSON.stringify(branchRequest),
+    });
+    assert.equal(idempotentRetry.status, 200);
+    assert.equal(((await idempotentRetry.json()) as { task: WorkflowTask }).task.id, branchedBody.task.id);
+
+    const stale = await request(api, `/tasks/${source.id}/checkpoints/${checkpointId}/branch`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...branchRequest, operationId: randomUUID() }),
+    });
+    assert.equal(stale.status, 409);
+    const staleBody = await stale.json() as { code: string; actualRevision: number };
+    assert.equal(staleBody.code, 'TASK_REVISION_CONFLICT');
+    assert.ok(staleBody.actualRevision > source.revision);
+
+    const currentSource = await store.getTask(source.id, 'local');
+    assert.ok(currentSource);
+    const changedSource = await store.updateTask(source.id, {
+      stepResults: [{ ...baseResult, output: '当前方案修改' }],
+    }, currentSource.revision);
+    const currentBranch = await store.getTask(branchedBody.task.id, 'local');
+    assert.ok(currentBranch);
+    await store.updateTask(currentBranch.id, {
+      status: 'completed',
+      stepResults: [{ ...baseResult, output: '分支方案修改' }],
+    }, currentBranch.revision);
+
+    const compared = await request(api, `/tasks/${source.id}/checkpoints/${checkpointId}/diff?targetTaskId=${branchedBody.task.id}`, { headers });
+    assert.equal(compared.status, 200);
+    const comparedBody = await compared.json() as { diff: { steps: { changed: string[] } } };
+    assert.deepEqual(comparedBody.diff.steps.changed, ['step-1']);
+
+    const mergeOperationId = randomUUID();
+    const conflicted = await request(api, `/tasks/${source.id}/checkpoints/${checkpointId}/merge`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        expectedRevision: changedSource.revision,
+        operationId: mergeOperationId,
+        branchTaskId: branchedBody.task.id,
+        strategy: 'manual',
+      }),
+    });
+    assert.equal(conflicted.status, 409);
+    const conflictBody = await conflicted.json() as { code: string; conflicts: string[] };
+    assert.equal(conflictBody.code, 'CHECKPOINT_MERGE_CONFLICT');
+    assert.deepEqual(conflictBody.conflicts, ['step-1']);
+
+    const merged = await request(api, `/tasks/${source.id}/checkpoints/${checkpointId}/merge`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        expectedRevision: changedSource.revision,
+        operationId: mergeOperationId,
+        branchTaskId: branchedBody.task.id,
+        strategy: 'prefer-branch',
+      }),
+    });
+    assert.equal(merged.status, 202);
+    const mergedBody = await merged.json() as { task: WorkflowTask; resolvedConflicts: string[] };
+    assert.equal(mergedBody.task.stepResults[0]?.output, '分支方案修改');
+    assert.deepEqual(mergedBody.resolvedConflicts, ['step-1']);
+    assert.ok(nudges >= 2);
+  } finally {
+    await store.close();
+  }
+});
+
+test('checkpoint APIs reject malformed task and checkpoint identifiers with 400 responses', async () => {
+  const { store, api } = await createHarness();
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'local', 'x-axiom-user-id': 'operator' };
+  try {
+    const task = await seedTask(store, 'completed');
+    const checkpointId = randomUUID();
+    await store.appendEvent(task, {
+      type: 'checkpoint.saved',
+      payload: {
+        checkpointId,
+        stage: 'completed',
+        revision: task.revision,
+        planVersion: task.planVersion ?? 0,
+        graphRevision: task.plan?.graph?.revision ?? 0,
+        completedSteps: task.stepResults.length,
+        failedSteps: 0,
+        totalSteps: task.plan?.steps.length ?? 0,
+        snapshot: { plan: task.plan, stepResults: task.stepResults, review: task.review, result: task.result ?? null },
+      },
+    });
+
+    const malformedTask = await request(api, '/tasks/not-a-uuid/checkpoints', { headers });
+    assert.equal(malformedTask.status, 400);
+
+    const malformedDiffCheckpoint = await request(api, `/tasks/${task.id}/checkpoints/not-a-uuid/diff`, { headers });
+    assert.equal(malformedDiffCheckpoint.status, 400);
+
+    const malformedBranchCheckpoint = await request(api, `/tasks/${task.id}/checkpoints/not-a-uuid/branch`, {
+      method: 'POST', headers, body: '{}',
+    });
+    assert.equal(malformedBranchCheckpoint.status, 400);
+
+    const malformedMergeCheckpoint = await request(api, `/tasks/${task.id}/checkpoints/not-a-uuid/merge`, {
+      method: 'POST', headers, body: '{}',
+    });
+    assert.equal(malformedMergeCheckpoint.status, 400);
+
+    const malformedTarget = await request(api, `/tasks/${task.id}/checkpoints/${checkpointId}/diff?targetTaskId=not-a-uuid`, { headers });
+    assert.equal(malformedTarget.status, 400);
   } finally {
     await store.close();
   }
@@ -1506,6 +1679,68 @@ test('persists sessions across store reinitialization and isolates tenant users'
     const restored = (await restoredResponse.json() as { sessions: typeof session[] }).sessions;
     assert.equal(restored.length, 1);
     assert.deepEqual(restored[0], { ...session, tenantId: 'tenant-session', userId: 'user-a' });
+  } finally {
+    await firstStore?.close();
+    await secondStore?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('persists versioned context summaries with task artifacts and human-control facts across restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'axiom-context-summary-api-'));
+  const databasePath = join(directory, 'runtime.sqlite');
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-context', 'x-axiom-user-id': 'user-context' };
+  let firstStore: SqliteTaskStore | undefined;
+  let secondStore: SqliteTaskStore | undefined;
+  try {
+    firstStore = new SqliteTaskStore(databasePath);
+    await firstStore.initialize();
+    const task = await firstStore.createTask({
+      tenantId: 'tenant-context', userId: 'user-context', sessionId: 'session-context', title: '上下文任务',
+      input: '形成可恢复摘要。', mode: 'build',
+    });
+    await firstStore.appendEvent(task, { type: 'artifact.created', payload: { id: 'step-result:context:analysis:abc' } });
+    await firstStore.appendEvent(task, { type: 'human.guidance_accepted', payload: { message: '保留迁移兼容性。' } });
+    await firstStore.appendEvent(task, { type: 'review.approval_requested', payload: { score: 70 } });
+    const messages = Array.from({ length: 20 }, (_, index) => ({
+      id: `context-message-${index}`,
+      role: (index % 2 ? 'assistant' : 'user') as 'assistant' | 'user',
+      content: `第 ${index + 1} 条会话内容：${'需要可靠恢复。'.repeat(12)}`,
+      createdAt: 1_000 + index,
+      ...(index === 1 ? { taskId: task.id } : {}),
+    }));
+    const firstApi = createTaskApi({ store: firstStore, hub: new EventHub(), coordinator: { nudge() {}, abort() {} } as never });
+    const saved = await request(firstApi, '/sessions/session-context', {
+      method: 'PUT', headers, body: JSON.stringify({ id: 'session-context', title: '持久上下文', messages, updatedAt: 2_000 }),
+    });
+    assert.equal(saved.status, 200);
+    const firstSummary = (await saved.json() as { session: { contextSummary?: import('./contextSummary.js').PersistedContextSummary } }).session.contextSummary;
+    assert.ok(firstSummary);
+    assert.equal(firstSummary.version, 1);
+    assert.ok(firstSummary.artifactIds.includes('step-result:context:analysis:abc'));
+    assert.equal(firstSummary.approvalEventIds.length, 1);
+    assert.match(firstSummary.content, /人工要求：保留迁移兼容性/);
+    assert.match(firstSummary.content, /未完成事项/);
+    await firstStore.close();
+    firstStore = undefined;
+
+    secondStore = new SqliteTaskStore(databasePath);
+    await secondStore.initialize();
+    const restored = (await secondStore.listSessions('tenant-context', 'user-context', 10))[0];
+    assert.deepEqual(restored?.contextSummary, firstSummary);
+    const secondApi = createTaskApi({ store: secondStore, hub: new EventHub(), coordinator: { nudge() {}, abort() {} } as never });
+    const appended = [...messages, ...Array.from({ length: 4 }, (_, index) => ({
+      id: `context-message-${20 + index}`,
+      role: (index % 2 ? 'assistant' : 'user') as 'assistant' | 'user',
+      content: `追加上下文 ${index + 1}`,
+      createdAt: 3_000 + index,
+    }))];
+    const updated = await request(secondApi, '/sessions/session-context', {
+      method: 'PUT', headers, body: JSON.stringify({ id: 'session-context', title: '持久上下文', messages: appended, updatedAt: 4_000 }),
+    });
+    const secondSummary = (await updated.json() as { session: { contextSummary?: import('./contextSummary.js').PersistedContextSummary } }).session.contextSummary;
+    assert.equal(secondSummary?.version, 2);
+    assert.ok((secondSummary?.coveredMessageIds.length ?? 0) > firstSummary.coveredMessageIds.length);
   } finally {
     await firstStore?.close();
     await secondStore?.close();

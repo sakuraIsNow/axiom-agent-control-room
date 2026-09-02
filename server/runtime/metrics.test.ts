@@ -16,6 +16,7 @@ const event = (type: RuntimeEvent['type'], payload: Record<string, unknown>): Ru
 
 test('runtime metrics derive route, quality, tool, and phase latency counters from events', () => {
   const metrics = new RuntimeMetrics();
+  metrics.recordUsage({ prompt_tokens: 80, completion_tokens: 20, total_tokens: 100, prompt_cache_hit_tokens: 60, prompt_cache_miss_tokens: 20 });
   metrics.recordEvent(event('task.planning', { profile: { route: 'full-workflow' } }));
   metrics.recordEvent(event('review.started', {}));
   metrics.recordEvent(event('review.approval_requested', { score: 62 }));
@@ -32,4 +33,7 @@ test('runtime metrics derive route, quality, tool, and phase latency counters fr
   assert.equal(snapshot.latency.p50Ms, 120);
   assert.equal(snapshot.latency.p95Ms, 380);
   assert.equal(snapshot.latency.samples, 2);
+  assert.equal(snapshot.tokens.promptCacheHit, 60);
+  assert.equal(snapshot.tokens.promptCacheMiss, 20);
+  assert.equal(snapshot.tokens.promptCacheHitRate, 75);
 });

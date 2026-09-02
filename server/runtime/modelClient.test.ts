@@ -69,24 +69,36 @@ test('allows a keyless local-compatible model without sending an empty authoriza
 test('forwards provider SSE deltas while preserving the final completion', async () => {
   const originalFetch = globalThis.fetch;
   const deltas: string[] = [];
-  globalThis.fetch = (async () => new Response([
+  let providerBody: Record<string, unknown> = {};
+  globalThis.fetch = (async (_input, init) => {
+    providerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response([
     'data: {"choices":[{"delta":{"content":"stream "}}]}\n\n',
-    'data: {"choices":[{"delta":{"content":"works"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}\n\n',
+    'data: {"choices":[{"delta":{"content":"works"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4,"prompt_cache_hit_tokens":1,"prompt_cache_miss_tokens":1}}\n\n',
     'data: [DONE]\n\n',
-  ].join(''), { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch;
+    ].join(''), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }) as typeof fetch;
 
   try {
     const client = new OpenAICompatibleModelClient({ apiKey: 'test-key', apiBase: 'https://provider.invalid', model: 'test-model' });
     const result = await client.complete({
       system: 'test',
       user: 'hello',
+      cacheNamespace: 'internal-only',
+      cacheKey: 'internal-key',
+      artifactRefs: ['step-result:private'],
       signal: new AbortController().signal,
       onDelta: (delta) => { if (delta.content) deltas.push(delta.content); },
     });
     assert.deepEqual(deltas, ['stream ', 'works']);
     assert.equal(result.content, 'stream works');
     assert.equal(result.usage?.total_tokens, 4);
+    assert.equal(result.usage?.prompt_cache_hit_tokens, 1);
+    assert.equal(result.usage?.prompt_cache_miss_tokens, 1);
     assert.equal(result.finishReason, 'stop');
+    assert.equal('cacheNamespace' in providerBody, false);
+    assert.equal('cacheKey' in providerBody, false);
+    assert.equal('artifactRefs' in providerBody, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

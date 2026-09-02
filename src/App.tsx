@@ -282,6 +282,8 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'review.approved': '操作员已批准当前审查员结果',
     'review.rejected': '操作员已驳回结果，等待重新规划',
     'checkpoint.saved': '运行检查点已持久化',
+    'checkpoint.branch_created': '已从检查点创建新方案',
+    'checkpoint.merge_created': '检查点方案已合并',
     'memory.recall.started': '开始召回智能体记忆',
     'memory.recall.completed': '智能体记忆召回完成',
     'memory.capture.started': '正在沉淀本轮长期记忆',
@@ -501,6 +503,7 @@ const sessionFromRemote = (remote: RemoteSession): Session => normalizeRestoredS
   activeTaskId: remote.activeTaskId,
   activeAssistantId: remote.activeAssistantId,
   agentGraph: remote.agentGraph,
+  contextSummary: remote.contextSummary,
   messages: remote.messages.map((message) => ({
     id: message.id,
     role: message.role,
@@ -2912,7 +2915,23 @@ function App() {
             routing,
           );
         } else {
-          const workflowContext = buildConversationContext(requestMessages);
+          const persistedSummary = activeSession.contextSummary;
+          const persistedCoverageValid = Boolean(
+            persistedSummary?.coveredMessageIds.length
+            && persistedSummary.coveredMessageIds.every((id, index) => requestMessages[index]?.id === id),
+          );
+          const workflowContextSource = persistedCoverageValid
+            ? [
+                {
+                  id: persistedSummary!.summaryId,
+                  role: 'assistant' as const,
+                  content: persistedSummary!.content,
+                  createdAt: activeSession.messages[0]?.createdAt ?? Date.now(),
+                },
+                ...requestMessages.slice(persistedSummary!.coveredMessageIds.length),
+              ]
+            : requestMessages;
+          const workflowContext = buildConversationContext(workflowContextSource);
           if (workflowContext.summaryApplied) {
             addRunEvent('context', `已自动整理最早的 ${workflowContext.summarizedMessages} 条消息，保留最新上下文执行。`);
           }
@@ -3397,6 +3416,7 @@ function App() {
             taskCatalog={taskCatalog}
             onOpenTask={(taskId) => { void openCatalogTask({ id: taskId }); }}
             onDeleteTask={deleteTask}
+            onRefreshTasks={refreshTaskCatalog}
             sessionId={activeSession.id}
             sessions={sessions}
             activeSession={activeSession}

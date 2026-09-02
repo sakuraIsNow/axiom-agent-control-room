@@ -6,6 +6,7 @@ import { isTaskExecuting, taskHistoryState } from './taskHistoryState';
 const task = (status: WorkflowTaskStatus): WorkflowTask => ({
   id: 'task-1',
   runId: 'run-1',
+  revision: 0,
   sessionId: 'session-1',
   title: 'History state',
   input: 'test',

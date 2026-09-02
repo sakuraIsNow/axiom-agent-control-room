@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Bounded conversation context for model calls.
  *
@@ -16,6 +18,31 @@ export type ContextMessage = {
   role: 'user' | 'assistant';
   content: string | ContextPart[];
 };
+
+export type DurableContextSourceMessage = ContextMessage & {
+  id: string;
+  taskId?: string;
+  attachments?: Array<{ id?: string; kind?: string; name?: string; mimeType?: string; size?: number }>;
+};
+
+export type PersistedContextSummary = {
+  summaryId: string;
+  sessionId: string;
+  version: number;
+  algorithm: string;
+  content: string;
+  coveredMessageIds: string[];
+  coveredFrom?: string;
+  coveredTo?: string;
+  sourceDigest: string;
+  artifactIds: string[];
+  approvalEventIds: string[];
+  unresolvedItems: string[];
+  durableFacts: string[];
+  createdAt: string;
+};
+
+export type DurableContextMetadata = Pick<PersistedContextSummary, 'artifactIds' | 'approvalEventIds' | 'unresolvedItems' | 'durableFacts'>;
 
 export type ContextWindowOptions = {
   recentMessages?: number;
@@ -106,6 +133,114 @@ const bounded = (value: string, limit: number) => {
   const head = Math.ceil(available * 0.58);
   const tail = Math.max(0, available - head);
   return `${value.slice(0, head)}${marker}${tail ? value.slice(-tail) : ''}`.slice(0, limit);
+};
+
+const durableAlgorithm = 'deterministic-incremental-v1';
+const summaryOpening = '【历史上下文摘要】\n';
+const summaryClosing = '\n\n以上是较早对话的压缩记录；如与最近消息冲突，以最近消息为准。';
+
+const sourceMessageDigestValue = (message: DurableContextSourceMessage) => ({
+  id: message.id,
+  role: message.role,
+  content: messageText(message),
+  taskId: message.taskId ?? '',
+  attachments: (message.attachments ?? []).map((attachment) => ({
+    id: attachment.id ?? '',
+    kind: attachment.kind ?? '',
+    name: attachment.name ?? '',
+    mimeType: attachment.mimeType ?? '',
+    size: Number.isFinite(attachment.size) ? attachment.size : 0,
+  })),
+});
+
+export const contextSourceDigest = (messages: DurableContextSourceMessage[]) => createHash('sha256')
+  .update(JSON.stringify(messages.map(sourceMessageDigestValue)), 'utf8')
+  .digest('hex');
+
+export const validatePersistedContextSummary = (
+  summary: PersistedContextSummary | undefined,
+  messages: DurableContextSourceMessage[],
+) => {
+  if (!summary || summary.algorithm !== durableAlgorithm || summary.coveredMessageIds.length === 0) return false;
+  if (messages.length < summary.coveredMessageIds.length) return false;
+  const covered = messages.slice(0, summary.coveredMessageIds.length);
+  if (!covered.every((message, index) => message.id === summary.coveredMessageIds[index])) return false;
+  return contextSourceDigest(covered) === summary.sourceDigest;
+};
+
+const summaryBody = (value: string) => value
+  .replace(/^【历史上下文摘要】\n/u, '')
+  .replace(/\n\n以上是较早对话的压缩记录；如与最近消息冲突，以最近消息为准。$/u, '')
+  .trim();
+
+const mergeSummary = (previous: string, additions: DurableContextSourceMessage[], maxCharacters: number) => {
+  if (!additions.length) return bounded(previous, maxCharacters);
+  const additionSummary = summarizeMessages(additions, maxCharacters);
+  const bodyBudget = Math.max(160, maxCharacters - summaryOpening.length - summaryClosing.length);
+  const body = bounded([summaryBody(previous), summaryBody(additionSummary)].filter(Boolean).join('\n\n'), bodyBudget);
+  return `${summaryOpening}${body}${summaryClosing}`;
+};
+
+export const buildPersistedContextSummary = (
+  sessionId: string,
+  input: DurableContextSourceMessage[],
+  previous?: PersistedContextSummary,
+  options: ContextWindowOptions = {},
+): PersistedContextSummary | null => {
+  const messages = input.filter((message) => Boolean(message.id && messageText(message)));
+  const window = buildContextWindow(messages, options);
+  if (!window.summaryApplied || window.summarizedMessages <= 0) return null;
+  const covered = messages.slice(0, window.summarizedMessages);
+  const previousValid = validatePersistedContextSummary(previous, messages);
+  const previousIsPrefix = previousValid && previous!.coveredMessageIds.every((id, index) => covered[index]?.id === id);
+  const maxCharacters = options.maxSummaryCharacters ?? defaults.maxSummaryCharacters;
+  const content = previousIsPrefix
+    ? mergeSummary(previous!.content, covered.slice(previous!.coveredMessageIds.length), maxCharacters)
+    : String(window.messages[0]?.content ?? summarizeMessages(covered, maxCharacters));
+  const digest = contextSourceDigest(covered);
+  const unchanged = previousIsPrefix
+    && previous!.sourceDigest === digest
+    && previous!.coveredMessageIds.length === covered.length;
+  if (unchanged) return previous!;
+  return {
+    summaryId: `context-summary:${sessionId}`,
+    sessionId,
+    version: Math.max(1, (previous?.version ?? 0) + 1),
+    algorithm: durableAlgorithm,
+    content: bounded(content, maxCharacters),
+    coveredMessageIds: covered.map((message) => message.id),
+    coveredFrom: covered[0]?.id,
+    coveredTo: covered.at(-1)?.id,
+    sourceDigest: digest,
+    artifactIds: [],
+    approvalEventIds: [],
+    unresolvedItems: [],
+    durableFacts: [],
+    createdAt: new Date().toISOString(),
+  };
+};
+
+export const attachPersistedContextMetadata = (
+  summary: PersistedContextSummary,
+  metadata: DurableContextMetadata,
+  maxCharacters = defaults.maxSummaryCharacters,
+): PersistedContextSummary => {
+  const artifactIds = [...new Set(metadata.artifactIds)].slice(0, 100);
+  const approvalEventIds = [...new Set(metadata.approvalEventIds)].slice(0, 100);
+  const unresolvedItems = [...new Set(metadata.unresolvedItems.map((item) => normalize(item)).filter(Boolean))].slice(0, 40);
+  const durableFacts = [...new Set(metadata.durableFacts.map((item) => normalize(item)).filter(Boolean))].slice(0, 40);
+  const ledger = [
+    artifactIds.length ? `Artifact 引用：${artifactIds.join('、')}` : '',
+    approvalEventIds.length ? `审批记录：${approvalEventIds.join('、')}` : '',
+    durableFacts.length ? `关键执行记录：\n- ${durableFacts.join('\n- ')}` : '',
+    unresolvedItems.length ? `未完成事项：\n- ${unresolvedItems.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n');
+  const bodyBudget = Math.max(160, maxCharacters - summaryOpening.length - summaryClosing.length);
+  const sourceBody = summaryBody(summary.content).replace(/\n\n【执行状态索引】[\s\S]*$/u, '').trim();
+  const content = ledger
+    ? `${summaryOpening}${bounded(`${sourceBody}\n\n【执行状态索引】\n${ledger}`, bodyBudget)}${summaryClosing}`
+    : summary.content;
+  return { ...summary, content: bounded(content, maxCharacters), artifactIds, approvalEventIds, unresolvedItems, durableFacts };
 };
 
 const dedupeKey = (value: string) => value

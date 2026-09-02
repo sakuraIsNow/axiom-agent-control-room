@@ -12,7 +12,7 @@ test('builds tenant operations snapshot from leases, events, and terminal task d
     { id: 'done', status: 'completed', createdAt: '2026-08-28T22:00:00.000Z', updatedAt: '2026-08-28T22:05:00.000Z' },
     { id: 'failed', status: 'failed', createdAt: '2026-08-28T21:00:00.000Z', updatedAt: '2026-08-28T21:20:00.000Z' },
   ], [
-    { taskId: 'done', type: 'model.completed', timestamp: '2026-08-28T22:01:00.000Z', payload: { model: 'deepseek-chat', durationMs: 1000, totalTokens: 100, estimatedCostUsd: 0.02 } },
+    { taskId: 'done', type: 'model.completed', timestamp: '2026-08-28T22:01:00.000Z', payload: { model: 'deepseek-chat', durationMs: 1000, totalTokens: 100, promptCacheHitTokens: 60, promptCacheMissTokens: 20, estimatedCostUsd: 0.02 } },
     { taskId: 'done', type: 'agent.started', agentId: 'analyst-1', timestamp: '2026-08-28T22:01:00.000Z', payload: { role: 'analyst' } },
     { taskId: 'done', type: 'agent.completed', agentId: 'analyst-1', timestamp: '2026-08-28T22:04:00.000Z', payload: { role: 'analyst' } },
     { taskId: 'done', type: 'tool.started', timestamp: '2026-08-28T22:02:00.000Z', payload: { name: 'workspace.read' } },
@@ -39,6 +39,9 @@ test('builds tenant operations snapshot from leases, events, and terminal task d
   assert.equal(snapshot.models[0]?.calls, 1);
   assert.equal(snapshot.models[0]?.failures, 1);
   assert.equal(snapshot.models[0]?.successRate, 50);
+  assert.equal(snapshot.models[0]?.promptCacheHitTokens, 60);
+  assert.equal(snapshot.models[0]?.promptCacheMissTokens, 20);
+  assert.equal(snapshot.models[0]?.promptCacheHitRate, 75);
   assert.equal(snapshot.models[0]?.health, 'degraded');
   assert.equal(snapshot.tools[0]?.name, 'http.fetch');
   assert.equal(snapshot.tools[0]?.failures, 1);

@@ -147,6 +147,33 @@ class GuidanceCaptureModel extends FakeModel {
   }
 }
 
+class LargeResultReferenceModel extends FakeModel {
+  readonly largeOutput = `${'完整上游证据。'.repeat(2_200)}尾部校验标记`;
+  downstreamRequest?: ModelCompletionRequest;
+  synthesisRequest?: ModelCompletionRequest;
+
+  async complete(request: ModelCompletionRequest) {
+    if (request.system.includes('You are a analyst sub-agent')) {
+      const content = JSON.stringify({ output: this.largeOutput, evidence: ['完整证据已生成'], confidence: 0.9, toolCalls: [], handoff: '上游已完成详细分析，完整正文请按 result_ref 读取。' });
+      await request.onDelta?.({ content });
+      return { content, attempts: 1, durationMs: 1, usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300, prompt_cache_hit_tokens: 60, prompt_cache_miss_tokens: 40 } };
+    }
+    if (request.system.includes('You are a builder sub-agent')) {
+      this.downstreamRequest = request;
+      const content = JSON.stringify({ output: '已根据上游摘要形成实施方案。', evidence: ['引用上游结果'], confidence: 0.88, toolCalls: [] });
+      await request.onDelta?.({ content });
+      return { content, attempts: 1, durationMs: 1 };
+    }
+    if (request.system.includes('synthesizer')) {
+      this.synthesisRequest = request;
+      const content = '长结果引用工作流已完成。';
+      await request.onDelta?.({ content });
+      return { content, attempts: 1, durationMs: 1 };
+    }
+    return super.complete(request);
+  }
+}
+
 class ConditionalWorkflowModel extends FakeModel {
   async complete(request: ModelCompletionRequest) {
     if (request.system.includes('You are a analyst sub-agent') && request.user.includes('decide approval')) {
@@ -1235,6 +1262,104 @@ describe('WorkflowOrchestrator', () => {
       assert.equal(writes.length, 1);
       assert.equal(writes[0]?.id, `result:${task.id}`);
       assert.ok(writes[0]?.content.length);
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('stores large step results by reference and dereferences them only for bounded review consumers', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    const objects = new Map<string, string>();
+    const artifactStore = {
+      kind: 'filesystem' as const,
+      put: async (id: string, content: string) => { objects.set(id, content); return { key: id, bytes: Buffer.byteLength(content, 'utf8') }; },
+      get: async (id: string) => objects.get(id) ?? null,
+      delete: async (id: string) => { objects.delete(id); },
+      health: async () => ({ configured: true, reachable: true, detail: 'ok' }),
+    };
+    try {
+      const profile = { kind: 'implementation' as const, difficulty: 'moderate' as const, route: 'team' as const, score: 4, reasons: ['long result'], maxSteps: 2, requiresReview: false };
+      const task = await store.createTask({
+        tenantId: 'tenant-a', userId: 'user-a', sessionId: 'session-a', title: 'long result reference',
+        input: '生成详细分析，并据此形成实施方案。', mode: 'build',
+        plan: {
+          summary: '详细分析后形成实施方案。', routingReason: '第二步依赖第一步。', profile,
+          steps: [
+            { id: 'analysis', title: '详细分析', role: 'analyst', objective: '输出详细分析。', dependsOn: [], acceptanceCriteria: ['分析完整'] },
+            { id: 'delivery', title: '形成方案', role: 'builder', objective: '基于分析形成方案。', dependsOn: ['analysis'], acceptanceCriteria: ['方案可执行'] },
+          ],
+          version: 1, approvalStatus: 'approved',
+        },
+      });
+      const model = new LargeResultReferenceModel();
+      const result = await new WorkflowOrchestrator(
+        store, new EventHub(), model, memory, pino({ level: 'silent' }),
+        undefined, undefined, undefined, undefined, artifactStore,
+      ).run(task, new AbortController().signal);
+      const analysis = result.stepResults.find((step) => step.stepId === 'analysis');
+      assert.equal(result.status, 'completed');
+      assert.ok(analysis?.resultRef?.id.startsWith(`step-result:${task.id}:analysis:`));
+      assert.equal(analysis?.outputTruncated, true);
+      assert.equal(analysis?.outputChars, model.largeOutput.length);
+      assert.equal(objects.get(analysis!.resultRef!.id), model.largeOutput);
+      assert.match(model.downstreamRequest?.user ?? '', /result_ref: step-result:/);
+      assert.doesNotMatch(model.downstreamRequest?.user ?? '', /完整上游证据。完整上游证据。完整上游证据。/);
+      assert.ok(model.synthesisRequest?.artifactRefs?.includes(analysis!.resultRef!.id));
+      assert.match(model.synthesisRequest?.user ?? '', /完整上游证据。完整上游证据。完整上游证据。/);
+      const events = await store.getEvents(task.id);
+      assert.ok(events.some((event) => event.type === 'artifact.created' && event.payload.id === analysis?.resultRef?.id));
+      assert.ok(events.some((event) => event.type === 'model.completed'
+        && event.payload.promptCacheHitTokens === 60
+        && event.payload.promptCacheMissTokens === 40
+        && typeof event.payload.cacheKey === 'string'));
+      assert.ok(events.some((event) => event.type === 'model.completed'
+        && event.payload.stage === 'synthesizer'
+        && Array.isArray(event.payload.artifactRefs)
+        && event.payload.artifactRefs.includes(analysis?.resultRef?.id)));
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('keeps the full large step result in the task database when Artifact storage is unavailable', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    const artifactStore = {
+      kind: 'filesystem' as const,
+      put: async () => { throw new Error('object store unavailable'); },
+      get: async () => null,
+      delete: async () => undefined,
+      health: async () => ({ configured: true, reachable: false, detail: 'offline' }),
+    };
+    try {
+      const profile = { kind: 'implementation' as const, difficulty: 'moderate' as const, route: 'team' as const, score: 4, reasons: ['long result'], maxSteps: 2, requiresReview: false };
+      const task = await store.createTask({
+        tenantId: 'tenant-a', userId: 'user-a', sessionId: 'session-a', title: 'long result fallback',
+        input: '生成详细分析，并据此形成实施方案。', mode: 'build',
+        plan: {
+          summary: '详细分析后形成实施方案。', routingReason: '第二步依赖第一步。', profile,
+          steps: [
+            { id: 'analysis', title: '详细分析', role: 'analyst', objective: '输出详细分析。', dependsOn: [], acceptanceCriteria: ['分析完整'] },
+            { id: 'delivery', title: '形成方案', role: 'builder', objective: '基于分析形成方案。', dependsOn: ['analysis'], acceptanceCriteria: ['方案可执行'] },
+          ],
+          version: 1, approvalStatus: 'approved',
+        },
+      });
+      const model = new LargeResultReferenceModel();
+      const result = await new WorkflowOrchestrator(
+        store, new EventHub(), model, memory, pino({ level: 'silent' }),
+        undefined, undefined, undefined, undefined, artifactStore,
+      ).run(task, new AbortController().signal);
+      const analysis = result.stepResults.find((step) => step.stepId === 'analysis');
+      const persisted = await store.getTask(task.id, task.tenantId);
+      assert.equal(result.status, 'completed');
+      assert.equal(analysis?.resultRef, undefined);
+      assert.equal(analysis?.outputTruncated, undefined);
+      assert.equal(analysis?.output, model.largeOutput);
+      assert.equal(persisted?.stepResults.find((step) => step.stepId === 'analysis')?.output, model.largeOutput);
+      assert.doesNotMatch(model.downstreamRequest?.user ?? '', /result_ref: step-result:/);
+      assert.equal((await store.getEvents(task.id)).some((event) => event.type === 'artifact.created' && event.payload.kind === 'step-output'), false);
     } finally {
       await store.close();
     }

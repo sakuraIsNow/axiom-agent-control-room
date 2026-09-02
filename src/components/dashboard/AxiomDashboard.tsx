@@ -34,7 +34,7 @@ export function AxiomDashboard(props: DashboardProps) {
     phase, mode, onModeChange, draft, onDraftChange, onSend, onNewTask, onOpenSettings, onRefreshTemplates,
     templateWorkspace, onOpenPlugins, pluginWorkspace, onOpenReadiness, onStop, onPause, onResume, isRunning, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, agentActivity, agents, graph,
     selectedNodeId, onSelectAgent, taskProfile, reviewResult, reviewApprovalTaskId, reviewNote, reviewActionBusy,
-    onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, sessionId,
+    onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, onRefreshTasks, sessionId,
     sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, textModelCredentialId, theme, onThemeChange, principalUserId: principalUserIdProp,
     attachments, onAddAttachments, onRemoveAttachment,
   } = props;
@@ -257,6 +257,11 @@ export function AxiomDashboard(props: DashboardProps) {
           onRequestReject={() => setPendingReviewAction('reject')}
           onResubmit={(input) => { onDraftChange(input); setNav('tasks'); }}
           onDeleteTask={(id) => setPendingDelete({ kind: 'task', id, taskIds: focusedTaskRunIds.length > 0 ? focusedTaskRunIds : [id] })}
+          onCheckpointTaskCreated={async (id) => {
+            await onRefreshTasks();
+            useDashboardStore.getState().selectTask(id);
+            onOpenTask(id);
+          }}
         />
       </>}
     </div>

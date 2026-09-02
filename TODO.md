@@ -519,7 +519,7 @@ npm run qa:search-agent
 - [x] Nexus 运行会话使用稳定的 `agent-nexus-<workflowId>` 标识；每次执行携带最近 24 条对话上下文，Agent 可理解同一 Nexus 内的连续追问。
 - [x] 上下文自动摘要：普通对话、主页工作流和 Agent Nexus 在超过 16 轮或 48K 字符时，保留最近 12 轮原文并将更早消息压缩为有界摘要；摘要仅用于模型请求，不修改历史记录，附带回归测试。
 - [x] 上下文预算增强（第一阶段）：增加可替换 tokenizer 接口、默认保守 Token 估算、`AXIOM_CONTEXT_MAX_TOKENS` 配置，并在摘要结果返回版本号、覆盖范围和估算用量；即使预算很紧也保留最新用户输入。
-- [ ] 摘要后续增强：改用 tokenizer 级预算，并持久化摘要版本、覆盖范围、Artifact/审批引用和压缩质量指标。
+- [ ] 摘要后续增强：持久化摘要版本、覆盖范围和 Artifact/审批引用已完成；剩余 Provider 精确 tokenizer、摘要命中率、压缩比例和压缩前后质量指标。
 - [x] 重新进入 Nexus 时从该 Nexus 的已持久化任务恢复用户输入和最终 Agent 输出；不同 Nexus 的历史互不串线，不污染普通对话历史。
 - [x] 新增 `qa:workflow-history` 回归烟测，验证离开工作区再进入后历史消息仍可见。
 - [x] 2026-08-28 Scheduler reliability: failure backoff, dead-letter state, resume API, tenant isolation regression tests, and dashboard status display.
@@ -571,7 +571,7 @@ npm run qa:search-agent
 - [x] Agent Nexus 条件分支、多 Loop、嵌套 Loop、节点级局部恢复和单节点重跑：已完成受限条件 DSL、最多 256 步展开、稳定 Loop 路径、分支事件和 rerun 检查点。
 - [ ] OpenTelemetry、Prometheus、日志关联、队列/Worker 指标和跨重启持久化。
 - [ ] 插件签名、兼容性检查、版本回滚、权限声明和插件市场。
-- [ ] tokenizer 级上下文预算、摘要版本持久化和压缩质量评估。
+- [ ] Provider 精确 tokenizer 与压缩质量评估；摘要版本、覆盖范围、来源 digest 和关键引用持久化已完成。
 - [ ] 登录开屏、3D Graph 降级视图、移动端节点抽屉、长日志虚拟滚动和场景按需分包。
 
 ### 2026-08-29 运行验收与一致性修复
@@ -675,12 +675,13 @@ npm run qa:search-agent
 - [x] 默认对话页和任务首页在持久任务执行中允许输入“补充要求”；暂停、停止与追加要求使用独立按钮。快速直答没有可恢复任务时保持只读，避免误建第二个任务。
 - [x] 补充要求写入当前会话上下文，并显示“已接收 / 已应用”单向状态；修复 SSE `applied` 先于 POST 响应时状态退回 `accepted` 的竞态。
 - [x] 对话顶部增加紧凑“本轮路径”，展示真实 Router/Scheduler 的路由、实际 Agent、Skill 与置信度；历史任务从持久计划恢复，不使用静态演示数据。
-- [x] 新增租户/用户隔离、终态拒绝、Builtin 一次性消费、Harness steer 成功/不可用、客户端请求和 `qa:live-guidance` 浏览器回归；当前 `npm test` 为 308/308，浏览器回归确认未创建第二任务且控制台零错误。
+- [x] 新增租户/用户隔离、终态拒绝、Builtin 一次性消费、Harness steer 成功/不可用、客户端请求和 `qa:live-guidance` 浏览器回归；当前 `npm test` 为 315/315，浏览器回归确认未创建第二任务且控制台零错误。
 
 ### Runtime 下一步
 
-1. [ ] Checkpoint 分支与版本冲突保护：同一任务并行人工操作使用显式 revision，支持从检查点派生分支、比较差异和选择合并，拒绝静默覆盖。
-2. [ ] 大结果引用与 Prompt Cache：工具输出、文档和搜索结果改用 `result_ref`/Artifact 引用，按模型能力复用稳定前缀，减少重复 Token 和超长上下文。
-3. [ ] 持久化上下文摘要版本：记录摘要覆盖范围、来源消息、Artifact、审批与未完成事项，恢复时可验证摘要没有遗漏关键约束。
-4. [ ] HarnessEval-W 业务评测扩展：增加执行中改需求、跨轮新增/跳过 Agent、外部 Harness 不支持 steer、长结果引用和恢复一致性用例。
-5. [ ] DeepSeek ACP / Codex sidecar 现场验收：固定版本、workspace、审批策略与故障注入，在真实部署中验证 steer、断流回放和跨 Worker 接管。
+1. [x] Checkpoint 分支与版本冲突保护：任务 revision 单调递增，SQLite/PostgreSQL 使用原子 `expectedRevision`；支持检查点差异、幂等派生分支、三方合并和显式冲突策略。HTTP、单元与 `qa:checkpoint` 浏览器回归均已通过。
+2. [x] 大结果引用与 Prompt Cache：超过阈值的步骤正文写入 Artifact，任务只保存预览、字符数与 `result_ref`；普通下游不读取全文，Reviewer/Synthesizer 在预算内受控解引用。对象存储故障时数据库保留完整正文；Provider cache hit/miss Token、稳定前缀 key 和解引用清单进入事件、运营快照与 Prometheus。
+3. [x] 持久化上下文摘要版本：SQLite/PostgreSQL 保存摘要版本、覆盖消息 ID、来源 digest、Artifact、审批、人工要求和未完成事项；追加消息增量升版，已覆盖消息变化时拒绝旧摘要并重建。`qa:context-summary` 与跨重启 TaskStore 回归已通过。
+4. [x] HarnessEval-W 业务评测扩展：`qa:business` 改为分段评测，持续保存 metadata、partial progress 和 artifact validation；覆盖按难度路由、跨轮新增/跳过 Agent、Skill 漂移、人工要求单次应用、Harness steer 真实状态、长结果引用/存储故障、摘要恢复和 Checkpoint 冲突。当前 6/6 分段通过。
+5. [ ] DeepSeek ACP / Codex sidecar 现场验收：2026-09-02 已用本机 Codex CLI `0.149.1` 完成真实 app-server v2 stdio 握手，协议、版本、Thread/Turn/steer/审批/回放能力识别通过；DeepSeek rc.8 源码包需要 Node >=22.19 与 pnpm。仍需在目标部署固定版本、workspace、审批策略并完成真实任务 steer、断流回放、故障注入和跨 Worker 接管，不能用协议 fake sidecar 或单次握手代替。
+6. [x] 本批发布门禁：`npm run check`、`npm test`（315/315）、`npm run build` 和 `npm run qa:all` 全部通过；生产门禁为 24 passed / 0 failed / 4 skipped，跳过项均为未配置的外部服务现场验收。Checkpoint 非法 ID 统一返回 400，人工审核浏览器回归不再产生 PostgreSQL UUID 500。

@@ -11,6 +11,12 @@ export type ModelCompletionRequest = {
   toolChoice?: 'auto' | 'none' | 'required';
   /** Internal runtime control for continuations that must be de-duplicated before streaming. */
   streamDeltas?: boolean;
+  /** Internal observability only; never serialized into a provider request. */
+  cacheNamespace?: string;
+  /** Digest of the stable prompt prefix used to correlate provider-side cache usage. */
+  cacheKey?: string;
+  /** Artifact ids deliberately dereferenced while assembling this completion. */
+  artifactRefs?: string[];
   signal: AbortSignal;
   onDelta?: (delta: { content?: string; reasoning?: string }) => void | Promise<void>;
   onRetry?: (nextAttempt: number) => void | Promise<void>;
@@ -118,30 +124,35 @@ export class OpenAICompatibleModelClient implements ModelClient {
         const requestedModel = request.model ?? this.model;
         const isReasoningModel = /(?:reasoner|reasoning|deepseek-v4-pro|deepseek-r1|\br1\b)/i.test(requestedModel);
         const requestTimeoutMs = isReasoningModel && !this.timeoutExplicit ? this.reasoningTimeoutMs : this.timeoutMs;
-        const requestSignal = AbortSignal.any([request.signal, AbortSignal.timeout(requestTimeoutMs)]);
-        const response = await fetch(endpoint(this.apiBase), {
-          method: 'POST',
-          headers: {
-            ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: requestedModel,
-            messages: [
-              { role: 'system', content: request.system.slice(0, 30_000) },
-              { role: 'user', content: request.user.slice(0, 80_000) },
-            ],
-            stream: true,
-            ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
-            stream_options: { include_usage: true },
-            temperature: request.temperature ?? 0.2,
-            ...(request.responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
-            ...(request.tools?.length ? { tools: request.tools, tool_choice: request.toolChoice ?? 'auto' } : {}),
-          }),
-          signal: requestSignal,
-        });
+        const timeoutController = new AbortController();
+        const timeout = setTimeout(() => {
+          timeoutController.abort(new DOMException(`Model request timed out after ${requestTimeoutMs}ms.`, 'TimeoutError'));
+        }, requestTimeoutMs);
+        const requestSignal = AbortSignal.any([request.signal, timeoutController.signal]);
+        try {
+          const response = await fetch(endpoint(this.apiBase), {
+            method: 'POST',
+            headers: {
+              ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: requestedModel,
+              messages: [
+                { role: 'system', content: request.system.slice(0, 30_000) },
+                { role: 'user', content: request.user.slice(0, 80_000) },
+              ],
+              stream: true,
+              ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
+              stream_options: { include_usage: true },
+              temperature: request.temperature ?? 0.2,
+              ...(request.responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
+              ...(request.tools?.length ? { tools: request.tools, tool_choice: request.toolChoice ?? 'auto' } : {}),
+            }),
+            signal: requestSignal,
+          });
 
-        const contentType = response.headers.get('content-type') ?? '';
+          const contentType = response.headers.get('content-type') ?? '';
         let content = '';
         let reasoning = '';
         let usage: Record<string, number> | undefined;
@@ -317,6 +328,9 @@ export class OpenAICompatibleModelClient implements ModelClient {
           attempts: attempt,
           durationMs: Date.now() - startedAt,
         };
+        } finally {
+          clearTimeout(timeout);
+        }
       } catch (caught) {
         if (request.signal.aborted) throw request.signal.reason ?? caught;
         lastError = caught instanceof Error ? caught : new Error('Unknown model request failure.');

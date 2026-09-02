@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
+import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
 import { isBuiltinRoleId } from './agentStore.js';
 import type { TaskCoordinator } from './coordinator.js';
 import type { EventHub } from './eventHub.js';
@@ -29,6 +29,8 @@ import { chatRouteDecisionSchema, fallbackChatRoute, routeChatIntent, workflowPl
 import { generateReport } from './reportExport.js';
 import { nextRunAtForCadence, scheduleCadenceSchema } from './scheduleCadence.js';
 import { fallbackScheduleDraft, parseScheduleDraft, scheduleAgentPrompt } from './scheduleAgent.js';
+import { checkpointsFromEvents, diffCheckpointToTask, mergeCheckpointBranch } from './checkpointRuntime.js';
+import { attachPersistedContextMetadata, buildPersistedContextSummary, type DurableContextSourceMessage } from './contextSummary.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -423,6 +425,24 @@ const nodeControlSchema = z.object({
   confidence: z.number().min(0).max(1).default(1),
 });
 
+const checkpointBranchSchema = z.object({
+  expectedRevision: z.number().int().min(0),
+  operationId: z.string().uuid(),
+  title: z.string().min(1).max(200).optional(),
+  instruction: z.string().max(8_000).default(''),
+  behavior: z.enum(['continue', 'replan']).default('continue'),
+}).strict();
+
+const checkpointMergeSchema = z.object({
+  expectedRevision: z.number().int().min(0),
+  operationId: z.string().uuid(),
+  branchTaskId: z.string().uuid(),
+  strategy: z.enum(['manual', 'prefer-branch', 'prefer-current']).default('manual'),
+  title: z.string().min(1).max(200).optional(),
+}).strict();
+
+const runtimeIdSchema = z.string().uuid();
+
 const sessionAttachmentSchema = z.object({
   id: z.string().min(1).max(160),
   kind: z.enum(['file', 'video', 'image']).optional(),
@@ -686,6 +706,52 @@ export const createTaskApi = (dependencies: {
       }
     }));
   };
+  const contextSummaryMetadata = async (
+    tenantId: string,
+    userId: string,
+    sessionId: string,
+    messages: PersistedSessionMessage[],
+    coveredMessageIds: string[],
+  ) => {
+    const coveredIds = new Set(coveredMessageIds);
+    const taskIds = [...new Set(messages
+      .filter((message) => coveredIds.has(message.id) && message.taskId)
+      .map((message) => message.taskId!))].slice(0, 24);
+    const artifactIds: string[] = [];
+    const approvalEventIds: string[] = [];
+    const unresolvedItems: string[] = messages
+      .filter((message) => coveredIds.has(message.id) && message.pending)
+      .map((message) => `消息 ${message.id} 尚在处理中。`);
+    const durableFacts: string[] = [];
+    const approvalTypes = new Set<RuntimeEvent['type']>([
+      'approval.requested', 'approval.resolved', 'plan.approval_requested', 'plan.approved', 'plan.rejected',
+      'tool.approval_requested', 'tool.approved', 'tool.rejected', 'review.approval_requested', 'review.approved', 'review.rejected',
+    ]);
+    for (const taskId of taskIds) {
+      const task = await store.getTask(taskId, tenantId);
+      if (!task || task.userId !== userId || task.sessionId !== sessionId) continue;
+      const events = await store.getEvents(taskId).catch(() => []);
+      if (!terminalStatuses.has(task.status)) unresolvedItems.push(`任务“${task.title}”当前状态为 ${task.status}。`);
+      for (const gap of task.review?.gaps ?? []) unresolvedItems.push(`审查待处理：${gap}`);
+      for (const correction of task.review?.requiredCorrections ?? []) unresolvedItems.push(`整改要求：${correction}`);
+      for (const event of events) {
+        if (approvalTypes.has(event.type)) approvalEventIds.push(event.id);
+        if (event.type === 'artifact.created') {
+          const id = event.payload.id ?? event.payload.artifactId
+            ?? (event.payload.artifact && typeof event.payload.artifact === 'object' ? (event.payload.artifact as { id?: unknown }).id : undefined);
+          if (typeof id === 'string' && id) artifactIds.push(id);
+        }
+        if (event.type === 'agent.conflict') durableFacts.push(`Agent 冲突：${String(event.payload.topic ?? event.payload.reason ?? '已交由审查 Agent 处理')}`);
+        if (event.type === 'human.note' || event.type === 'human.guidance_accepted') {
+          const message = typeof event.payload.message === 'string' ? event.payload.message : '';
+          if (message) durableFacts.push(`人工要求：${message}`);
+        }
+        if (event.type === 'review.approved') durableFacts.push('人工已批准当前审查结果。');
+        if (event.type === 'review.rejected') durableFacts.push('人工已驳回当前结果并要求整改。');
+      }
+    }
+    return { artifactIds, approvalEventIds, unresolvedItems, durableFacts };
+  };
   type CreateTaskData = z.infer<typeof createTaskSchema>;
 
   const taskStage = (task: Awaited<ReturnType<TaskStore['getTask']>>, eventSummary: TaskEventSummary) => {
@@ -745,6 +811,7 @@ export const createTaskApi = (dependencies: {
     return {
       id: task.id,
       runId: task.runId,
+      revision: task.revision,
       sessionId: task.sessionId,
       userId: task.userId,
       ...(source ? { source } : {}),
@@ -2348,7 +2415,31 @@ export const createTaskApi = (dependencies: {
     if (!parsed.success || parsed.data.id && parsed.data.id !== sessionId) return c.json({ error: 'Invalid session history.' }, 400);
     const { tenantId, userId } = identity(c.req.raw.headers);
     try {
-      const session = await store.upsertSession(tenantId, userId, { ...parsed.data, id: sessionId } as never);
+      const previous = (await store.listSessions(tenantId, userId, 100)).find((session) => session.id === sessionId);
+      let contextSummary = buildPersistedContextSummary(
+        sessionId,
+        parsed.data.messages as DurableContextSourceMessage[],
+        previous?.contextSummary,
+        {
+          recentMessages: 12,
+          triggerMessages: 16,
+          maxMessages: 24,
+          maxCharacters: 48_000,
+          maxSummaryCharacters: 8_000,
+          maxTokens: Math.max(512, Number(process.env.AXIOM_CONTEXT_MAX_TOKENS ?? 12_000)),
+        },
+      );
+      if (contextSummary) {
+        contextSummary = attachPersistedContextMetadata(
+          contextSummary,
+          await contextSummaryMetadata(tenantId, userId, sessionId, parsed.data.messages, contextSummary.coveredMessageIds),
+        );
+      }
+      const session = await store.upsertSession(tenantId, userId, {
+        ...parsed.data,
+        id: sessionId,
+        contextSummary,
+      } as never);
       return c.json({ session });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : 'Session could not be persisted.' }, 409);
@@ -2394,6 +2485,232 @@ export const createTaskApi = (dependencies: {
     const task = await store.getTask(c.req.param('taskId'), tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     return c.json({ task });
+  });
+
+  api.get('/tasks/:taskId/checkpoints', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const taskId = c.req.param('taskId');
+    if (!runtimeIdSchema.safeParse(taskId).success) return c.json({ error: '任务 ID 格式无效。' }, 400);
+    const task = await store.getTask(taskId, principal.tenantId);
+    if (!task) return c.json({ error: 'Task not found.' }, 404);
+    const events = await store.getEvents(task.id);
+    const checkpoints = checkpointsFromEvents(events).map(({ snapshot: _snapshot, ...checkpoint }) => checkpoint);
+    const branchEvents = events.filter((event) => event.type === 'checkpoint.branch_created' || event.type === 'checkpoint.merge_created');
+    const branches = (await Promise.all(branchEvents.map(async (event) => {
+      const branchTaskId = typeof event.payload.branchTaskId === 'string'
+        ? event.payload.branchTaskId
+        : typeof event.payload.mergedTaskId === 'string' ? event.payload.mergedTaskId : '';
+      if (!branchTaskId) return null;
+      const branch = await store.getTask(branchTaskId, principal.tenantId);
+      if (!branch) return null;
+      return {
+        taskId: branch.id,
+        checkpointId: typeof event.payload.checkpointId === 'string' ? event.payload.checkpointId : '',
+        kind: event.type === 'checkpoint.merge_created' ? 'merge' : 'branch',
+        title: branch.title,
+        status: branch.status,
+        revision: branch.revision,
+        updatedAt: branch.updatedAt,
+      };
+    }))).filter((branch): branch is NonNullable<typeof branch> => Boolean(branch));
+    return c.json({ taskId: task.id, currentRevision: task.revision, checkpoints, branches });
+  });
+
+  api.get('/tasks/:taskId/checkpoints/:checkpointId/diff', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const taskId = c.req.param('taskId');
+    const checkpointId = c.req.param('checkpointId');
+    if (!runtimeIdSchema.safeParse(taskId).success) return c.json({ error: '任务 ID 格式无效。' }, 400);
+    if (!runtimeIdSchema.safeParse(checkpointId).success) return c.json({ error: '检查点 ID 格式无效。' }, 400);
+    const task = await store.getTask(taskId, principal.tenantId);
+    if (!task) return c.json({ error: 'Task not found.' }, 404);
+    const checkpoint = checkpointsFromEvents(await store.getEvents(task.id))
+      .find((candidate) => candidate.checkpointId === checkpointId);
+    if (!checkpoint) return c.json({ error: '检查点不存在。' }, 404);
+    if (!checkpoint.restorable) return c.json({ error: '这个旧检查点没有完整快照，只能查看，不能比较或恢复。' }, 409);
+    const targetTaskId = c.req.query('targetTaskId')?.trim() || task.id;
+    if (!runtimeIdSchema.safeParse(targetTaskId).success) return c.json({ error: '目标任务 ID 格式无效。' }, 400);
+    const target = targetTaskId === task.id ? task : await store.getTask(targetTaskId, principal.tenantId);
+    if (!target) return c.json({ error: '要比较的任务不存在。' }, 404);
+    return c.json({ diff: diffCheckpointToTask(checkpoint, target) });
+  });
+
+  api.post('/tasks/:taskId/checkpoints/:checkpointId/branch', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const taskId = c.req.param('taskId');
+    const checkpointId = c.req.param('checkpointId');
+    if (!runtimeIdSchema.safeParse(taskId).success) return c.json({ error: '任务 ID 格式无效。' }, 400);
+    if (!runtimeIdSchema.safeParse(checkpointId).success) return c.json({ error: '检查点 ID 格式无效。' }, 400);
+    const source = await store.getTask(taskId, principal.tenantId);
+    if (!source) return c.json({ error: 'Task not found.' }, 404);
+    if (principal.role !== 'owner' && principal.role !== 'admin' && source.userId !== principal.userId) {
+      return c.json({ error: '只有任务创建者或租户管理员可以派生新方案。' }, 403);
+    }
+    const parsed = checkpointBranchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '缺少当前版本号或分支操作标识。' }, 400);
+    const checkpoint = checkpointsFromEvents(await store.getEvents(source.id))
+      .find((candidate) => candidate.checkpointId === checkpointId);
+    if (!checkpoint) return c.json({ error: '检查点不存在。' }, 404);
+    if (!checkpoint.snapshot) return c.json({ error: '这个旧检查点没有完整快照，无法派生新方案。' }, 409);
+
+    const idempotencyKey = `checkpoint-branch:${source.id}:${parsed.data.operationId}`;
+    const existing = await store.findTaskByIdempotency(source.tenantId, idempotencyKey);
+    if (existing) return c.json({ task: existing, checkpointId, idempotent: true }, 200);
+    let reserved;
+    try {
+      reserved = await store.updateTask(source.id, {}, parsed.data.expectedRevision);
+    } catch (error) {
+      if (error instanceof TaskRevisionConflictError) {
+        return c.json({ error: '任务刚刚产生了新进展，请刷新版本后再操作。', code: error.code, expectedRevision: error.expectedRevision, actualRevision: error.actualRevision }, 409);
+      }
+      throw error;
+    }
+
+    const instruction = parsed.data.instruction.trim();
+    const branch = await store.createTask({
+      tenantId: source.tenantId,
+      userId: source.userId,
+      sessionId: source.sessionId,
+      templateId: source.templateId,
+      title: parsed.data.title?.trim() || `${source.title} · 分支方案`,
+      input: source.input,
+      mode: source.mode,
+      model: source.model,
+      modelCredentialId: source.modelCredentialId,
+      policy: source.policy,
+      idempotencyKey,
+      ...(parsed.data.behavior === 'continue' && checkpoint.snapshot.plan ? { plan: checkpoint.snapshot.plan } : {}),
+    });
+    const prepared = await store.updateTask(branch.id, {
+      stepResults: checkpoint.snapshot.stepResults,
+      planVersion: checkpoint.planVersion,
+      review: null,
+      result: null,
+      error: null,
+      cancelRequested: false,
+    });
+    const created = await store.appendEvent(prepared, {
+      type: 'task.created',
+      payload: { title: prepared.title, mode: prepared.mode, source: 'checkpoint-branch', parentTaskId: source.id, checkpointId, operationId: parsed.data.operationId },
+    });
+    hub.publish(created);
+    const branched = await store.appendEvent(prepared, {
+      type: 'checkpoint.branch_created',
+      agentId: 'operator-checkpoint',
+      payload: { sourceTaskId: source.id, branchTaskId: prepared.id, checkpointId, sourceRevision: reserved.revision, requestedBy: principal.userId },
+    });
+    hub.publish(branched);
+    if (instruction) {
+      const guidanceId = randomUUID();
+      const guidance = await store.appendEvent(prepared, {
+        type: 'human.guidance_accepted',
+        payload: { guidanceId, message: instruction, behavior: parsed.data.behavior, author: principal.userId, delivery: 'builtin-next-safe-point' },
+      });
+      hub.publish(guidance);
+    }
+    const queued = await store.appendEvent(prepared, { type: 'task.queued', payload: { parentTaskId: source.id, checkpointId } });
+    hub.publish(queued);
+    const sourceEvent = await store.appendEvent(reserved, {
+      type: 'checkpoint.branch_created',
+      agentId: 'operator-checkpoint',
+      payload: { sourceTaskId: source.id, branchTaskId: prepared.id, checkpointId, sourceRevision: reserved.revision, requestedBy: principal.userId },
+    });
+    hub.publish(sourceEvent);
+    coordinator.nudge();
+    return c.json({ task: prepared, checkpointId, sourceRevision: reserved.revision }, 202);
+  });
+
+  api.post('/tasks/:taskId/checkpoints/:checkpointId/merge', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const taskId = c.req.param('taskId');
+    const checkpointId = c.req.param('checkpointId');
+    if (!runtimeIdSchema.safeParse(taskId).success) return c.json({ error: '任务 ID 格式无效。' }, 400);
+    if (!runtimeIdSchema.safeParse(checkpointId).success) return c.json({ error: '检查点 ID 格式无效。' }, 400);
+    const source = await store.getTask(taskId, principal.tenantId);
+    if (!source) return c.json({ error: 'Task not found.' }, 404);
+    if (principal.role !== 'owner' && principal.role !== 'admin' && source.userId !== principal.userId) {
+      return c.json({ error: '只有任务创建者或租户管理员可以合并方案。' }, 403);
+    }
+    const parsed = checkpointMergeSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '合并参数不完整。' }, 400);
+    const checkpoint = checkpointsFromEvents(await store.getEvents(source.id))
+      .find((candidate) => candidate.checkpointId === checkpointId);
+    if (!checkpoint?.snapshot) return c.json({ error: '检查点不存在或没有可恢复快照。' }, 409);
+    const branch = await store.getTask(parsed.data.branchTaskId, principal.tenantId);
+    if (!branch) return c.json({ error: '分支任务不存在。' }, 404);
+    const branchEvents = await store.getEvents(branch.id);
+    const belongsToCheckpoint = branchEvents.some((event) => event.type === 'checkpoint.branch_created'
+      && event.payload.sourceTaskId === source.id
+      && event.payload.checkpointId === checkpointId);
+    if (!belongsToCheckpoint) return c.json({ error: '所选任务不是从这个检查点派生的分支。' }, 409);
+    if (executingTaskStatuses.has(branch.status)) return c.json({ error: '分支仍在执行，请等待完成或暂停后再合并。' }, 409);
+
+    const idempotencyKey = `checkpoint-merge:${source.id}:${parsed.data.operationId}`;
+    const existing = await store.findTaskByIdempotency(source.tenantId, idempotencyKey);
+    if (existing) return c.json({ task: existing, checkpointId, idempotent: true }, 200);
+    const mergedState = mergeCheckpointBranch(checkpoint, source, branch, parsed.data.strategy);
+    if (!mergedState.canMerge) {
+      return c.json({
+        error: '当前方案和分支修改了相同内容，请明确选择以哪个方案为准。',
+        code: 'CHECKPOINT_MERGE_CONFLICT',
+        conflicts: mergedState.conflicts,
+      }, 409);
+    }
+    let reserved;
+    try {
+      reserved = await store.updateTask(source.id, {}, parsed.data.expectedRevision);
+    } catch (error) {
+      if (error instanceof TaskRevisionConflictError) {
+        return c.json({ error: '任务刚刚产生了新进展，请刷新版本后再操作。', code: error.code, expectedRevision: error.expectedRevision, actualRevision: error.actualRevision }, 409);
+      }
+      throw error;
+    }
+
+    const merged = await store.createTask({
+      tenantId: source.tenantId,
+      userId: source.userId,
+      sessionId: source.sessionId,
+      templateId: source.templateId,
+      title: parsed.data.title?.trim() || `${source.title} · 合并方案`,
+      input: source.input,
+      mode: source.mode,
+      model: source.model,
+      modelCredentialId: source.modelCredentialId,
+      policy: source.policy,
+      idempotencyKey,
+      ...(mergedState.plan ? { plan: mergedState.plan } : {}),
+    });
+    const prepared = await store.updateTask(merged.id, {
+      stepResults: mergedState.stepResults,
+      planVersion: Math.max(source.planVersion ?? 0, branch.planVersion ?? 0, checkpoint.planVersion),
+      review: null,
+      result: null,
+      error: null,
+      cancelRequested: false,
+    });
+    const created = await store.appendEvent(prepared, {
+      type: 'task.created',
+      payload: { title: prepared.title, mode: prepared.mode, source: 'checkpoint-merge', parentTaskId: source.id, branchTaskId: branch.id, checkpointId, operationId: parsed.data.operationId },
+    });
+    hub.publish(created);
+    const mergePayload = {
+      sourceTaskId: source.id,
+      branchTaskId: branch.id,
+      mergedTaskId: prepared.id,
+      checkpointId,
+      sourceRevision: reserved.revision,
+      strategy: parsed.data.strategy,
+      resolvedConflicts: mergedState.conflicts,
+      requestedBy: principal.userId,
+    };
+    const mergedEvent = await store.appendEvent(prepared, { type: 'checkpoint.merge_created', agentId: 'operator-checkpoint', payload: mergePayload });
+    hub.publish(mergedEvent);
+    const queued = await store.appendEvent(prepared, { type: 'task.queued', payload: { parentTaskId: source.id, branchTaskId: branch.id, checkpointId } });
+    hub.publish(queued);
+    const sourceEvent = await store.appendEvent(reserved, { type: 'checkpoint.merge_created', agentId: 'operator-checkpoint', payload: mergePayload });
+    hub.publish(sourceEvent);
+    coordinator.nudge();
+    return c.json({ task: prepared, checkpointId, sourceRevision: reserved.revision, resolvedConflicts: mergedState.conflicts }, 202);
   });
 
   // External Harness delegation is deliberately explicit and starts only from

@@ -10,6 +10,7 @@ import type { AgentStore, WorkflowTask } from './contracts.js';
 const task = (id = 'tool-task'): WorkflowTask => ({
   id,
   runId: `${id}-run`,
+  revision: 0,
   tenantId: 'tenant-a',
   userId: 'operator-a',
   sessionId: 'session-a',

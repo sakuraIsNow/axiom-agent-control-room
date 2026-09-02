@@ -1,3 +1,5 @@
+import type { PersistedContextSummary } from './contextSummary.js';
+
 export type TaskStatus =
   | 'queued'
   | 'planning'
@@ -508,6 +510,10 @@ export type StepResult = {
   role: WorkflowStep['role'];
   status: 'completed' | 'failed';
   output: string;
+  /** Full output location when the database field contains a bounded preview. */
+  resultRef?: ArtifactRef;
+  outputChars?: number;
+  outputTruncated?: boolean;
   evidence: string[];
   confidence: number;
   attempts: number;
@@ -531,6 +537,8 @@ export type ReviewResult = {
 export type WorkflowTask = {
   id: string;
   runId: string;
+  /** Monotonic task revision used for optimistic human-control writes. */
+  revision: number;
   tenantId: string;
   userId: string;
   sessionId: string;
@@ -592,9 +600,13 @@ export type PersistedSession = {
   activeAssistantId?: string;
   /** Graph assembled by direct specialist turns; independent from task graphs. */
   agentGraph?: AgentGraph;
+  /** Server-generated summary; original messages remain authoritative. */
+  contextSummary?: PersistedContextSummary;
 };
 
-export type UpsertSessionInput = Omit<PersistedSession, 'tenantId' | 'userId'>;
+export type UpsertSessionInput = Omit<PersistedSession, 'tenantId' | 'userId' | 'contextSummary'> & {
+  contextSummary?: PersistedContextSummary | null;
+};
 
 export type RuntimeEventType =
   | 'task.created'
@@ -658,6 +670,8 @@ export type RuntimeEventType =
   | 'review.approved'
   | 'review.rejected'
   | 'checkpoint.saved'
+  | 'checkpoint.branch_created'
+  | 'checkpoint.merge_created'
   | 'memory.recall.started'
   | 'memory.recall.completed'
   | 'memory.capture.started'
@@ -778,6 +792,19 @@ export type TaskPatch = {
   policy?: ExecutionPolicy;
 };
 
+export class TaskRevisionConflictError extends Error {
+  readonly code = 'TASK_REVISION_CONFLICT';
+
+  constructor(
+    readonly taskId: string,
+    readonly expectedRevision: number,
+    readonly actualRevision: number,
+  ) {
+    super(`Task ${taskId} revision changed from ${expectedRevision} to ${actualRevision}.`);
+    this.name = 'TaskRevisionConflictError';
+  }
+}
+
 export type TaskStats = {
   byStatus: Record<TaskStatus, number>;
   createdLast24h: number;
@@ -799,6 +826,9 @@ export type OperationsModelSummary = {
   successRate: number | null;
   averageLatencyMs: number;
   totalTokens: number;
+  promptCacheHitTokens: number;
+  promptCacheMissTokens: number;
+  promptCacheHitRate: number | null;
   estimatedCostUsd: number;
   lastUsedAt?: string;
   health: 'healthy' | 'degraded' | 'unknown';
@@ -893,7 +923,7 @@ export interface TaskStore {
   getTaskStats(tenantId: string): Promise<TaskStats>;
   getTaskStatsDaily(tenantId: string, days: number): Promise<TaskStatsDaily[]>;
   getOperationsSnapshot(tenantId: string, windowHours?: number): Promise<OperationsSnapshot>;
-  updateTask(taskId: string, patch: TaskPatch): Promise<WorkflowTask>;
+  updateTask(taskId: string, patch: TaskPatch, expectedRevision?: number): Promise<WorkflowTask>;
   requestCancel(taskId: string, tenantId: string): Promise<boolean>;
   claimNextTask(workerId: string, leaseMs: number): Promise<WorkflowTask | null>;
   renewLease(taskId: string, workerId: string, leaseMs: number): Promise<boolean>;

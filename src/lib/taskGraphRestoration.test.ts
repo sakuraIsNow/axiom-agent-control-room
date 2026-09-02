@@ -6,6 +6,7 @@ import { restoreTaskGraph } from './taskGraphRestoration';
 const taskWithStatus = (status: WorkflowTask['status']): WorkflowTask => ({
   id: 'task-1',
   runId: 'run-1',
+  revision: 0,
   sessionId: 'session-1',
   title: 'Graph restore test',
   input: 'test',

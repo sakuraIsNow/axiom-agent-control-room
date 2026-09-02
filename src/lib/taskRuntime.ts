@@ -1,4 +1,4 @@
-import type { AgentMode, ChatRouteDecision, OperationsSnapshot, TaskStats, TaskStatsDaily, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
+import type { AgentMode, ChatRouteDecision, OperationsSnapshot, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
 import type { ExecutionPolicy } from '../types';
 import { consumeSseBlocks } from './sse';
 
@@ -88,6 +88,84 @@ export async function getWorkflowTask(taskId: string, signal?: AbortSignal) {
   const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, { signal });
   const body = await response.json().catch(() => null) as { task?: WorkflowTask; error?: string } | null;
   if (!response.ok || !body?.task) throw new Error(body?.error ?? `Task lookup returned ${response.status}.`);
+  return body.task;
+}
+
+export async function listWorkflowCheckpoints(taskId: string, signal?: AbortSignal) {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/checkpoints`, { signal });
+  const body = await response.json().catch(() => null) as {
+    taskId?: string;
+    currentRevision?: number;
+    checkpoints?: WorkflowCheckpointSummary[];
+    branches?: WorkflowCheckpointBranch[];
+    error?: string;
+  } | null;
+  if (!response.ok || !Array.isArray(body?.checkpoints) || !Array.isArray(body.branches) || typeof body.currentRevision !== 'number') {
+    throw new Error(body?.error ?? `Checkpoint list returned ${response.status}.`);
+  }
+  return {
+    taskId: body.taskId ?? taskId,
+    currentRevision: body.currentRevision,
+    checkpoints: body.checkpoints,
+    branches: body.branches,
+  };
+}
+
+export async function compareWorkflowCheckpoint(taskId: string, checkpointId: string, targetTaskId?: string, signal?: AbortSignal) {
+  const query = targetTaskId ? `?targetTaskId=${encodeURIComponent(targetTaskId)}` : '';
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/checkpoints/${encodeURIComponent(checkpointId)}/diff${query}`, { signal });
+  const body = await response.json().catch(() => null) as { diff?: WorkflowCheckpointDiff; error?: string } | null;
+  if (!response.ok || !body?.diff) throw new Error(body?.error ?? `Checkpoint comparison returned ${response.status}.`);
+  return body.diff;
+}
+
+export async function branchWorkflowCheckpoint(input: {
+  taskId: string;
+  checkpointId: string;
+  expectedRevision: number;
+  instruction?: string;
+  behavior?: 'continue' | 'replan';
+  title?: string;
+  operationId?: string;
+}) {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(input.taskId)}/checkpoints/${encodeURIComponent(input.checkpointId)}/branch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: input.expectedRevision,
+      operationId: input.operationId ?? crypto.randomUUID(),
+      instruction: input.instruction ?? '',
+      behavior: input.behavior ?? 'continue',
+      title: input.title,
+    }),
+  });
+  const body = await response.json().catch(() => null) as { task?: WorkflowTask; error?: string; code?: string; actualRevision?: number } | null;
+  if (!response.ok || !body?.task) throw Object.assign(new Error(body?.error ?? `Checkpoint branch returned ${response.status}.`), { code: body?.code, actualRevision: body?.actualRevision });
+  return body.task;
+}
+
+export async function mergeWorkflowCheckpoint(input: {
+  taskId: string;
+  checkpointId: string;
+  branchTaskId: string;
+  expectedRevision: number;
+  strategy?: 'manual' | 'prefer-branch' | 'prefer-current';
+  title?: string;
+  operationId?: string;
+}) {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(input.taskId)}/checkpoints/${encodeURIComponent(input.checkpointId)}/merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: input.expectedRevision,
+      operationId: input.operationId ?? crypto.randomUUID(),
+      branchTaskId: input.branchTaskId,
+      strategy: input.strategy ?? 'manual',
+      title: input.title,
+    }),
+  });
+  const body = await response.json().catch(() => null) as { task?: WorkflowTask; error?: string; code?: string; actualRevision?: number; conflicts?: string[] } | null;
+  if (!response.ok || !body?.task) throw Object.assign(new Error(body?.error ?? `Checkpoint merge returned ${response.status}.`), { code: body?.code, actualRevision: body?.actualRevision, conflicts: body?.conflicts });
   return body.task;
 }
 

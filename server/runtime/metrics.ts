@@ -7,7 +7,7 @@ type RuntimeMetricSnapshot = {
   requests: { total: number; errors: number; durationMsTotal: number };
   tasks: { created: number; completed: number; failed: number; cancelled: number };
   images: { requested: number; failed: number };
-  tokens: { prompt: number; completion: number; total: number; estimatedCostUsd: number };
+  tokens: { prompt: number; completion: number; total: number; promptCacheHit: number; promptCacheMiss: number; promptCacheHitRate: number | null; estimatedCostUsd: number };
   routes: Record<string, number>;
   review: { started: number; approved: number; rejected: number; humanTakeover: number };
   tools: { started: number; completed: number; failed: number };
@@ -31,6 +31,8 @@ export class RuntimeMetrics {
     promptTokens: 0,
     completionTokens: 0,
     totalTokens: 0,
+    promptCacheHitTokens: 0,
+    promptCacheMissTokens: 0,
     estimatedCostUsd: 0,
     routeDirect: 0,
     routeSingleAgent: 0,
@@ -72,6 +74,8 @@ export class RuntimeMetrics {
     this.counters.promptTokens += prompt;
     this.counters.completionTokens += completion;
     this.counters.totalTokens += total;
+    this.counters.promptCacheHitTokens += number(usage.prompt_cache_hit_tokens);
+    this.counters.promptCacheMissTokens += number(usage.prompt_cache_miss_tokens);
     const inputRate = Number(process.env.AGENT_INPUT_COST_PER_1K_USD ?? 0);
     const outputRate = Number(process.env.AGENT_OUTPUT_COST_PER_1K_USD ?? 0);
     this.counters.estimatedCostUsd += (prompt / 1_000) * inputRate + (completion / 1_000) * outputRate;
@@ -130,6 +134,11 @@ export class RuntimeMetrics {
         prompt: this.counters.promptTokens,
         completion: this.counters.completionTokens,
         total: this.counters.totalTokens,
+        promptCacheHit: this.counters.promptCacheHitTokens,
+        promptCacheMiss: this.counters.promptCacheMissTokens,
+        promptCacheHitRate: this.counters.promptCacheHitTokens + this.counters.promptCacheMissTokens > 0
+          ? Number((this.counters.promptCacheHitTokens / (this.counters.promptCacheHitTokens + this.counters.promptCacheMissTokens) * 100).toFixed(1))
+          : null,
         estimatedCostUsd: Number(this.counters.estimatedCostUsd.toFixed(6)),
       },
       routes: {
@@ -181,6 +190,8 @@ export class RuntimeMetrics {
       `axiom_tokens_total{kind="prompt"} ${snapshot.tokens.prompt}`,
       `axiom_tokens_total{kind="completion"} ${snapshot.tokens.completion}`,
       `axiom_tokens_total{kind="total"} ${snapshot.tokens.total}`,
+      `axiom_tokens_total{kind="prompt_cache_hit"} ${snapshot.tokens.promptCacheHit}`,
+      `axiom_tokens_total{kind="prompt_cache_miss"} ${snapshot.tokens.promptCacheMiss}`,
       '# TYPE axiom_estimated_model_cost_usd_total counter',
       `axiom_estimated_model_cost_usd_total ${snapshot.tokens.estimatedCostUsd}`,
       '# TYPE axiom_route_tasks_total counter',

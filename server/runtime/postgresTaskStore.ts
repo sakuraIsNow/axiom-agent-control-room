@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { runtimeEventSource } from './runtimeContext.js';
 import { Pool, type PoolClient } from 'pg';
+import { TaskRevisionConflictError } from './contracts.js';
 import type {
   AgentGraph,
   CreateTaskInput,
@@ -25,6 +26,7 @@ const allTaskStatuses: TaskStatus[] = ['queued', 'planning', 'awaiting_approval'
 type PostgresTaskRow = {
   id: string;
   run_id: string;
+  revision: number;
   tenant_id: string;
   user_id: string;
   session_id: string;
@@ -58,6 +60,7 @@ type PostgresSessionRow = {
   title: string;
   messages_json: PersistedSessionMessage[];
   graph_json: AgentGraph | null;
+  context_summary_json: PersistedSession['contextSummary'] | null;
   active_task_id: string | null;
   active_assistant_id: string | null;
   updated_at: Date | string | number;
@@ -69,6 +72,7 @@ const iso = (value: Date | string) => value instanceof Date ? value.toISOString(
 const taskFromRow = (row: PostgresTaskRow): WorkflowTask => ({
   id: row.id,
   runId: row.run_id,
+  revision: Number(row.revision ?? 0),
   tenantId: row.tenant_id,
   userId: row.user_id,
   sessionId: row.session_id,
@@ -100,6 +104,7 @@ const sessionFromRow = (row: PostgresSessionRow): PersistedSession => ({
   title: row.title,
   messages: row.messages_json ?? [],
   agentGraph: row.graph_json ?? undefined,
+  contextSummary: row.context_summary_json ?? undefined,
   updatedAt: Number(row.updated_at instanceof Date ? row.updated_at.getTime() : row.updated_at),
   activeTaskId: row.active_task_id ?? undefined,
   activeAssistantId: row.active_assistant_id ?? undefined,
@@ -129,6 +134,7 @@ export class PostgresTaskStore implements TaskStore {
       CREATE TABLE IF NOT EXISTS tasks (
         id UUID PRIMARY KEY,
         run_id UUID NOT NULL UNIQUE,
+        revision INTEGER NOT NULL DEFAULT 0,
         tenant_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -181,6 +187,7 @@ export class PostgresTaskStore implements TaskStore {
         title TEXT NOT NULL,
         messages_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         graph_json JSONB,
+        context_summary_json JSONB,
         active_task_id TEXT,
         active_assistant_id TEXT,
         updated_at BIGINT NOT NULL,
@@ -193,6 +200,7 @@ export class PostgresTaskStore implements TaskStore {
       INSERT INTO schema_migrations (version) VALUES (1) ON CONFLICT (version) DO NOTHING;
 
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_version INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS policy_json JSONB NOT NULL DEFAULT '{"requirePlanApproval":false}'::jsonb;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS template_id UUID;
@@ -202,6 +210,7 @@ export class PostgresTaskStore implements TaskStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS graph_json JSONB;
+      ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_summary_json JSONB;
       ALTER TABLE task_events ADD COLUMN IF NOT EXISTS runtime_context_json JSONB;
     `);
   }
@@ -216,6 +225,7 @@ export class PostgresTaskStore implements TaskStore {
       ...input,
       id: randomUUID(),
       runId: randomUUID(),
+      revision: 0,
       status: 'queued',
       stepResults: [],
       cancelRequested: false,
@@ -447,7 +457,7 @@ export class PostgresTaskStore implements TaskStore {
     );
   }
 
-  async updateTask(taskId: string, patch: TaskPatch) {
+  async updateTask(taskId: string, patch: TaskPatch, expectedRevision?: number) {
     const assignments: string[] = [];
     const values: unknown[] = [];
     const assign = (column: string, value: unknown) => {
@@ -465,13 +475,20 @@ export class PostgresTaskStore implements TaskStore {
     if (patch.cancelRequested !== undefined) assign('cancel_requested', patch.cancelRequested);
     if (patch.planVersion !== undefined) assign('plan_version', patch.planVersion);
     if (patch.policy !== undefined) assign('policy_json', patch.policy);
+    assignments.push('revision = revision + 1');
     assign('updated_at', new Date().toISOString());
     values.push(taskId);
+    const taskParameter = values.length;
+    if (expectedRevision !== undefined) values.push(expectedRevision);
 
     const result = await this.pool.query(
-      `UPDATE tasks SET ${assignments.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      `UPDATE tasks SET ${assignments.join(', ')} WHERE id = $${taskParameter}${expectedRevision !== undefined ? ` AND revision = $${values.length}` : ''} RETURNING *`,
       values,
     );
+    if (!result.rows[0] && expectedRevision !== undefined) {
+      const current = await this.getTask(taskId);
+      if (current) throw new TaskRevisionConflictError(taskId, expectedRevision, current.revision);
+    }
     if (!result.rows[0]) throw new Error(`Task ${taskId} was not found after update.`);
     return taskFromRow(result.rows[0] as PostgresTaskRow);
   }
@@ -625,12 +642,13 @@ export class PostgresTaskStore implements TaskStore {
 
   async upsertSession(tenantId: string, userId: string, input: UpsertSessionInput) {
     const result = await this.pool.query(`
-      INSERT INTO sessions (id, tenant_id, user_id, title, messages_json, graph_json, active_task_id, active_assistant_id, updated_at)
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9)
+      INSERT INTO sessions (id, tenant_id, user_id, title, messages_json, graph_json, context_summary_json, active_task_id, active_assistant_id, updated_at)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10)
       ON CONFLICT (tenant_id, id) DO UPDATE SET
         title = EXCLUDED.title,
         messages_json = EXCLUDED.messages_json,
         graph_json = EXCLUDED.graph_json,
+        context_summary_json = EXCLUDED.context_summary_json,
         active_task_id = EXCLUDED.active_task_id,
         active_assistant_id = EXCLUDED.active_assistant_id,
         updated_at = EXCLUDED.updated_at,
@@ -645,6 +663,7 @@ export class PostgresTaskStore implements TaskStore {
       input.title,
       JSON.stringify(input.messages),
       JSON.stringify(input.agentGraph ?? null),
+      JSON.stringify(input.contextSummary ?? null),
       input.activeTaskId ?? null,
       input.activeAssistantId ?? null,
       input.updatedAt,

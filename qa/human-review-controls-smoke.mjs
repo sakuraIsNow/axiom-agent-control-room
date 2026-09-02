@@ -127,6 +127,13 @@ page.on('request', (request) => {
 await page.route('**/api/tasks?limit=30', async (route) => {
   await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tasks: [summary] }) });
 });
+await page.route(`**/api/tasks/${taskId}/checkpoints`, async (route) => {
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ taskId, currentRevision: 1, checkpoints: [], branches: [] }),
+  });
+});
 await page.route(`**/api/tasks/${taskId}`, async (route) => {
   await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task }) });
 });

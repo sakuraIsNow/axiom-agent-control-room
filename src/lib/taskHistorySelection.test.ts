@@ -6,6 +6,7 @@ import { findTaskAssistantIndex } from './taskHistorySelection';
 const task = (id: string, input: string): WorkflowTask => ({
   id,
   runId: `run-${id}`,
+  revision: 0,
   sessionId: 'session-1',
   title: input,
   input,

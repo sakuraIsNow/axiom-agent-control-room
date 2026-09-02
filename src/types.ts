@@ -343,6 +343,8 @@ export type WorkflowEventType =
   | 'review.approved'
   | 'review.rejected'
   | 'checkpoint.saved'
+  | 'checkpoint.branch_created'
+  | 'checkpoint.merge_created'
   | 'memory.recall.started'
   | 'memory.recall.completed'
   | 'memory.capture.started'
@@ -390,6 +392,7 @@ export type WorkflowEvent = {
 export type WorkflowTask = {
   id: string;
   runId: string;
+  revision: number;
   sessionId: string;
   templateId?: string;
   title: string;
@@ -418,6 +421,9 @@ export type WorkflowTask = {
     role: string;
     status: 'completed' | 'failed';
     output: string;
+    resultRef?: ArtifactRef;
+    outputChars?: number;
+    outputTruncated?: boolean;
     evidence: string[];
     confidence: number;
     attempts: number;
@@ -445,6 +451,7 @@ export type WorkflowTask = {
 export type WorkflowTaskSummary = {
   id: string;
   runId: string;
+  revision: number;
   sessionId: string;
   userId: string;
   /** Origin recorded on task.created. Optional for summaries from older servers. */
@@ -495,6 +502,45 @@ export type WorkflowTaskSummary = {
   };
 };
 
+export type WorkflowCheckpointSummary = {
+  checkpointId: string;
+  eventId: string;
+  sequence: number;
+  createdAt: string;
+  stage: string;
+  revision: number;
+  planVersion: number;
+  graphRevision: number;
+  completedSteps: number;
+  failedSteps: number;
+  totalSteps: number;
+  restorable: boolean;
+};
+
+export type WorkflowCheckpointBranch = {
+  taskId: string;
+  checkpointId: string;
+  kind: 'branch' | 'merge';
+  title: string;
+  status: WorkflowTaskStatus;
+  revision: number;
+  updatedAt: string;
+};
+
+export type WorkflowCheckpointDiff = {
+  baseCheckpointId: string;
+  targetTaskId: string;
+  baseRevision: number;
+  targetRevision: number;
+  planChanged: boolean;
+  steps: {
+    added: string[];
+    removed: string[];
+    changed: string[];
+    unchanged: string[];
+  };
+};
+
 export type WorkflowTemplateVisibility = 'private' | 'team';
 
 export type TaskStats = {
@@ -538,6 +584,9 @@ export type OperationsSnapshot = {
     successRate: number | null;
     averageLatencyMs: number;
     totalTokens: number;
+    promptCacheHitTokens: number;
+    promptCacheMissTokens: number;
+    promptCacheHitRate: number | null;
     estimatedCostUsd: number;
     lastUsedAt?: string;
     health: 'healthy' | 'degraded' | 'unknown';
@@ -748,6 +797,23 @@ export type AgentGraph = {
   revision?: number;
 };
 
+export type PersistedContextSummary = {
+  summaryId: string;
+  sessionId: string;
+  version: number;
+  algorithm: string;
+  content: string;
+  coveredMessageIds: string[];
+  coveredFrom?: string;
+  coveredTo?: string;
+  sourceDigest: string;
+  artifactIds: string[];
+  approvalEventIds: string[];
+  unresolvedItems: string[];
+  durableFacts: string[];
+  createdAt: string;
+};
+
 export type Session = {
   id: string;
   title: string;
@@ -757,4 +823,6 @@ export type Session = {
   activeAssistantId?: string;
   /** Session-scoped graph for direct specialist turns and cross-refresh restore. */
   agentGraph?: AgentGraph;
+  /** Server-generated and digest-verified compact history for model context. */
+  contextSummary?: PersistedContextSummary;
 };

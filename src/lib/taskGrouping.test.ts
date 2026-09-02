@@ -6,6 +6,7 @@ import { groupTaskRuns, isAgentWorkflowTask } from './taskGrouping';
 const makeTask = (overrides: Partial<WorkflowTaskSummary> = {}): WorkflowTaskSummary => ({
   id: 'task-1',
   runId: 'run-1',
+  revision: 0,
   sessionId: 'session-1',
   userId: 'user-1',
   templateId: null,

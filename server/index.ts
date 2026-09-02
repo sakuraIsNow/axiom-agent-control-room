@@ -30,7 +30,7 @@ import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
 import { chatRouteDecisionSchema, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision } from './runtime/chatRouter.js';
 import { isOriginAllowed } from './runtime/originPolicy.js';
 import { normalizeProviderBaseUrl } from './runtime/providerLocation.js';
-import { buildContextWindow } from './runtime/contextSummary.js';
+import { buildContextWindow, validatePersistedContextSummary, type DurableContextSourceMessage, type PersistedContextSummary } from './runtime/contextSummary.js';
 import { runtimeSkillCatalog, skillInstructions } from './runtime/skillCatalog.js';
 import { workflowSpecialistCatalog } from './runtime/workflowSpecialists.js';
 import type { AgentGraph } from './runtime/contracts.js';
@@ -61,13 +61,16 @@ type ClientContentPart =
   | { type: 'file'; file: { file_id: string } };
 
 type ClientMessage = {
+  id?: string;
   role: 'user' | 'assistant';
   content: string | ClientContentPart[];
+  taskId?: string;
   /** Browser-only metadata used to extract attachments before provider calls. */
   attachments?: ClientAttachment[];
 };
 
 type ClientAttachment = {
+  id?: string;
   kind?: 'file' | 'image' | 'video';
   name?: string;
   mimeType?: string;
@@ -375,21 +378,29 @@ type CleanMessagesResult = {
   estimatedTokens: number;
   summaryVersion: string | null;
   summaryCoverage: { start: number; end: number; total: number } | null;
+  durableSummaryId?: string;
 };
 
-const cleanMessages = async (messages: unknown): Promise<CleanMessagesResult> => {
+const cleanMessages = async (messages: unknown, persistedSummary?: PersistedContextSummary): Promise<CleanMessagesResult> => {
   if (!Array.isArray(messages)) return {
     messages: [], summaryApplied: false, summarizedMessages: 0, estimatedTokens: 0, summaryVersion: null, summaryCoverage: null,
   };
 
-  const cleaned = messages
+  const candidates = messages
     .filter(
       (message): message is ClientMessage & { attachments?: ClientAttachment[] } =>
         typeof message === 'object' &&
         message !== null &&
         ('role' in message && (message.role === 'user' || message.role === 'assistant')) &&
         ('content' in message && (typeof message.content === 'string' || Array.isArray(message.content))),
-    )
+    );
+  const durableSources = candidates.every((message) => typeof message.id === 'string' && message.id.length > 0)
+    ? candidates as DurableContextSourceMessage[]
+    : [];
+  const durableSummaryUsed = durableSources.length > 0 && validatePersistedContextSummary(persistedSummary, durableSources);
+  const coveredMessageIds = durableSummaryUsed ? new Set(persistedSummary!.coveredMessageIds) : new Set<string>();
+  const cleaned = candidates
+    .filter((message) => !message.id || !coveredMessageIds.has(message.id))
     .map(async (message) => {
       const rawContent = typeof message.content === 'string' ? message.content.trim().slice(0, 24_000) : '';
       const attachments = message.role === 'user' && Array.isArray(message.attachments)
@@ -405,8 +416,11 @@ const cleanMessages = async (messages: unknown): Promise<CleanMessagesResult> =>
       }
       return { role: message.role, content: parts.length === 1 && parts[0]?.type === 'text' ? parts[0].text : parts };
     });
-  const normalized = (await Promise.all(cleaned))
+  const recent = (await Promise.all(cleaned))
     .filter((message) => Array.isArray(message.content) ? message.content.length > 0 : message.content.length > 0);
+  const normalized = durableSummaryUsed
+    ? [{ role: 'assistant' as const, content: persistedSummary!.content }, ...recent]
+    : recent;
   const bounded = buildContextWindow<ClientMessage>(normalized, {
     recentMessages: 12,
     triggerMessages: 16,
@@ -417,11 +431,14 @@ const cleanMessages = async (messages: unknown): Promise<CleanMessagesResult> =>
   });
   return {
     messages: bounded.messages,
-    summaryApplied: bounded.summaryApplied,
-    summarizedMessages: bounded.summarizedMessages,
+    summaryApplied: durableSummaryUsed || bounded.summaryApplied,
+    summarizedMessages: (durableSummaryUsed ? persistedSummary!.coveredMessageIds.length : 0) + bounded.summarizedMessages,
     estimatedTokens: bounded.estimatedTokens,
-    summaryVersion: bounded.summaryVersion,
-    summaryCoverage: bounded.summaryCoverage,
+    summaryVersion: durableSummaryUsed ? `${persistedSummary!.algorithm}@${persistedSummary!.version}` : bounded.summaryVersion,
+    summaryCoverage: durableSummaryUsed
+      ? { start: 0, end: persistedSummary!.coveredMessageIds.length - 1, total: candidates.length }
+      : bounded.summaryCoverage,
+    ...(durableSummaryUsed ? { durableSummaryId: persistedSummary!.summaryId } : {}),
   };
 };
 
@@ -1392,14 +1409,18 @@ app.post('/api/chat', async (c) => {
     return c.json({ error: 'Invalid JSON request body.' }, 400);
   }
 
-  const cleanedMessages = await cleanMessages(request.messages);
+  const principal = localPrincipal(c.req.raw.headers);
+  const persistedSummary = request.sessionId
+    ? (await taskStore.listSessions(principal.tenantId, principal.userId, 100).catch(() => []))
+      .find((session) => session.id === request.sessionId)?.contextSummary
+    : undefined;
+  const cleanedMessages = await cleanMessages(request.messages, persistedSummary);
   let messages = cleanedMessages.messages;
   if (messages.length === 0 || messages[messages.length - 1]?.role !== 'user') {
     return c.json({ error: 'A user message is required.' }, 400);
   }
 
   const mode = request.mode && request.mode in modePrompts ? request.mode : 'analyze';
-  const principal = localPrincipal(c.req.raw.headers);
   let provider: ResolvedProvider;
   try {
     provider = await resolveProviderForRequest(request.provider, defaultTextProvider, 'Text model', principal.tenantId, principal.userId, 'text');
@@ -1487,7 +1508,12 @@ app.post('/api/chat', async (c) => {
         if (uploadedImageFiles > 0) push('status', { phase: 'context', message: `DeepSeek Files API 已复用 ${uploadedImageFiles} 张图片` });
 
         if (cleanedMessages.summaryApplied) {
-          push('status', { phase: 'context', message: `已自动整理最早的 ${cleanedMessages.summarizedMessages} 条消息为上下文摘要。` });
+          push('status', {
+            phase: 'context',
+            message: cleanedMessages.durableSummaryId
+              ? `已恢复持久上下文摘要，覆盖最早的 ${cleanedMessages.summarizedMessages} 条消息。`
+              : `已自动整理最早的 ${cleanedMessages.summarizedMessages} 条消息为上下文摘要。`,
+          });
         }
 
         if (routing.intent === 'image-generation') {

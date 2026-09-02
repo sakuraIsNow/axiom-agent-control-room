@@ -525,6 +525,27 @@
 .dash-detail-actions { display: flex; gap: 8px; }
 .dash-resubmit, .dash-detail-delete { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 0 11px; border-radius: 7px; cursor: pointer; font-size: 12px; }
 .dash-detail-delete { border: 1px solid rgb(216 120 125 / 30%); color: #dda5a8; background: rgb(88 21 28 / 16%); }
+.dash-checkpoints { padding-block: 15px; border-block: 1px solid var(--dash-line); }
+.dash-checkpoints .dash-detail-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.dash-checkpoints .dash-detail-head em { color: var(--dash-copper); font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; font-style: normal; }
+.dash-checkpoints .dash-detail-head button { display: grid; width: 25px; height: 25px; place-items: center; padding: 0; border: 1px solid var(--dash-line); border-radius: 6px; color: var(--dash-muted); background: rgb(255 255 255 / 4%); cursor: pointer; }
+.dash-checkpoints select { width: 100%; min-height: 35px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--dash-line-strong); border-radius: 7px; outline: 0; color: var(--dash-soft); background: rgb(var(--dash-surface-strong-rgb) / 82%); font: inherit; font-size: 11px; }
+.dash-checkpoint-meta, .dash-checkpoint-diff { display: flex; flex-wrap: wrap; gap: 6px; color: var(--dash-muted); font-size: 10px; }
+.dash-checkpoint-meta span, .dash-checkpoint-diff span { padding: 4px 7px; border: 1px solid var(--dash-line); border-radius: 6px; background: rgb(255 255 255 / 4%); }
+.dash-checkpoint-meta .warning { color: var(--dash-copper); }
+.dash-checkpoint-branch-form, .dash-checkpoint-compare { display: grid; gap: 8px; }
+.dash-checkpoint-branch-form textarea { width: 100%; min-height: 60px; box-sizing: border-box; padding: 9px 10px; resize: vertical; border: 1px solid var(--dash-line-strong); border-radius: 7px; outline: 0; color: var(--dash-ink); background: rgb(3 8 6 / 30%); font: inherit; font-size: 11px; line-height: 1.5; }
+.dash-checkpoint-branch-form textarea:focus { border-color: rgb(var(--dash-accent-rgb) / 58%); box-shadow: 0 0 0 3px rgb(var(--dash-accent-rgb) / 8%); }
+.dash-checkpoint-actions { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+.dash-checkpoint-actions button, .dash-checkpoint-conflict button { display: inline-flex; min-height: 31px; align-items: center; justify-content: center; gap: 5px; padding: 0 9px; border: 1px solid var(--dash-line-strong); border-radius: 7px; color: var(--dash-soft); background: rgb(255 255 255 / 5%); cursor: pointer; font-size: 10px; }
+.dash-checkpoint-actions button.primary { border-color: rgb(var(--dash-accent-rgb) / 48%); color: var(--dash-selected); background: rgb(var(--dash-accent-rgb) / 10%); }
+.dash-checkpoint-actions button:disabled, .dash-checkpoint-conflict button:disabled { opacity: .45; cursor: wait; }
+.dash-checkpoint-mode { display: inline-flex; padding: 2px; border: 1px solid var(--dash-line); border-radius: 7px; }
+.dash-checkpoint-mode button { min-height: 26px; padding-inline: 7px; border: 0; background: transparent; }
+.dash-checkpoint-mode button.active { color: var(--dash-bg); background: var(--dash-selected); }
+.dash-checkpoint-conflict { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 9px; border: 1px solid rgb(216 120 125 / 32%); border-radius: 7px; background: rgb(88 21 28 / 10%); }
+.dash-checkpoint-conflict p { grid-column: 1 / -1; margin: 0; color: #e2afb2; font-size: 11px; line-height: 1.5; }
+.dash-checkpoint-message { margin: 0; color: var(--dash-copper); font-size: 10px; line-height: 1.5; }
 .dash-detail-section { gap: 11px; }
 .dash-detail-head { font-size: 12px; letter-spacing: 0; }
 .dash-detail-section ul { gap: 8px; padding-left: 18px; font-size: 12px; line-height: 1.55; }

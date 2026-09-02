@@ -118,7 +118,7 @@ export const buildOperationsSnapshot = (
     }
   }
 
-  const modelMap = new Map<string, { calls: number; successes: number; failures: number; latencies: number[]; tokens: number; cost: number; lastUsedAt?: string }>();
+  const modelMap = new Map<string, { calls: number; successes: number; failures: number; latencies: number[]; tokens: number; cacheHits: number; cacheMisses: number; cost: number; lastUsedAt?: string }>();
   const toolMap = new Map<string, { calls: number; successes: number; failures: number; lastFailureAt?: string }>();
   const agentMap = new Map<string, { role?: string; started: number; completed: number; failed: number }>();
   let reviewerStarted = 0;
@@ -132,11 +132,13 @@ export const buildOperationsSnapshot = (
     const payload = event.payload ?? {};
     if (event.type === 'model.completed') {
       const model = String(payload.model ?? '未标记模型').trim() || '未标记模型';
-      const current = modelMap.get(model) ?? { calls: 0, successes: 0, failures: 0, latencies: [], tokens: 0, cost: 0 };
+      const current = modelMap.get(model) ?? { calls: 0, successes: 0, failures: 0, latencies: [], tokens: 0, cacheHits: 0, cacheMisses: 0, cost: 0 };
       current.calls += 1;
       current.successes += 1;
       current.latencies.push(numberValue(payload.durationMs));
       current.tokens += numberValue(payload.totalTokens);
+      current.cacheHits += numberValue(payload.promptCacheHitTokens);
+      current.cacheMisses += numberValue(payload.promptCacheMissTokens);
       current.cost += numberValue(payload.estimatedCostUsd);
       current.lastUsedAt = iso(event.timestamp);
       modelMap.set(model, current);
@@ -144,7 +146,7 @@ export const buildOperationsSnapshot = (
     if (event.type === 'agent.failed' || event.type === 'turn.failed') {
       const model = String(payload.model ?? '').trim();
       if (model) {
-        const current = modelMap.get(model) ?? { calls: 0, successes: 0, failures: 0, latencies: [], tokens: 0, cost: 0 };
+        const current = modelMap.get(model) ?? { calls: 0, successes: 0, failures: 0, latencies: [], tokens: 0, cacheHits: 0, cacheMisses: 0, cost: 0 };
         current.failures += 1;
         current.lastUsedAt = iso(event.timestamp);
         modelMap.set(model, current);
@@ -186,6 +188,9 @@ export const buildOperationsSnapshot = (
     successRate: percentage(value.successes, value.successes + value.failures),
     averageLatencyMs: value.latencies.length ? Math.round(value.latencies.reduce((sum, item) => sum + item, 0) / value.latencies.length) : 0,
     totalTokens: Math.round(value.tokens),
+    promptCacheHitTokens: Math.round(value.cacheHits),
+    promptCacheMissTokens: Math.round(value.cacheMisses),
+    promptCacheHitRate: percentage(value.cacheHits, value.cacheHits + value.cacheMisses),
     estimatedCostUsd: Number(value.cost.toFixed(6)),
     ...(value.lastUsedAt ? { lastUsedAt: value.lastUsedAt } : {}),
     health: modelHealth(value.successes, value.failures),

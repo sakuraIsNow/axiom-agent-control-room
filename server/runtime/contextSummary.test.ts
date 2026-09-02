@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildContextWindow, estimateTokens, messageText, summarizeMessages, type ContextMessage } from './contextSummary.js';
+import { attachPersistedContextMetadata, buildContextWindow, buildPersistedContextSummary, estimateTokens, messageText, summarizeMessages, validatePersistedContextSummary, type ContextMessage, type DurableContextSourceMessage } from './contextSummary.js';
 
 const turn = (role: ContextMessage['role'], content: string): ContextMessage => ({ role, content });
 
@@ -97,4 +97,58 @@ test('an exact tokenizer hook can tighten the context budget', () => {
   assert.equal(result.summaryApplied, true);
   assert.ok(result.estimatedTokens <= 10);
   assert.equal(result.messages.at(-1)?.content, 'newest');
+});
+
+test('persistent summaries update incrementally and rebuild when a covered source message changes', () => {
+  const messages = Array.from({ length: 20 }, (_, index): DurableContextSourceMessage => ({
+    id: `message-${index}`,
+    role: index % 2 ? 'assistant' : 'user',
+    content: `第 ${index + 1} 条持久消息：${'上下文 '.repeat(30)}`,
+    ...(index === 5 ? { taskId: 'task-context' } : {}),
+  }));
+  const first = buildPersistedContextSummary('session-context', messages);
+  assert.ok(first);
+  assert.equal(first.version, 1);
+  assert.equal(validatePersistedContextSummary(first, messages), true);
+  assert.ok(first.coveredMessageIds.length > 0);
+
+  const appended = [
+    ...messages,
+    ...Array.from({ length: 4 }, (_, index): DurableContextSourceMessage => ({
+      id: `message-${20 + index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `新增消息 ${index + 1}：继续推进持久摘要。`,
+    })),
+  ];
+  const second = buildPersistedContextSummary('session-context', appended, first!);
+  assert.ok(second);
+  assert.equal(second.version, 2);
+  assert.ok(second.coveredMessageIds.length > first!.coveredMessageIds.length);
+  assert.equal(validatePersistedContextSummary(second, appended), true);
+
+  const tampered = appended.map((message, index) => index === 1 ? { ...message, content: '已修改的历史内容。' } : message);
+  assert.equal(validatePersistedContextSummary(second, tampered), false);
+  const rebuilt = buildPersistedContextSummary('session-context', tampered, second!);
+  assert.ok(rebuilt);
+  assert.equal(rebuilt.version, 3);
+  assert.notEqual(rebuilt.sourceDigest, second!.sourceDigest);
+  assert.equal(validatePersistedContextSummary(rebuilt, tampered), true);
+});
+
+test('persistent summary metadata retains artifacts, approvals, human facts, and unresolved work', () => {
+  const messages = Array.from({ length: 18 }, (_, index): DurableContextSourceMessage => ({ id: `meta-${index}`, role: index % 2 ? 'assistant' : 'user', content: `消息 ${index}` }));
+  const summary = buildPersistedContextSummary('session-metadata', messages);
+  assert.ok(summary);
+  const enriched = attachPersistedContextMetadata(summary!, {
+    artifactIds: ['step-result:task:analysis:abc'],
+    approvalEventIds: ['approval-event-1'],
+    durableFacts: ['人工要求：保留数据库兼容性。', 'Agent 冲突：两个来源版本不一致。'],
+    unresolvedItems: ['审查待处理：补充回滚演练。'],
+  });
+  assert.deepEqual(enriched.artifactIds, ['step-result:task:analysis:abc']);
+  assert.deepEqual(enriched.approvalEventIds, ['approval-event-1']);
+  assert.match(enriched.content, /Artifact 引用/);
+  assert.match(enriched.content, /人工要求/);
+  assert.match(enriched.content, /Agent 冲突/);
+  assert.match(enriched.content, /未完成事项/);
 });

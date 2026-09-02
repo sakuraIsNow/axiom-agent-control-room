@@ -1,4 +1,4 @@
-import type { AgentGraph, ChatMessage, FileAttachment, ImageAttachment, Session, VideoAttachment } from '../types';
+import type { AgentGraph, ChatMessage, FileAttachment, ImageAttachment, PersistedContextSummary, Session, VideoAttachment } from '../types';
 
 type PersistedSessionMessage = Omit<ChatMessage, 'attachments'> & {
   attachments?: Array<{
@@ -22,6 +22,7 @@ export type PersistedSessionPayload = {
   activeTaskId?: string;
   activeAssistantId?: string;
   agentGraph?: AgentGraph;
+  contextSummary?: PersistedContextSummary;
 };
 
 export type RemoteSession = PersistedSessionPayload & {
@@ -31,6 +32,7 @@ export type RemoteSession = PersistedSessionPayload & {
 
 const imageAttachment = (attachment: ImageAttachment) => ({
   id: attachment.id,
+  kind: 'image' as const,
   url: attachment.url,
   alt: attachment.alt,
 });

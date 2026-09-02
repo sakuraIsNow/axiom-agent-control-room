@@ -3,6 +3,7 @@ import { runtimeEventSource } from './runtimeContext.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { TaskRevisionConflictError } from './contracts.js';
 import type {
   CreateTaskInput,
   RuntimeEvent,
@@ -26,6 +27,7 @@ const allTaskStatuses: TaskStatus[] = ['queued', 'planning', 'awaiting_approval'
 type TaskRow = {
   id: string;
   run_id: string;
+  revision: number;
   tenant_id: string;
   user_id: string;
   session_id: string;
@@ -71,6 +73,7 @@ type SessionRow = {
   title: string;
   messages_json: string;
   graph_json: string | null;
+  context_summary_json: string | null;
   active_task_id: string | null;
   active_assistant_id: string | null;
   updated_at: number;
@@ -91,6 +94,7 @@ const defaultPolicy = () => ({ requirePlanApproval: false });
 const taskFromRow = (row: TaskRow): WorkflowTask => ({
   id: row.id,
   runId: row.run_id,
+  revision: row.revision ?? 0,
   tenantId: row.tenant_id,
   userId: row.user_id,
   sessionId: row.session_id,
@@ -135,6 +139,7 @@ const sessionFromRow = (row: SessionRow): PersistedSession => ({
   title: row.title,
   messages: parseJson<PersistedSessionMessage[]>(row.messages_json, []),
   agentGraph: parseJson<PersistedSession['agentGraph']>(row.graph_json, undefined),
+  contextSummary: parseJson<PersistedSession['contextSummary']>(row.context_summary_json, undefined),
   updatedAt: Number(row.updated_at),
   activeTaskId: row.active_task_id ?? undefined,
   activeAssistantId: row.active_assistant_id ?? undefined,
@@ -158,6 +163,7 @@ export class SqliteTaskStore implements TaskStore {
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL UNIQUE,
+        revision INTEGER NOT NULL DEFAULT 0,
         tenant_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -210,6 +216,7 @@ export class SqliteTaskStore implements TaskStore {
         title TEXT NOT NULL,
         messages_json TEXT NOT NULL,
         graph_json TEXT,
+        context_summary_json TEXT,
         active_task_id TEXT,
         active_assistant_id TEXT,
         updated_at INTEGER NOT NULL,
@@ -226,6 +233,9 @@ export class SqliteTaskStore implements TaskStore {
     const columns = this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === 'plan_version')) {
       this.db.exec('ALTER TABLE tasks ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!columns.some((column) => column.name === 'revision')) {
+      this.db.exec('ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     }
     if (!columns.some((column) => column.name === 'policy_json')) {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{"requirePlanApproval":false}'`);
@@ -252,6 +262,9 @@ export class SqliteTaskStore implements TaskStore {
     if (!sessionColumns.some((column) => column.name === 'graph_json')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN graph_json TEXT');
     }
+    if (!sessionColumns.some((column) => column.name === 'context_summary_json')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN context_summary_json TEXT');
+    }
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL');
   }
 
@@ -265,6 +278,7 @@ export class SqliteTaskStore implements TaskStore {
       ...input,
       id: randomUUID(),
       runId: randomUUID(),
+      revision: 0,
       status: 'queued',
       stepResults: [],
       cancelRequested: false,
@@ -491,7 +505,7 @@ export class SqliteTaskStore implements TaskStore {
     );
   }
 
-  async updateTask(taskId: string, patch: TaskPatch) {
+  async updateTask(taskId: string, patch: TaskPatch, expectedRevision?: number) {
     const columns: string[] = [];
     const values: Array<string | number | bigint | Uint8Array | null> = [];
     const assign = (column: string, value: string | number | bigint | Uint8Array | null) => {
@@ -509,10 +523,16 @@ export class SqliteTaskStore implements TaskStore {
     if (patch.cancelRequested !== undefined) assign('cancel_requested', patch.cancelRequested ? 1 : 0);
     if (patch.planVersion !== undefined) assign('plan_version', patch.planVersion);
     if (patch.policy !== undefined) assign('policy_json', JSON.stringify(patch.policy));
+    columns.push('revision = revision + 1');
     assign('updated_at', new Date().toISOString());
     values.push(taskId);
+    if (expectedRevision !== undefined) values.push(expectedRevision);
 
-    this.db.prepare(`UPDATE tasks SET ${columns.join(', ')} WHERE id = ?`).run(...values);
+    const result = this.db.prepare(`UPDATE tasks SET ${columns.join(', ')} WHERE id = ?${expectedRevision !== undefined ? ' AND revision = ?' : ''}`).run(...values);
+    if (result.changes === 0 && expectedRevision !== undefined) {
+      const current = await this.getTask(taskId);
+      if (current) throw new TaskRevisionConflictError(taskId, expectedRevision, current.revision);
+    }
     const updated = await this.getTask(taskId);
     if (!updated) throw new Error(`Task ${taskId} was not found after update.`);
     return updated;
@@ -648,12 +668,13 @@ export class SqliteTaskStore implements TaskStore {
 
   async upsertSession(tenantId: string, userId: string, input: UpsertSessionInput) {
     this.db.prepare(`
-      INSERT INTO sessions (id, tenant_id, user_id, title, messages_json, graph_json, active_task_id, active_assistant_id, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, tenant_id, user_id, title, messages_json, graph_json, context_summary_json, active_task_id, active_assistant_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (tenant_id, id) DO UPDATE SET
         title = excluded.title,
         messages_json = excluded.messages_json,
         graph_json = excluded.graph_json,
+        context_summary_json = excluded.context_summary_json,
         active_task_id = excluded.active_task_id,
         active_assistant_id = excluded.active_assistant_id,
         updated_at = excluded.updated_at,
@@ -667,6 +688,7 @@ export class SqliteTaskStore implements TaskStore {
       input.title,
       JSON.stringify(input.messages),
       input.agentGraph ? JSON.stringify(input.agentGraph) : null,
+      input.contextSummary ? JSON.stringify(input.contextSummary) : null,
       input.activeTaskId ?? null,
       input.activeAssistantId ?? null,
       input.updatedAt,

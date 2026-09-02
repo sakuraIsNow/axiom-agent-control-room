@@ -19,6 +19,7 @@ demo/
 qa/concept/
 qa/*.png
 qa/*.log
+qa/*.err
 qa/*-results.json
 qa/runtime-results.json
 *.tsbuildinfo

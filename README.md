@@ -58,6 +58,10 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - ♻️ **失败可继续**：任务、检查点、事件和交付证据会持久化；网络断开、Worker 重启或单个 Agent 失败后，可以从可用检查点继续，已有结果会保留为部分交付。
 - 🧭 **路由理由可见**：对话顶部会显示本轮是直接回答、单 Agent 还是 Agent 小组，以及实际参与的 Agent、能力和 Router 置信度；历史会话也能从持久计划恢复。
 - ✍️ **任务执行中可引导**：补充要求进入同一任务的下一安全执行点并只应用一次。接入外部 Harness 时，只有 Codex/DeepSeek transport 真正接受 steer 才会显示成功。
+- 🌿 **从检查点试另一种方案**：可以比较当前任务与历史检查点，从任一检查点派生分支；多人同时操作时用 revision 拒绝静默覆盖，合并冲突必须由用户明确选择。
+- 📦 **大结果不再挤满上下文**：长文档、搜索结果和 Agent 中间结果保存为 Artifact，普通下游只接收摘要和 `result_ref`，需要复核或汇总时才在预算内读取全文。
+- 🧠 **长对话可以可靠恢复**：摘要版本、覆盖消息、Artifact、审批和未完成事项写入数据库；历史消息变化会使旧摘要失效并自动重建，原始对话始终完整保留。
+- 🧪 **按业务过程评测**：生产门禁不只看最终答案，还验证跨轮路由是否漂移、执行中改需求是否只应用一次、长结果引用边界、恢复一致性与版本冲突。
 
 ### 🔁 一次任务的真实执行链路
 
@@ -81,31 +85,31 @@ Synthesizer：只汇总已验证的结果
 
 每轮对话都会重新判断是否需要继续使用旧 Agent、跳过旧 Agent 或加入新 Agent；简单聊天不会被强行升级成完整工作流。
 
-### ✅ v1.1.0 验收结果
+### ✅ 当前版本验收结果
 
 当前源码版本已经通过：
 
 ```text
 npm run check       通过
-npm test            308 passed / 0 failed
+npm test            315 passed / 0 failed
 npm run build       通过
 npm run qa:search-agent
                     通过
-npm run qa:all      22 passed / 0 failed / 3 skipped
+npm run qa:all      24 passed / 0 failed / 4 skipped
 ```
 
-跳过的 3 项只涉及尚未配置的外部服务：TencentDB MemoryCore、MinIO/S3/COS 对象存储。配置对应 endpoint 后，可以继续进行真实多 Worker 验收；这不影响 SQLite、本地文件目录和协议级 Harness/Codex 回归。
+跳过的 4 项只涉及尚未配置的外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar 现场握手。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；这不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
 
 ### 📈 本机性能基线
 
-下面是 2026-08-29 在 Windows 单节点、10 并发、每项 50 次请求下测得的 API 基线：
+下面是 2026-09-02 在 Windows 单节点、10 并发、每项 50 次请求下测得的 API 基线：
 
 | 接口 | 吞吐 | P95 延迟 |
 | --- | ---: | ---: |
-| 健康检查 | 1,472.58 请求/秒 | 11.01 ms |
-| 就绪检查 | 2,031.08 请求/秒 | 5.69 ms |
-| 任务列表 | 1,699.79 请求/秒 | 7.31 ms |
-| 运行观测 | 682.26 请求/秒 | 31.67 ms |
+| 健康检查 | 1,765.74 请求/秒 | 8.78 ms |
+| 就绪检查 | 2,055.90 请求/秒 | 5.36 ms |
+| 任务列表 | 2,358.48 请求/秒 | 4.93 ms |
+| 运行观测 | 888.16 请求/秒 | 24.06 ms |
 
 这组数据衡量的是 Axiom 自己的 API、调度和数据库访问，不包含 DeepSeek 的网络延迟、排队时间或模型生成速度。可以用下面的命令在自己的机器上重新测试：
 
@@ -291,6 +295,9 @@ npm test            # 单元和运行时测试
 npm run build       # 构建前端和服务端
 npm start           # 运行构建后的单体服务
 npm run qa:visual   # 浏览器界面验收
+npm run qa:business # 分段业务闭环评测
+npm run qa:context-summary # 持久摘要 API 回归
+npm run qa:harness-live # 已配置 sidecar 的真实能力握手
 npm run qa:all      # 生产门禁回归
 ```
 
@@ -309,6 +316,8 @@ npm run qa:all      # 生产门禁回归
 | 视频 | `VIDEO_API_BASE`、`VIDEO_API_KEY`、`VIDEO_MODEL` | 连接本地视频生成服务 |
 | 长期记忆 | `TDAI_MEMORY_ENDPOINT`、`TDAI_MEMORY_API_KEY` | 可选的 MemoryCore L0-L3 记忆 |
 | 外部 Agent | `DEEPSEEK_HARNESS_*`、`CODEX_APP_SERVER_*` | 接入 Harness 或 Codex sidecar |
+
+`qa:harness-live` 只有在 sidecar 命令已配置时才执行真实握手；未配置时生产门禁会明确标为跳过。协议模拟测试不能替代目标服务器上的真实任务、断流和跨 Worker 演练。
 
 更完整的变量说明见 [`.env.example`](.env.example)。
 
@@ -334,6 +343,8 @@ npm run qa:all      # 生产门禁回归
 - [工具目录](docs/tool-registry.md)：工具权限、审批和执行边界。
 - [MemoryCore 接入](docs/memorycore-integration.md)：长期记忆配置与验收。
 - [Harness 适配器](docs/harness-adapters.md)：DeepSeek Harness/Codex 的可选接入方式。
+- [上下文窗口与持久摘要](docs/context-window.md)：长对话如何压缩、校验并恢复。
+- [业务闭环评测](docs/runtime-business-evaluation.md)：分段评测维度和失败定位方式。
 - [Reasonix 运行时采纳说明](docs/reasonix-runtime-adoption.md)：DAG、统一运行上下文、写入冲突调度和交付证据的设计边界。
 - [上线就绪度](docs/launch-readiness.md)：当前能力、风险和生产前置条件。
 

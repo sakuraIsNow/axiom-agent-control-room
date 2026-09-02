@@ -500,6 +500,7 @@ export class TencentMemoryClient implements AgentMemory {
 const compensationTask = (receipt: MemoryCaptureReceipt): WorkflowTask => ({
   id: receipt.taskId,
   runId: `memory-compensation:${receipt.id}`,
+  revision: 0,
   tenantId: receipt.tenantId,
   userId: receipt.userId,
   sessionId: receipt.sessionId,
