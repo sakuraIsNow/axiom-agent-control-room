@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
@@ -24,8 +25,10 @@ import { agentWorkflowCanvasSchema, compileAgentWorkflow } from './workflowCompi
 import { workflowSpecialistCatalog } from './workflowSpecialists.js';
 import { runtimeSkillCatalog } from './skillCatalog.js';
 import { verifyWebhookRequest } from './webhookSecurity.js';
-import { chatRouteDecisionSchema, workflowPlanFromChatRoute } from './chatRouter.js';
+import { chatRouteDecisionSchema, fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute, type ChatRouteDecision, type RoutingAgentDirectoryEntry } from './chatRouter.js';
 import { generateReport } from './reportExport.js';
+import { nextRunAtForCadence, scheduleCadenceSchema } from './scheduleCadence.js';
+import { fallbackScheduleDraft, parseScheduleDraft, scheduleAgentPrompt } from './scheduleAgent.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -331,11 +334,26 @@ const runAgentWorkflowSchema = z.object({
   policy: createTaskSchema.shape.policy,
 }).strict();
 
-const scheduleSchema = createTaskSchema.omit({ templateId: true }).extend({
-  id: z.string().min(1).max(120).optional(),
-  intervalSeconds: z.number().int().min(15).max(86_400),
+const scheduleSchema = createTaskSchema.omit({ templateId: true, routing: true, model: true, policy: true }).extend({
+  cadence: scheduleCadenceSchema.optional(),
+  intervalSeconds: z.number().int().min(15).max(31_536_000).optional(),
   enabled: z.boolean().default(true),
+}).strict().refine((value) => value.cadence !== undefined || value.intervalSeconds !== undefined, {
+  message: 'cadence or intervalSeconds is required.',
 });
+
+const scheduleDraftRequestSchema = z.object({
+  request: z.string().min(1).max(8_000),
+  sessionId: z.string().min(1).max(160),
+  timezone: z.string().min(1).max(100).refine((value) => {
+    try { new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date()); return true; } catch { return false; }
+  }, 'Invalid IANA timezone.').default('Asia/Shanghai'),
+  modelCredentialId: z.string().uuid().optional(),
+}).strict();
+
+const manualScheduleRunSchema = z.object({
+  idempotencyKey: z.string().min(8).max(120).optional(),
+}).strict();
 
 const noteSchema = z.object({
   message: z.string().min(1).max(8_000),
@@ -588,6 +606,7 @@ export const createTaskApi = (dependencies: {
   artifactCatalog?: ArtifactCatalog | null;
   model?: OpenAICompatibleModelClient;
   reportModelFactory?: (credentialId: string | undefined, tenantId: string, userId: string) => ModelClient | Promise<ModelClient>;
+  scheduleModelFactory?: (credentialId: string | undefined, tenantId: string, userId: string) => ModelClient | Promise<ModelClient>;
   pluginModelFactory?: (provider?: z.infer<typeof pluginAgentProviderSchema>, tenantId?: string, userId?: string) => ModelClient | Promise<ModelClient>;
   templates?: TemplateStore;
   plugins?: PluginStore;
@@ -724,6 +743,10 @@ export const createTaskApi = (dependencies: {
       sessionId: task.sessionId,
       userId: task.userId,
       ...(source ? { source } : {}),
+      ...(summary.triggerId ? { triggerId: summary.triggerId } : {}),
+      ...(summary.manual !== undefined ? { manual: summary.manual } : {}),
+      ...(summary.activeAgentIds ? { activeAgentIds: summary.activeAgentIds } : {}),
+      ...(summary.selectedSkillIds ? { selectedSkillIds: summary.selectedSkillIds } : {}),
       templateId: task.templateId ?? null,
       title: displayTitle,
       input: task.input,
@@ -888,12 +911,108 @@ export const createTaskApi = (dependencies: {
     return { task, eventsUrl: `/api/tasks/${task.id}/events`, deduplicated: false };
   };
 
+  const liveScheduleRoutingAgents = async (tenantId: string, userId: string): Promise<RoutingAgentDirectoryEntry[]> => {
+    const customAgents = agents
+      ? await agents.listAgents(tenantId, 100, { userId, role: 'member' }).catch(() => [])
+      : [];
+    const entries: RoutingAgentDirectoryEntry[] = [
+      { id: 'direct-responder', label: '对话 Agent', description: '处理直接说明与轻量内容整理。', capabilities: ['conversation', 'answer'], available: true },
+      { id: 'registry-agent', label: 'Agent 目录 Agent', description: '读取实时 Agent 与 Skill 目录。', capabilities: ['agent-registry'], available: true },
+      { id: 'vision-agent', label: '视觉分析 Agent', description: '分析图片附件。', capabilities: ['image-analysis', 'vision'], available: true },
+      { id: 'document-agent', label: '文档分析 Agent', description: '分析 PDF、Word 与文本附件。', capabilities: ['document-analysis'], available: true },
+      { id: 'report-agent', label: '报告生成 Agent', description: '生成可下载的结构化报告。', capabilities: ['report-export', 'document-generation'], available: true },
+      ...agentCatalog.filter((agent) => agent.kind === 'worker' || agent.kind === 'quality').map((agent) => ({
+        id: agent.role,
+        label: agent.label,
+        description: agent.description,
+        capabilities: agent.capabilities,
+        available: true,
+      })),
+      ...workflowSpecialistCatalog().map((agent) => ({
+        id: agent.id,
+        label: agent.label,
+        description: agent.description,
+        capabilities: agent.capabilities,
+        available: agent.available,
+      })),
+      ...customAgents.filter((agent) => agent.status === 'published').map((agent) => ({
+        id: agent.roleId,
+        label: agent.name,
+        description: agent.definition.whenToUseHint || agent.description,
+        capabilities: ['custom-agent', ...agent.definition.toolAllowlist],
+        available: true,
+      })),
+    ];
+    return entries.filter((entry, index) => entries.findIndex((candidate) => candidate.id === entry.id) === index);
+  };
+
+  const ensureScheduledWorkflow = (decision: ChatRouteDecision, objective: string): ChatRouteDecision => {
+    if (decision.execution === 'workflow') return decision;
+    const agentId = decision.scheduler.activeAgentIds[0] ?? decision.agentRole ?? 'analyst';
+    const stepId = 'scheduled-action';
+    return chatRouteDecisionSchema.parse({
+      ...decision,
+      execution: 'workflow',
+      agentRole: 'orchestrator',
+      workflowRoute: 'single-agent',
+      reason: `${decision.reason} 日程触发已转换为可追踪的单 Agent 执行。`,
+      scheduler: {
+        ...decision.scheduler,
+        route: 'single-agent',
+        activeAgentIds: [agentId],
+        appendAgentIds: [agentId],
+        executionWaves: [[stepId]],
+        steps: [{
+          id: stepId,
+          title: '执行本次日程目标',
+          agentId,
+          objective,
+          dependsOn: [],
+          skillIds: decision.scheduler.selectedSkillIds,
+        }],
+        requiresReview: false,
+      },
+    });
+  };
+
+  const routeScheduledTrigger = async (trigger: ScheduledTrigger) => {
+    const availableAgents = await liveScheduleRoutingAgents(trigger.tenantId, trigger.userId);
+    const routeInput = {
+      message: trigger.input,
+      mode: trigger.mode,
+      availableAgents,
+      availableSkills: runtimeSkillCatalog.map((skill) => ({ id: skill.id, label: skill.label, description: skill.description })),
+    };
+    const routeModel = dependencies.scheduleModelFactory
+      ? await dependencies.scheduleModelFactory(trigger.modelCredentialId, trigger.tenantId, trigger.userId)
+      : model;
+    const decision = routeModel
+      ? await routeChatIntent(routeInput, routeModel, AbortSignal.timeout(45_000))
+      : fallbackChatRoute(routeInput);
+    return ensureScheduledWorkflow(decision, trigger.input);
+  };
+
+  const enqueueScheduledTrigger = async (trigger: ScheduledTrigger, manual = false, requestId?: string) => {
+    const routing = chatRouteDecisionSchema.parse(await routeScheduledTrigger(trigger));
+    const idempotencyKey = manual
+      ? `schedule:${trigger.id}:manual:${requestId ?? randomUUID()}`
+      : `schedule:${trigger.id}:${trigger.nextRunAt}`;
+    return enqueueTask(
+      { ...trigger, routing },
+      trigger.tenantId,
+      trigger.userId,
+      { triggerId: trigger.id, source: 'schedule', manual, routingSource: routing.source },
+      idempotencyKey,
+      { userId: trigger.userId, role: 'member' },
+    );
+  };
+
   const scheduler: Scheduler = (process.env.DATABASE_URL
     ? new PostgresScheduler(process.env.DATABASE_URL, async (trigger: ScheduledTrigger) => {
-      await enqueueTask(trigger, trigger.tenantId, trigger.userId, { triggerId: trigger.id, source: 'schedule' }, `schedule:${trigger.id}:${trigger.nextRunAt}`, { userId: trigger.userId, role: 'member' });
+      await enqueueScheduledTrigger(trigger);
     })
     : new InMemoryScheduler(async (trigger: ScheduledTrigger) => {
-    await enqueueTask(trigger, trigger.tenantId, trigger.userId, { triggerId: trigger.id, source: 'schedule' }, `schedule:${trigger.id}:${trigger.nextRunAt}`, { userId: trigger.userId, role: 'member' });
+      await enqueueScheduledTrigger(trigger);
     }));
   void scheduler.ready().then(() => scheduler.start()).catch(() => undefined);
 
@@ -1974,9 +2093,79 @@ export const createTaskApi = (dependencies: {
     }
   });
 
+  const listScheduleRuns = async (scheduleId: string, tenantId: string, limit = 20) => {
+    const candidates = store.listTasksByTrigger
+      ? await store.listTasksByTrigger(tenantId, scheduleId, limit)
+      : await store.listTasks(tenantId, Math.max(100, limit));
+    const eventSummaries = await store.getTaskEventSummaries(candidates.map((task) => task.id), tenantId);
+    const owned = store.listTasksByTrigger
+      ? candidates
+      : candidates.filter((task) => eventSummaries.get(task.id)?.triggerId === scheduleId).slice(0, limit);
+    return Promise.all(owned.map((task) => summarizeTask(task, eventSummaries.get(task.id))));
+  };
+
+  api.post('/schedules/draft', async (c) => {
+    if (process.env.AXIOM_SCHEDULER_ENABLED === 'false') return c.json({ error: '日程服务当前未启用。' }, 503);
+    const parsed = scheduleDraftRequestSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '日程描述或时区无效。', details: parsed.error.flatten() }, 400);
+    const principal = identity(c.req.raw.headers);
+    let modelError: unknown;
+    try {
+      const draftModel = dependencies.scheduleModelFactory
+        ? await dependencies.scheduleModelFactory(parsed.data.modelCredentialId, principal.tenantId, principal.userId)
+        : model;
+      if (!draftModel) throw new Error('日程 Agent 尚未配置文本模型。');
+      const completion = await draftModel.complete({
+        signal: AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(45_000)]),
+        responseFormat: 'json',
+        temperature: 0,
+        maxTokens: 1_200,
+        system: scheduleAgentPrompt(new Date(), parsed.data.timezone),
+        user: parsed.data.request,
+      });
+      const generated = parseScheduleDraft(completion.content);
+      const draft = parseScheduleDraft(JSON.stringify({
+        ...generated,
+        schedule: { ...generated.schedule, timezone: parsed.data.timezone },
+      }));
+      if (draft.schedule.kind === 'once' && !nextRunAtForCadence(draft.schedule, new Date())) {
+        return c.json({ error: '日程 Agent 返回的单次执行时间已经过去，请补充一个未来时间。' }, 422);
+      }
+      return c.json({ draft, source: 'schedule-agent', model: draftModel.model, createsSchedule: false });
+    } catch (error) {
+      modelError = error;
+    }
+
+    const fallback = fallbackScheduleDraft(parsed.data.request, parsed.data.timezone);
+    if (fallback) {
+      return c.json({
+        draft: fallback,
+        source: 'deterministic-fallback',
+        createsSchedule: false,
+        warning: '日程 Agent 本次不可用，已使用有限的常用时间表达解析。请确认草案后再保存。',
+      });
+    }
+    const detail = modelError instanceof Error ? modelError.message.slice(0, 300) : '未知模型错误';
+    return c.json({ error: '日程 Agent 未能生成可靠草案，且当前描述无法由有限规则安全解析。日程没有被创建。', detail }, 502);
+  });
+
   api.get('/schedules', async (c) => {
     const { tenantId } = identity(c.req.raw.headers);
-    return c.json({ schedules: await scheduler.list(tenantId), persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' });
+    const schedules = await scheduler.list(tenantId);
+    if (schedules.length === 0) {
+      return c.json({ schedules, latestRuns: {}, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' });
+    }
+    const tasks = await store.listTasks(tenantId, 100);
+    const summaries = await store.getTaskEventSummaries(tasks.map((task) => task.id), tenantId);
+    const scheduleIds = new Set(schedules.map((schedule) => schedule.id));
+    const latestRuns: Record<string, Awaited<ReturnType<typeof summarizeTask>>> = {};
+    for (const task of tasks) {
+      const summary = summaries.get(task.id);
+      const triggerId = summary?.triggerId;
+      if (!triggerId || !scheduleIds.has(triggerId) || latestRuns[triggerId]) continue;
+      latestRuns[triggerId] = await summarizeTask(task, summary);
+    }
+    return c.json({ schedules, latestRuns, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' });
   });
 
   api.post('/schedules', async (c) => {
@@ -1984,8 +2173,42 @@ export const createTaskApi = (dependencies: {
     const parsed = scheduleSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'Invalid schedule.', details: parsed.error.flatten() }, 400);
     const { tenantId, userId } = identity(c.req.raw.headers);
-    const schedule = await scheduler.upsert({ ...parsed.data, title: parsed.data.title ?? parsed.data.input.slice(0, 80), tenantId, userId });
-    return c.json({ schedule, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' }, 201);
+    try {
+      if (parsed.data.modelCredentialId) {
+        const credential = dependencies.resolveModelCredential
+          ? await dependencies.resolveModelCredential(parsed.data.modelCredentialId, tenantId, userId)
+          : null;
+        if (!credential) return c.json({ error: '文本模型凭据不存在或不属于当前用户。' }, 400);
+      }
+      const schedule = await scheduler.upsert({ ...parsed.data, title: parsed.data.title ?? parsed.data.input.slice(0, 80), tenantId, userId });
+      return c.json({ schedule, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' }, 201);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '日程创建失败。' }, 400);
+    }
+  });
+
+  api.get('/schedules/:scheduleId/runs', async (c) => {
+    const { tenantId } = identity(c.req.raw.headers);
+    const scheduleId = c.req.param('scheduleId');
+    if (!await scheduler.get(scheduleId, tenantId)) return c.json({ error: 'Schedule not found.' }, 404);
+    const requestedLimit = Number(c.req.query('limit') ?? 20);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 20;
+    return c.json({ runs: await listScheduleRuns(scheduleId, tenantId, limit) });
+  });
+
+  api.post('/schedules/:scheduleId/run', async (c) => {
+    if (process.env.AXIOM_SCHEDULER_ENABLED === 'false') return c.json({ error: '日程服务当前未启用。' }, 503);
+    const parsed = manualScheduleRunSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: '立即运行请求无效。', details: parsed.error.flatten() }, 400);
+    const { tenantId } = identity(c.req.raw.headers);
+    const schedule = await scheduler.get(c.req.param('scheduleId'), tenantId);
+    if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
+    try {
+      return c.json(await enqueueScheduledTrigger(schedule, true, parsed.data.idempotencyKey), 202);
+    } catch (error) {
+      const failure = enqueueErrorResponse(error);
+      return c.json({ error: failure.message }, failure.status);
+    }
   });
 
   api.delete('/schedules/:scheduleId', async (c) => {

@@ -388,6 +388,17 @@ export class SqliteTaskStore implements TaskStore {
     return rows.map(taskFromRow);
   }
 
+  async listTasksByTrigger(tenantId: string, triggerId: string, limit = 50) {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT t.* FROM tasks t
+      JOIN task_events e ON e.task_id = t.id
+      WHERE t.tenant_id = ? AND e.type = 'task.created'
+        AND json_extract(e.payload_json, '$.triggerId') = ?
+      ORDER BY t.created_at DESC LIMIT ?
+    `).all(tenantId, triggerId, Math.min(100, Math.max(1, Math.floor(limit)))) as TaskRow[];
+    return rows.map(taskFromRow);
+  }
+
   async getTaskEventSummaries(taskIds: string[], tenantId: string) {
     const ids = [...new Set(taskIds.filter(Boolean))];
     if (!ids.length) return new Map();

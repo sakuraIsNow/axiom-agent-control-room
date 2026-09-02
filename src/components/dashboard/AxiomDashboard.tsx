@@ -35,7 +35,7 @@ export function AxiomDashboard(props: DashboardProps) {
     templateWorkspace, onOpenPlugins, pluginWorkspace, onOpenReadiness, onStop, onPause, onResume, isRunning, agentActivity, agents, graph,
     selectedNodeId, onSelectAgent, taskProfile, reviewResult, reviewApprovalTaskId, reviewNote, reviewActionBusy,
     onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, sessionId,
-    sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, theme, onThemeChange, principalUserId: principalUserIdProp,
+    sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, textModelCredentialId, theme, onThemeChange, principalUserId: principalUserIdProp,
     attachments, onAddAttachments, onRemoveAttachment,
   } = props;
   const nav = useDashboardStore((state) => state.nav);
@@ -181,7 +181,7 @@ export function AxiomDashboard(props: DashboardProps) {
         : nav === 'plugins' ? <section className="dash-main dash-main-plugins">{pluginWorkspace}</section>
         : nav === 'workflows' ? <section ref={workflowMainRef} className="dash-main dash-main-workflows"><WorkflowStudio /></section>
         : nav === 'agent-studio' ? <section className="dash-main"><AgentStudio /></section>
-        : nav === 'schedules' ? <section className="dash-main"><ScheduleBoard sessionId={sessionId} /></section>
+        : nav === 'schedules' ? <section className="dash-main"><ScheduleBoard sessionId={sessionId} modelCredentialId={textModelCredentialId} /></section>
         : nav === 'operations' ? <section className="dash-main dash-main-operations"><OperationsConsole /></section>
         : nav === 'chat' ? <section className="dash-main dash-main-chat"><DashboardChat key={activeSession.id}
           sessions={sessions}

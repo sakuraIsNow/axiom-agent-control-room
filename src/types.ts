@@ -447,6 +447,10 @@ export type WorkflowTaskSummary = {
   userId: string;
   /** Origin recorded on task.created. Optional for summaries from older servers. */
   source?: 'agent-workflow' | 'plugin' | 'webhook' | 'schedule' | 'conversation' | string;
+  triggerId?: string;
+  manual?: boolean;
+  activeAgentIds?: string[];
+  selectedSkillIds?: string[];
   templateId?: string | null;
   title: string;
   input?: string;
@@ -543,16 +547,34 @@ export type OperationsSnapshot = {
   sla: { terminalTasks: number; completed: number; failed: number; cancelled: number; successRate: number | null; p50DurationMs: number; p95DurationMs: number };
 };
 
+export type ScheduleCadence =
+  | { kind: 'once'; runAt: string; timezone: string }
+  | { kind: 'interval'; intervalSeconds: number; timezone: string }
+  | { kind: 'daily'; timeOfDay: string; timezone: string }
+  | { kind: 'weekly'; timeOfDay: string; weekdays: number[]; timezone: string };
+
+export type ScheduleDraft = {
+  title: string;
+  input: string;
+  mode: AgentMode;
+  schedule: ScheduleCadence;
+  agentPolicy: 'auto';
+  reason: string;
+};
+
 export type ScheduledTrigger = {
   id: string;
   sessionId: string;
   title: string;
   input: string;
   mode: AgentMode;
+  modelCredentialId?: string;
+  cadence: ScheduleCadence;
   intervalSeconds: number;
   enabled: boolean;
   nextRunAt: string;
   createdAt: string;
+  lastRunAt?: string;
   failureCount: number;
   lastError?: string;
   lastRunStatus?: 'success' | 'failed' | 'dead-letter';

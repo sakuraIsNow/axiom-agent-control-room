@@ -566,6 +566,7 @@ app.route('/api', createTaskApi({
   metrics,
   model: runtimeModel,
   reportModelFactory,
+  scheduleModelFactory: reportModelFactory,
   pluginModelFactory,
   toolRegistry: runtimeTools,
   artifactStore: runtimeArtifactStore,

@@ -3282,6 +3282,7 @@ function App() {
             error={error}
             readiness={readiness.state}
             provider={activeProvider}
+            textModelCredentialId={providerSettings.text.useCustom ? providerSettings.text.credentialId : undefined}
             onThemeChange={setUiTheme}
           />
       </Suspense>

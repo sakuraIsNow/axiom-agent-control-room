@@ -27,7 +27,17 @@ export const summarizeTaskEvents = (rows: TaskEventSummaryRow[]) => {
   const summaries = new Map<string, TaskEventSummary>();
   for (const row of rows) {
     const summary = summaries.get(row.taskId) ?? emptySummary();
-    if (row.type === 'task.created' && typeof row.payload.source === 'string') summary.source = row.payload.source;
+    if (row.type === 'task.created') {
+      if (typeof row.payload.source === 'string') summary.source = row.payload.source;
+      if (typeof row.payload.triggerId === 'string') summary.triggerId = row.payload.triggerId;
+      if (typeof row.payload.manual === 'boolean') summary.manual = row.payload.manual;
+      if (Array.isArray(row.payload.activeAgentIds)) {
+        summary.activeAgentIds = row.payload.activeAgentIds.filter((value): value is string => typeof value === 'string').slice(0, 20);
+      }
+      if (Array.isArray(row.payload.selectedSkillIds)) {
+        summary.selectedSkillIds = row.payload.selectedSkillIds.filter((value): value is string => typeof value === 'string').slice(0, 30);
+      }
+    }
     if (row.type === 'model.completed') {
       summary.modelCalls += 1;
       summary.promptTokens += numeric(row.payload.promptTokens);

@@ -326,6 +326,17 @@ export class PostgresTaskStore implements TaskStore {
     return result.rows.map((row) => taskFromRow(row as PostgresTaskRow));
   }
 
+  async listTasksByTrigger(tenantId: string, triggerId: string, limit = 50) {
+    const result = await this.pool.query(`
+      SELECT DISTINCT t.* FROM tasks t
+      JOIN task_events e ON e.task_id = t.id
+      WHERE t.tenant_id = $1 AND e.type = 'task.created'
+        AND e.payload_json ->> 'triggerId' = $2
+      ORDER BY t.created_at DESC LIMIT $3
+    `, [tenantId, triggerId, Math.min(100, Math.max(1, Math.floor(limit)))]);
+    return result.rows.map((row) => taskFromRow(row as PostgresTaskRow));
+  }
+
   async getTaskEventSummaries(taskIds: string[], tenantId: string) {
     const ids = [...new Set(taskIds.filter(Boolean))];
     if (!ids.length) return new Map();

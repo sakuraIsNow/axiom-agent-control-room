@@ -647,3 +647,22 @@ npm run qa:search-agent
 ### 2026-09-01 Agent Registry 兜底路由修复
 - [x] 修复确定性兜底把 Registry 说明中的“实时”误识别为联网检索 Skill 的问题；“你有哪些子智能体”等目录查询现在只调用实时 Agent 目录，不再误触发 DeepSeek 原生搜索。
 - [x] 增加 Registry 路由回归测试，验证 `requiresSearch=false`、无额外联网 Skill，并通过 `npm run qa:search-agent` 与完整 `npm run qa:all` 门禁。
+
+### 2026-09-02 Agent 日程执行闭环
+
+- [x] 大范围前端与联动改动前保存 `frontend-backup/20260902-agent-schedule-v1` 快照，覆盖 `src/`、`server/`、`scripts/`、README、TODO 和包配置。
+- [x] 新增严格的 cadence 契约，兼容单次、固定间隔、每天固定时间、每周指定日期和 IANA 时区；旧 `intervalSeconds` 日程自动归一化，daily/weekly 下一次触发不再按任务完成时间累加，避免时间漂移。
+- [x] 内存和 PostgreSQL 调度器统一 cadence 行为；PostgreSQL 自动增加 `cadence_json`、`last_run_at`，保留 `FOR UPDATE SKIP LOCKED`、认领租约、指数退避和 5 次失败死信策略；单次日程成功后自动停用。
+- [x] 新增日程 Agent 草案接口：自然语言先生成经过 Zod 严格校验的草案，不直接创建；模型不可用时只对明确的常用时间表达启用有限解析，并明确标记 fallback，模糊时间不擅自猜测。
+- [x] 每次自动或手动触发都重新经过 Router Agent 与调度 Agent，根据当轮目标选择最小充分的 Agent/Skill 集合；轻量 specialist 路由也转换为真实可追踪的单 Agent 计划，Graph 不使用展示动画冒充执行。
+- [x] 日程继承用户已保存的自定义文本模型凭据，草案、触发路由和实际任务使用同一凭据引用；服务端重新校验归属，PostgreSQL 只持久化凭据 UUID，不写入 API Key。
+- [x] 新增立即运行和运行历史接口；手动运行使用稳定幂等键且不移动自动时间，任务摘要保留 `triggerId`、`manual`、`activeAgentIds` 和 `selectedSkillIds`，跨租户查看或触发返回 404。
+- [x] 日程前端改为自然语言优先的毛玻璃工作区，包含下一项、草案确认、固定间隔高级设置、立即运行、最近 Agent 路由、Token/交付状态、可展开历史、恢复和内联删除确认；桌面/移动端无横向溢出。
+- [x] 新增 cadence、日程草案、单次停用、任务摘要、幂等手动运行、租户隔离、客户端 ID 覆盖防护和草案不落库回归；标准验证达到 `npm test` 304/304，`npm run check`、`npm run build`、`npm run qa:visual` 全部通过。
+
+### Agent 日程下一步
+
+1. [ ] 可配置交付通知：任务完成、需要人工确认或进入死信时，通过站内通知及可选 Webhook/邮件送达，通知本身不包含敏感模型凭据。
+2. [ ] 日程健康回顾 Agent：按运行历史识别长期失败、成本异常、结果质量下降和不再需要的日程，只给出可确认的调整建议，不自行改频率或删除日程。
+3. [ ] 月/周日历视图与冲突提示：在不暴露 cron 的前提下展示未来执行窗口，并提示大量高成本日程在同一时间集中触发的容量风险。
+4. [ ] 运行结果联动：允许把一个日程的已验证 Artifact 作为后续日程的输入，同时保留来源、版本和租户边界，形成可审计的周期性 Agent 流程。

@@ -1633,3 +1633,117 @@ test('keeps Agent Nexus task history out of regular conversations', async () => 
     await store.close();
   }
 });
+
+test('schedule Agent creates a confirmable draft without creating a schedule', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  await store.initialize();
+  const designModel: ModelClient = {
+    model: 'schedule-design-model',
+    async complete(_request: ModelCompletionRequest) {
+      return {
+        content: JSON.stringify({
+          title: 'Agent 行业每日简报',
+          input: '搜索最新 Agent 行业动态，筛选重要信息并整理为 5 条摘要，保留来源。',
+          mode: 'analyze',
+          schedule: { kind: 'daily', timeOfDay: '09:00', timezone: 'Asia/Shanghai' },
+          agentPolicy: 'auto',
+          reason: '每次执行都需要重新检索并自动选择搜索、分析和汇总 Agent。',
+        }),
+        attempts: 1,
+        durationMs: 1,
+      };
+    },
+  };
+  const api = createTaskApi({
+    store,
+    hub: new EventHub(),
+    coordinator: { nudge() {}, abort() {} } as never,
+    scheduleModelFactory: () => designModel,
+  });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-schedule-draft', 'x-axiom-user-id': 'user-schedule-draft' };
+  try {
+    const response = await request(api, '/schedules/draft', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ request: '每天早上 9 点搜索 Agent 行业动态，整理成 5 条摘要', sessionId: 'schedule-session', timezone: 'Asia/Shanghai' }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { source: string; createsSchedule: boolean; draft: { agentPolicy: string; schedule: { kind: string; timeOfDay: string } } };
+    assert.equal(body.source, 'schedule-agent');
+    assert.equal(body.createsSchedule, false);
+    assert.equal(body.draft.agentPolicy, 'auto');
+    assert.deepEqual(body.draft.schedule, { kind: 'daily', timeOfDay: '09:00', timezone: 'Asia/Shanghai' });
+    const listed = await request(api, '/schedules', { headers });
+    assert.deepEqual((await listed.json() as { schedules: unknown[] }).schedules, []);
+  } finally {
+    await store.close();
+  }
+});
+
+test('schedule runs are tenant-isolated, routed per execution, and do not move the automatic deadline', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  await store.initialize();
+  const credentialId = 'd9428888-122b-4f85-b84c-3e8e0c16bf19';
+  const api = createTaskApi({
+    store,
+    hub: new EventHub(),
+    coordinator: { nudge() {}, abort() {} } as never,
+    resolveModelCredential: async (id, tenantId, userId) => id === credentialId && tenantId === 'tenant-schedule-run' && userId === 'user-schedule-run'
+      ? { id, model: 'user-schedule-model' }
+      : null,
+  });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-schedule-run', 'x-axiom-user-id': 'user-schedule-run' };
+  const otherHeaders = { ...headers, 'x-axiom-tenant-id': 'tenant-schedule-other' };
+  try {
+    const createdResponse = await request(api, '/schedules', {
+      method: 'POST', headers, body: JSON.stringify({
+        sessionId: 'schedule-session', title: '每日开源项目观察', input: '每天搜索新的开源 Agent 项目并比较差异', mode: 'analyze', enabled: true, modelCredentialId: credentialId,
+        cadence: { kind: 'daily', timeOfDay: '23:59', timezone: 'Asia/Shanghai' },
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = (await createdResponse.json() as { schedule: { id: string; nextRunAt: string; modelCredentialId?: string } }).schedule;
+    assert.equal(created.modelCredentialId, credentialId);
+
+    const attemptedIdOverride = await request(api, '/schedules', {
+      method: 'POST', headers: otherHeaders, body: JSON.stringify({
+        id: created.id, sessionId: 'other-session', title: '越权覆盖', input: '不应被创建', mode: 'analyze', enabled: true,
+        cadence: { kind: 'daily', timeOfDay: '23:59', timezone: 'Asia/Shanghai' },
+      }),
+    });
+    assert.equal(attemptedIdOverride.status, 400);
+    assert.equal((await request(api, `/schedules/${created.id}/runs`, { headers: otherHeaders })).status, 404);
+
+    const runResponse = await request(api, `/schedules/${created.id}/run`, {
+      method: 'POST', headers, body: JSON.stringify({ idempotencyKey: 'manual-run-stable-001' }),
+    });
+    assert.equal(runResponse.status, 202);
+    const runBody = await runResponse.json() as { task: { id: string }; deduplicated: boolean };
+    assert.equal(runBody.deduplicated, false);
+
+    const duplicate = await request(api, `/schedules/${created.id}/run`, {
+      method: 'POST', headers, body: JSON.stringify({ idempotencyKey: 'manual-run-stable-001' }),
+    });
+    assert.equal((await duplicate.json() as { deduplicated: boolean }).deduplicated, true);
+
+    const listed = await request(api, '/schedules', { headers });
+    const listedBody = await listed.json() as { schedules: Array<{ id: string; nextRunAt: string }>; latestRuns: Record<string, { id: string; triggerId: string; manual: boolean; activeAgentIds: string[] }> };
+    assert.equal(listedBody.schedules[0]?.nextRunAt, created.nextRunAt);
+    assert.equal(listedBody.latestRuns[created.id]?.id, runBody.task.id);
+    assert.equal(listedBody.latestRuns[created.id]?.triggerId, created.id);
+    assert.equal(listedBody.latestRuns[created.id]?.manual, true);
+    assert.ok((listedBody.latestRuns[created.id]?.activeAgentIds.length ?? 0) >= 1);
+
+    const runs = await request(api, `/schedules/${created.id}/runs`, { headers });
+    assert.equal(runs.status, 200);
+    const runItems = (await runs.json() as { runs: Array<{ id: string; triggerId: string; source: string }> }).runs;
+    assert.equal(runItems.length, 1);
+    assert.equal(runItems[0]?.source, 'schedule');
+    assert.equal(runItems[0]?.triggerId, created.id);
+
+    assert.equal((await request(api, `/schedules/${created.id}/runs`, { headers: otherHeaders })).status, 404);
+    assert.equal((await request(api, `/schedules/${created.id}/run`, { method: 'POST', headers: otherHeaders, body: '{}' })).status, 404);
+  } finally {
+    await store.close();
+  }
+});

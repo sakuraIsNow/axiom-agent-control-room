@@ -722,6 +722,11 @@ export type CompletionEvidenceSummary = {
 /** Aggregates used by task list projections; avoids loading each task's full event stream. */
 export type TaskEventSummary = {
   source?: string;
+  /** Owning schedule/plugin/webhook trigger reconstructed from task.created. */
+  triggerId?: string;
+  manual?: boolean;
+  activeAgentIds?: string[];
+  selectedSkillIds?: string[];
   modelCalls: number;
   promptTokens: number;
   completionTokens: number;
@@ -880,6 +885,8 @@ export interface TaskStore {
   listRecoverableHarnessTasks?(limit?: number): Promise<WorkflowTask[]>;
   /** List every task for a workflow when administrative cleanup needs more than the UI page size. */
   listTasksByTemplate?(tenantId: string, templateId: string): Promise<WorkflowTask[]>;
+  /** List task runs created by one durable schedule trigger. */
+  listTasksByTrigger?(tenantId: string, triggerId: string, limit?: number): Promise<WorkflowTask[]>;
   getTaskEventSummaries(taskIds: string[], tenantId: string): Promise<Map<string, TaskEventSummary>>;
   getTaskStats(tenantId: string): Promise<TaskStats>;
   getTaskStatsDaily(tenantId: string, days: number): Promise<TaskStatsDaily[]>;

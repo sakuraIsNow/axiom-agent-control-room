@@ -1,4 +1,4 @@
-import type { AgentMode, ScheduledTrigger } from '../types';
+import type { AgentMode, ScheduleCadence, ScheduleDraft, ScheduledTrigger, WorkflowTaskSummary } from '../types';
 
 const readJson = async <T>(response: Response, fallback: string) => {
   const body = await response.json().catch(() => null) as T & { error?: string } | null;
@@ -8,8 +8,17 @@ const readJson = async <T>(response: Response, fallback: string) => {
 
 export async function listSchedules(signal?: AbortSignal) {
   const response = await fetch('/api/schedules', { signal });
-  const body = await readJson<{ schedules?: ScheduledTrigger[] }>(response, '日程列表读取失败');
-  return body.schedules ?? [];
+  const body = await readJson<{ schedules?: ScheduledTrigger[]; latestRuns?: Record<string, WorkflowTaskSummary> }>(response, '日程列表读取失败');
+  return { schedules: body.schedules ?? [], latestRuns: body.latestRuns ?? {} };
+}
+
+export async function draftSchedule(input: { request: string; sessionId: string; timezone?: string; modelCredentialId?: string }) {
+  const response = await fetch('/api/schedules/draft', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...input, timezone: input.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'Asia/Shanghai' }),
+  });
+  return readJson<{ draft: ScheduleDraft; source: 'schedule-agent' | 'deterministic-fallback'; warning?: string; createsSchedule: false }>(response, '日程草案生成失败');
 }
 
 export async function createSchedule(input: {
@@ -17,7 +26,9 @@ export async function createSchedule(input: {
   title: string;
   input: string;
   mode: AgentMode;
-  intervalSeconds: number;
+  modelCredentialId?: string;
+  cadence?: ScheduleCadence;
+  intervalSeconds?: number;
   enabled?: boolean;
 }) {
   const response = await fetch('/api/schedules', {
@@ -38,6 +49,24 @@ export async function removeSchedule(scheduleId: string) {
 
 export async function resumeSchedule(scheduleId: string) {
   const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/resume`, { method: 'POST' });
-  const body = await readJson<{ schedule: ScheduledTrigger }>(response, '鏃ョ▼鎭㈠澶辫触');
+  const body = await readJson<{ schedule: ScheduledTrigger }>(response, '日程恢复失败');
   return body.schedule;
+}
+
+const requestId = () => typeof crypto !== 'undefined' && 'randomUUID' in crypto
+  ? crypto.randomUUID()
+  : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+export async function runSchedule(scheduleId: string) {
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idempotencyKey: requestId() }),
+  });
+  return readJson<{ task: WorkflowTaskSummary; eventsUrl: string; deduplicated: boolean }>(response, '日程立即运行失败');
+}
+
+export async function listScheduleRuns(scheduleId: string, signal?: AbortSignal) {
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/runs?limit=20`, { signal });
+  return (await readJson<{ runs?: WorkflowTaskSummary[] }>(response, '日程运行记录读取失败')).runs ?? [];
 }

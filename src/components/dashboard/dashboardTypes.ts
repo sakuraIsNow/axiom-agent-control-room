@@ -55,6 +55,7 @@ export type DashboardProps = {
   error: string | null;
   readiness: 'ready' | 'degraded' | 'blocked';
   provider: string;
+  textModelCredentialId?: string;
   onThemeChange: (theme: UiTheme) => void;
   principalUserId?: string;
 };

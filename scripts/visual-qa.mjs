@@ -55,6 +55,7 @@ let qaTaskId = null;
 let qaSessionId = null;
 let qaPluginId = null;
 let qaWorkflowId = null;
+let qaScheduleId = null;
 let qaArtifactSessionId = null;
 page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
 page.on('pageerror', (error) => consoleErrors.push(error.message));
@@ -107,6 +108,21 @@ const taskFixtureResponse = await fetch(`${baseUrl}/api/tasks`, {
 });
 if (!taskFixtureResponse.ok) throw new Error(`视觉 QA 任务 fixture 创建失败 (${taskFixtureResponse.status})`);
 qaTaskId = (await taskFixtureResponse.json()).task?.id ?? null;
+
+const scheduleFixtureResponse = await fetch(`${baseUrl}/api/schedules`, {
+  method: 'POST',
+  headers: { ...qaHeaders, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    sessionId: `qa-schedule-${fixtureStamp}`,
+    title: '每日 Agent 行业简报',
+    input: '搜索最新 Agent 行业动态，整理 5 条摘要并保留来源。',
+    mode: 'analyze',
+    enabled: true,
+    cadence: { kind: 'daily', timeOfDay: '09:00', timezone: 'Asia/Shanghai' },
+  }),
+});
+if (!scheduleFixtureResponse.ok) throw new Error(`视觉 QA 日程 fixture 创建失败 (${scheduleFixtureResponse.status})`);
+qaScheduleId = (await scheduleFixtureResponse.json()).schedule?.id ?? null;
 
 await page.goto(baseUrl, { waitUntil: 'networkidle' });
 await page.locator('.axiom-dashboard').waitFor({ state: 'visible', timeout: 30_000 });
@@ -350,6 +366,49 @@ const leftNavToolsRemoved = await page.locator('.dash-nav-rail').getByRole('butt
 const headerReadinessStillAvailable = await page.locator('.dash-header-actions button[title="生产就绪"]').count() === 1;
 page.off('request', countTemplateRequest);
 await page.screenshot({ path: resolve(outputDir, 'dashboard-templates.png'), fullPage: false });
+
+await page.route('**/api/schedules/draft', async (route) => {
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      source: 'schedule-agent',
+      createsSchedule: false,
+      draft: {
+        title: 'Agent 行业每日简报',
+        input: '搜索最新 Agent 行业动态，整理 5 条摘要并保留来源。',
+        mode: 'analyze',
+        schedule: { kind: 'daily', timeOfDay: '09:00', timezone: 'Asia/Shanghai' },
+        agentPolicy: 'auto',
+        reason: '每次触发时重新由 Router Agent 和调度 Agent 选择所需能力。',
+      },
+    }),
+  });
+});
+await page.getByRole('button', { name: '日程', exact: true }).click();
+await page.locator('.schedule-workspace').waitFor({ state: 'visible' });
+const scheduleComposerVisible = await page.locator('.schedule-agent-composer textarea').isVisible();
+const scheduleUsesGlass = await page.locator('.schedule-agent-composer').evaluate((element) => {
+  const style = getComputedStyle(element);
+  return style.backgroundImage.includes('radial-gradient') && style.backdropFilter.includes('blur') && style.borderRadius === '8px';
+});
+const scheduleFixtureCard = page.locator('.schedule-card').filter({ hasText: '每日 Agent 行业简报' });
+await scheduleFixtureCard.waitFor({ state: 'visible', timeout: 5_000 });
+await scheduleFixtureCard.getByText('自动编排', { exact: true }).waitFor({ state: 'visible', timeout: 5_000 });
+const scheduleFixtureVisible = await scheduleFixtureCard.isVisible()
+  && await scheduleFixtureCard.getByText('自动编排', { exact: true }).isVisible();
+const scheduleRunControlsVisible = await scheduleFixtureCard.getByRole('button', { name: '立即运行', exact: true }).isVisible()
+  && await scheduleFixtureCard.getByRole('button', { name: /运行记录/u }).isVisible();
+await page.locator('.schedule-agent-composer textarea').fill('每天早上 9 点整理 Agent 行业动态');
+await page.getByRole('button', { name: '生成草案', exact: true }).click();
+await page.locator('.schedule-draft').waitFor({ state: 'visible' });
+const scheduleDraftRequiresConfirmation = await page.getByText('待确认', { exact: true }).isVisible()
+  && await page.getByRole('button', { name: '确认并启用', exact: true }).isVisible()
+  && await page.locator('.schedule-card').count() === 1;
+const scheduleNoHorizontalOverflow = await page.locator('.schedule-workspace').evaluate(() => document.body.scrollWidth <= innerWidth + 1);
+await page.screenshot({ path: resolve(outputDir, 'dashboard-schedules.png'), fullPage: false });
+await page.getByRole('button', { name: '关闭草案', exact: true }).click();
+await page.unroute('**/api/schedules/draft');
 
 const workflowListResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/workflows', { timeout: 5_000 });
 await page.getByRole('button', { name: 'Agent Nexus', exact: true }).click();
@@ -722,6 +781,11 @@ const workflowWorkspaceStartsAtTop = await page.evaluate(() => {
   return layout.scrollTop === 0 && main.scrollTop === 0 && studioRect.top >= layoutRect.top + 70;
 });
 await page.screenshot({ path: resolve(outputDir, 'dashboard-workflows-mobile.png'), fullPage: false });
+await page.getByRole('button', { name: '日程', exact: true }).click();
+await page.locator('.schedule-workspace').waitFor({ state: 'visible', timeout: 5_000 });
+const mobileScheduleNoHorizontalOverflow = await page.evaluate(() => document.body.scrollWidth <= innerWidth + 1);
+const mobileScheduleComposerVisible = await page.locator('.schedule-agent-composer textarea').isVisible();
+await page.screenshot({ path: resolve(outputDir, 'dashboard-schedules-mobile.png'), fullPage: false });
 await page.getByRole('button', { name: '对话', exact: true }).click();
 await page.locator('.dash-chat-workspace').waitFor({ state: 'visible', timeout: 5_000 });
 const mobileLayout = await layout(page);
@@ -805,6 +869,14 @@ const assertions = {
   templateModalRemoved: templatesUseWorkspace,
   templateRefreshSettles,
   templateRefreshUsesSingleRequest,
+  scheduleComposerVisible,
+  scheduleUsesGlass,
+  scheduleFixtureVisible,
+  scheduleRunControlsVisible,
+  scheduleDraftRequiresConfirmation,
+  scheduleNoHorizontalOverflow,
+  mobileScheduleNoHorizontalOverflow,
+  mobileScheduleComposerVisible,
   workflowUsesMainWorkspace: workflowWorkspaceUsesMainArea,
   workflowWorkspaceUsesGlass,
   workflowCanvasVisible,
@@ -885,6 +957,9 @@ if (Object.values(assertions).some((passed) => !passed)) process.exitCode = 1;
   }
   if (qaWorkflowId) {
     await fetch(`${baseUrl}/api/workflows/${encodeURIComponent(qaWorkflowId)}`, { method: 'DELETE', headers: qaHeaders }).catch(() => undefined);
+  }
+  if (qaScheduleId) {
+    await fetch(`${baseUrl}/api/schedules/${encodeURIComponent(qaScheduleId)}`, { method: 'DELETE', headers: qaHeaders }).catch(() => undefined);
   }
   await browser.close();
 }

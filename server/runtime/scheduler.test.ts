@@ -96,3 +96,21 @@ test('deleting an in-flight in-memory schedule does not recreate it', async () =
   await running;
   assert.deepEqual(await scheduler.list('tenant-a'), []);
 });
+
+test('a one-time schedule disables itself after one successful run', async () => {
+  let calls = 0;
+  const scheduler = new InMemoryScheduler(async () => { calls += 1; });
+  const created = await scheduler.upsert(input({
+    intervalSeconds: undefined,
+    cadence: { kind: 'once', runAt: new Date(Date.now() + 60_000).toISOString(), timezone: 'Asia/Shanghai' },
+    nextRunAt: new Date(Date.now() - 1_000).toISOString(),
+  }));
+  await tick(scheduler);
+  const completed = await scheduler.get(created.id, 'tenant-a');
+  assert.equal(calls, 1);
+  assert.equal(completed?.lastRunStatus, 'success');
+  assert.equal(completed?.enabled, false);
+  forceDue(scheduler, created.id);
+  await tick(scheduler);
+  assert.equal(calls, 1);
+});
