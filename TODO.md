@@ -282,7 +282,7 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [x] 场景生产分包已按真实依赖修正：当前 `AxiomDashboard` 未挂载旧 R3F/WebGL 场景，生产产物不再生成或预加载 Three.js、R3F、postprocessing chunk；`react-dom/client` 归入 React framework chunk，删除了误导性的约 1 MB 旧结论。
 - [x] 移动端 Graph 全屏、节点详情抽屉和长事件虚拟滚动：节点支持鼠标、触摸、键盘选择，桌面/移动端均可全屏；运行事件上限为 500 条并按固定行高窗口化渲染。
 - [x] MCP / OpenAPI 受控能力目录：已完成分类标签、版本固定、真实健康探测、Agent 权限、调用统计和按任务 Top-K 路由，外部工具不会全量注入所有 Agent。
-- [ ] MCP 加密认证代理与能力包市场：API Key/OAuth/服务账号只登记认证类型并保持“待授权”，下一批补 Secret 引用、OAuth 回调、Token 刷新、审核发布、撤回和租户配额。
+- [ ] 通用 MCP 加密认证代理与能力包市场：飞书服务账号已率先使用加密 Secret 引用；任意 MCP 的 API Key 注入、OAuth 回调、Token 刷新、审核发布、撤回和租户配额仍待完成。
 - [ ] 多租户计费、配额、审计查询和行业工作流。
 
 ## 本轮交付记录
@@ -804,10 +804,20 @@ npm run qa:search-agent
 - [x] 前端能力目录展示真实状态、指标和重新检查入口，并通过毛玻璃主题、桌面/移动端和浏览器零错误视觉回归。
 - [x] 发布门禁：`npm test` 为 `379 passed / 0 failed / 1 skipped`，PostgreSQL 专项补跑 `1 passed / 0 failed / 0 skipped`；`npm run build`、`npm run qa:visual` 通过，`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped` 且可运行项全部首轮通过。剩余 4 个外部服务现场验收未冒充通过。
 
-### v2.2 下一批：受控 MCP 规模化
+### 2026-09-04 v2.2.0-rc.1 受控能力包与飞书连接
 
-1. [ ] MCP 加密认证代理：API Key、OAuth 2、服务账号只保存加密 Secret 引用；完成 OAuth 回调、Token 刷新、撤销和审计，Secret 不进入 specification、日志或模型上下文。
-2. [ ] 审核能力包与租户市场：提供办公、研究、开发、业务、内容、运维、数据能力包；固定版本、签名、权限声明、发布审核、撤回和兼容性检查，不提供无审核“一键全开”。
+1. [x] 七类能力包进入目录，开发与代码、研究与论文、办公协作、数据分析作为首批推荐包按租户默认启用；显式停用状态持久化，重启不会自动恢复。
+2. [x] Tool Registry 在候选阶段按租户和已安装能力包过滤；其他租户的工具、停用能力包中的工具和无权限工具不会进入模型上下文。
+3. [x] 飞书服务账号连接器真实换取 `tenant_access_token`，支持云文档、日历、群消息读取和文本消息发送；发送继续经过统一高风险人工审批。
+4. [x] 集成凭据在 SQLite/PostgreSQL 中使用 AES-256-GCM 加密，AAD 绑定租户、凭据和 provider；Secret 不进入 specification、日志、模型上下文或 API 响应。
+5. [x] 项目空间增加能力包启停与飞书连接、检查、断开界面；高级 MCP/OpenAPI 导入保留，不重复展示内建飞书源。
+6. [x] 凭据安全与多 Worker 加固：拒绝弱主密钥和跨租户 ID 覆盖；同租户多位管理员使用独立飞书源；PostgreSQL 首次并发建表使用 advisory lock。
+7. [x] 候选版门禁：`npm test` 为 `384 passed / 0 failed / 1 skipped`，`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped`；独立 PostgreSQL 临时库专项补跑 `1 passed / 0 failed`，测试库已删除。剩余 4 项外部服务未冒充通过。
+
+### v2.2 后续：受控 MCP 规模化
+
+1. [ ] 通用 MCP 加密认证代理：为任意 MCP/OpenAPI 完成 API Key 注入、OAuth 2 回调、state/PKCE、Token 刷新、撤销和审计；Secret 不进入 specification、日志或模型上下文。
+2. [ ] 审核能力包与租户市场：在现有七类目录和租户启停基础上，补固定版本签名、权限声明、发布审核、撤回和兼容性检查，不提供无审核“一键全开”。
 3. [ ] 后台健康巡检与熔断：定时探测、连续失败熔断、半开恢复、延迟/成功率趋势和告警；模型请求不现场执行健康探测。
 4. [ ] 租户工具配额：限制来源数量、每小时调用、并发、schema/Token 预算和高风险写操作策略；配额拒绝进入持久审计和运营指标。
 5. [ ] 外部对象存储现场验收：PostgreSQL + MinIO/S3/COS 双 Worker 验证二进制跨进程读取、租户隔离、超时、删除和失败补偿。

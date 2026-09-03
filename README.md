@@ -2,7 +2,7 @@
 
 > 把一句话交给一组真正会分工的 Agent。Axiom 会判断任务难度、安排合适的 Agent、展示实时进度，并在交付前帮你检查结果。
 
-当前发布版本：**v2.1.0**（受控环境生产候选；`v2.0.0` 为本次升级前稳定基线）
+当前源码版本：**v2.2.0-rc.1**（受控能力包与飞书连接候选版；`v2.1.0` 为当前稳定标签）
 
 ![Axiom 任务台](docs/images/overview.png)
 
@@ -70,6 +70,8 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - 👁️ **视觉与文档 Agent 使用真实内容**：视觉 Agent 读取图片，文档 Agent 读取解析后的文件正文；其他 Agent 不会收到大段 Base64，附件被替换或跨用户引用时会直接拒绝。
 - 🧰 **外部工具按需加入**：MCP/OpenAPI 工具按办公、研究、开发、业务、内容、运维和数据分类。系统结合任务、Agent 权限、健康状态和历史成功率，每一步默认只选择最相关的 6 个，而不是把全部工具塞给模型。
 - 🩺 **工具状态可见**：能力目录会显示健康、待授权、异常、成功率、延迟和使用次数；异常或未授权工具不会进入 Agent 的可用目录。
+- 📦 **按需求安装能力包**：开发与代码、研究与论文、办公协作、数据分析四个推荐包首次使用时默认启用；内容创作、运维观测和企业业务可按租户单独开启或停用。
+- 🪽 **飞书真正参与协作**：使用飞书自建应用连接后，Agent 可以读取云文档、日历和群消息，也可以在人工确认后发送消息。App Secret 只在服务端加密保存，不进入工具描述、日志或模型上下文。
 
 ### 🧭 从任务到业务交付
 
@@ -77,7 +79,7 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 
 项目空间可以集中管理任务、会话、Agent Nexus、日程、决策、成员和审核。任务结束后可以继续分析、局部重跑、换模型复核、导出报告，或保存为 Nexus、插件和日程。平台还提供十种常用业务方案、可控长期记忆、按需选择的 MCP/OpenAPI 能力目录、真实反馈聚合，以及随运行事件更新的成本和时间预估。
 
-平台可以接入很多种 MCP，但不会让每个 Agent 同时看到所有工具。大量工具会增加 Token、延迟和误选概率，也会扩大第三方服务故障与权限风险。更合适的方式是按用户需要组合“办公、研究、开发、业务、内容、运维、数据”等能力包，再由路由每轮挑选少量相关工具。需要 API Key、OAuth 或服务账号的 MCP 当前可以先登记，但会保持“待授权”，等下一批加密认证代理完成后才允许调用。
+平台可以接入很多种 MCP，但不会让每个 Agent 同时看到所有工具。大量工具会增加 Token、延迟和误选概率，也会扩大第三方服务故障与权限风险。更合适的方式是按用户需要组合“办公、研究、开发、业务、内容、运维、数据”等能力包，再由路由每轮挑选少量相关工具。飞书服务账号已经使用独立的加密凭据代理；任意 MCP 的 API Key 注入和通用 OAuth 2 回调、刷新、撤销仍在下一批，未完成授权的来源继续保持禁用。
 
 这些能力都有 SQLite/PostgreSQL 持久化、服务端权限和 API 回归，不是只在页面上展示。完整说明、使用边界和验收方法见 [业务能力 V2](docs/business-capabilities-v2.md)。
 
@@ -109,7 +111,7 @@ Synthesizer：只汇总已验证的结果
 
 ```text
 npm run check       通过
-npm test            379 passed / 0 failed / 1 skipped
+npm test            384 passed / 0 failed / 1 skipped
 npm run qa:business-postgres
                     1 passed / 0 failed / 0 skipped（独立 PostgreSQL 测试库）
 npm run build       通过
@@ -118,7 +120,7 @@ npm run qa:search-agent
 npm run qa:all      24 passed / 0 failed / 5 skipped
 ```
 
-本轮门禁开始前已经确认 Docker 与 PostgreSQL 容器正常运行；24 个总门禁项目全部在第一次尝试通过。真实复杂任务产生 732 个连续事件和 624 个 SSE 流式增量，共使用 46,523 Token；Reviewer 评分 45 后触发一次真实人工确认，最终正常完成并保存 568 字符 Artifact。总门禁中的 PostgreSQL 专项最初因为未设置隔离测试库地址而跳过，随后在独立临时数据库中补跑为 `1 passed / 0 failed`，测试库已删除，未触碰业务数据库。
+2026-09-04 的候选版门禁开始前已确认 Docker 与 PostgreSQL 容器正常运行；24 个可运行门禁项目全部在第一次尝试通过。真实复杂任务产生 520 个连续事件和 421 个 SSE 流式增量，共使用 30,415 Token；Reviewer 触发一次真实人工确认后正常完成，并保存 800 字符 Artifact。总门禁中的 PostgreSQL 专项因为未把测试地址注入总门禁而显示跳过，随后在独立临时数据库中补跑为 `1 passed / 0 failed`，覆盖业务记录、凭据跨实例恢复、跨租户覆盖拒绝和首次并发初始化；测试库已删除，未触碰业务数据库。
 
 扣除已补跑的 PostgreSQL 后，仍未现场验收的是 4 项外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；跳过不等于通过，也不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
 
@@ -128,10 +130,10 @@ npm run qa:all      24 passed / 0 failed / 5 skipped
 
 | 接口 | 吞吐 | P95 延迟 |
 | --- | ---: | ---: |
-| 健康检查 | 1,722.04 请求/秒 | 8.86 ms |
-| 就绪检查 | 2,460.17 请求/秒 | 5.12 ms |
-| 任务列表 | 2,074.96 请求/秒 | 5.77 ms |
-| 运行观测 | 929.22 请求/秒 | 11.57 ms |
+| 健康检查 | 1,547.56 请求/秒 | 11.01 ms |
+| 就绪检查 | 2,328.26 请求/秒 | 4.59 ms |
+| 任务列表 | 2,347.15 请求/秒 | 5.15 ms |
+| 运行观测 | 981.93 请求/秒 | 11.99 ms |
 
 这组数据衡量的是 Axiom 自己的 API、调度和数据库访问，不包含 DeepSeek 的网络延迟、排队时间或模型生成速度。可以用下面的命令在自己的机器上重新测试：
 
@@ -162,6 +164,22 @@ npm run perf:smoke
 - 🚦 **异常会主动提示**：运行观测会根据真实队列、Worker 租约、模型/工具失败、Artifact 清理和 Readiness 状态生成告警，不需要盯着数字猜问题。
 - 📣 **结果可以推到你的系统**：在右上角通知铃铛中配置外发渠道后，任务完成、失败、需要确认或日程异常时，可以把签名 Webhook 发送到你自己的服务；失败投递可查看、重试或暂停。
 - ✍️ **边做边改**：复杂任务执行中可以继续补充要求，页面会告诉你 Agent 已接收还是已经应用。
+- 🪽 **连接飞书协作**：让 Agent 在授权范围内读取飞书云文档、日历和群消息，需要发送消息时先进入人工确认。
+
+## 📦 能力包与飞书
+
+进入“项目空间 → 能力”可以看到七类能力包。新租户首次进入时默认启用开发与代码、研究与论文、办公协作、数据分析；停用状态会持久化，服务重启不会擅自重新开启。能力包决定哪些外部工具可以进入 Router 候选，工具仍要继续通过租户隔离、Agent 权限、健康状态、任务相关度和 Top-K 筛选。
+
+连接飞书需要先在飞书开放平台创建企业自建应用，并准备 `App ID`、`App Secret`。根据实际用途给应用授予云文档读取、日历读取、群消息读取和以应用身份发送消息等权限，然后在“项目空间 → 能力 → 连接飞书”中验证。只有飞书真实返回 `tenant_access_token` 后，页面才显示已连接；读取操作直接执行，发送消息属于高风险写操作，会等待人工确认。
+
+建议在部署环境设置不少于 32 个字符、独立且稳定的 `AXIOM_INTEGRATION_SECRET`。它用于 AES-256-GCM 加密集成凭据；未设置时会回退使用 `AXIOM_PROVIDER_SECRET`，回退密钥也必须满足同样长度。更换密钥前必须先迁移或重新连接现有凭据，否则旧密文无法解密。
+
+### GitHub 项目读取要不要 Key？
+
+- 读取公开仓库网页、README 和公开文件不需要 Key，Axiom 当前的 GitHub 研究 Agent 也可以通过已配置的 DeepSeek 原生搜索研究公开项目。
+- 匿名调用 GitHub REST API 的额度较低，通常约为同一 IP 每小时 60 次；需要稳定批量读取时建议授权。
+- 私有仓库必须授权。团队部署优先使用 GitHub App，并只开放 `Metadata: Read`、`Contents: Read`，确实需要分析 Issue 或 PR 时再增加对应只读权限。
+- 个人访问令牌适合本地短期使用，不建议作为团队长期共享密钥。提交代码、创建 Issue/PR、合并等写权限不会默认开启，后续接入时应独立授权并继续经过人工确认。
 
 ## 🗓️ Agent 日程
 
@@ -367,6 +385,7 @@ npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 | 外部 Agent | `DEEPSEEK_HARNESS_*`、`CODEX_APP_SERVER_*` | 接入 Harness 或 Codex sidecar |
 | Nexus 附件 | `AXIOM_NEXUS_ARTIFACT_BUDGET_BYTES` | 单任务可加载的附件总预算，默认 20 MB |
 | 外部工具路由 | `AXIOM_EXTERNAL_TOOL_TOP_K` | 每个 Agent 步骤最多注入的相关 MCP/OpenAPI 工具，默认 6 |
+| 集成凭据加密 | `AXIOM_INTEGRATION_SECRET` | 不少于 32 个字符；加密飞书等集成的 Secret，未设置时回退到 `AXIOM_PROVIDER_SECRET` |
 | 外发通知 | `AXIOM_NOTIFICATION_SECRET`、`AXIOM_NOTIFICATION_RETENTION_DAYS` | 签名 Webhook、失败重试与投递审计 |
 
 `qa:harness-live` 只有在 sidecar 命令已配置时才执行真实握手；未配置时生产门禁会明确标为跳过。协议模拟测试不能替代目标服务器上的真实任务、断流和跨 Worker 演练。
@@ -395,6 +414,7 @@ npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 - [Agent Nexus 控制流](docs/agent-nexus-control-flow.md)：分支、Loop、DAG 和局部重跑。
 - [执行闭环](docs/execution-loop.md)：任务如何从输入走到交付。
 - [工具目录](docs/tool-registry.md)：MCP/OpenAPI 按需路由、健康、权限、审批和执行边界。
+- [v2.2 能力包迁移指南](docs/migration-v2.2.md)：能力包、飞书连接、加密凭据和升级边界。
 - [MemoryCore 接入](docs/memorycore-integration.md)：长期记忆配置与验收。
 - [业务能力 V2](docs/business-capabilities-v2.md)：15 项业务闭环、数据边界与验收方法。
 - [Harness 适配器](docs/harness-adapters.md)：DeepSeek Harness/Codex 的可选接入方式。

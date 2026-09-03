@@ -40,6 +40,7 @@ import { outboundNotificationKinds, type NotificationEndpointLocation, type Outb
 import { createBusinessCapabilityApi } from './businessCapabilities.js';
 import type { BusinessCapabilityStore } from './businessCapabilityStore.js';
 import type { ModelRoutingPolicy } from './modelRouting.js';
+import type { IntegrationCredentialStore } from './integrationCredentialStore.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -698,6 +699,7 @@ export const createTaskApi = (dependencies: {
   harnessAdapter?: HarnessAdapter;
   outboundNotifications?: OutboundNotificationManager;
   businessCapabilities?: BusinessCapabilityStore;
+  integrationCredentials?: IntegrationCredentialStore;
   modelRouting?: ModelRoutingPolicy;
 }) => {
   const api = new Hono();
@@ -1213,6 +1215,7 @@ export const createTaskApi = (dependencies: {
       artifactCatalog,
       modelRouting: dependencies.modelRouting,
       memory,
+      integrationCredentials: dependencies.integrationCredentials,
       createSchedule: async (input) => {
         const cadence = input.runAt
           ? { kind: 'once' as const, runAt: input.runAt, timezone: 'Asia/Shanghai' }

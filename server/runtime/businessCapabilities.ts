@@ -15,6 +15,9 @@ import { createPluginRelease, inspectPluginCompatibility } from './pluginCompati
 import type { RegisteredTool, ToolContext, ToolRegistry } from './toolRegistry.js';
 import type { ModelRoutingPolicy } from './modelRouting.js';
 import type { MemoryScope, TencentMemoryClient } from './memoryClient.js';
+import { capabilityPackById, capabilityPackCatalog, recommendedCapabilityPackIds } from './capabilityPacks.js';
+import type { IntegrationCredentialStore } from './integrationCredentialStore.js';
+import { acquireFeishuTenantToken, feishuOpenApiSpecification, invokeFeishuOperation } from './feishuConnector.js';
 import { attachmentDataUrl, decodeAttachmentDataUrl } from './attachmentContent.js';
 import {
   nexusArtifactSetDigest,
@@ -91,6 +94,12 @@ const toolSourceSchema = z.object({
   specification: z.record(z.string(), z.unknown()),
 }).strict();
 const toolSourcePatchSchema = toolSourceSchema.partial().extend({ revision: revisionSchema }).strict();
+const feishuConnectionSchema = z.object({
+  name: z.string().min(1).max(120).default('团队飞书'),
+  appId: z.string().min(6).max(200),
+  appSecret: z.string().min(8).max(500),
+  allowedAgentIds: z.array(z.string().min(1).max(160)).max(100).default([]),
+}).strict();
 
 const nexusArtifactSchema = z.object({
   name: z.string().min(1).max(240), mimeType: z.string().min(1).max(160), dataBase64: z.string().min(1).max(14_000_000),
@@ -346,10 +355,21 @@ const invokeExternalOperation = async (
   source: BusinessRecord,
   operation: Operation,
   args: Record<string, unknown>,
+  integrations?: IntegrationCredentialStore,
+  fetchImpl: typeof fetch = fetch,
 ) => {
   const inputSchema = operationInputSchema(operation);
   const validationErrors = validateJsonValue(inputSchema, args);
   if (validationErrors.length) throw new Error(`工具参数校验失败：${validationErrors.slice(0, 8).join(' ')}`);
+  if (source.data.connectorId === 'feishu') {
+    const credentialRef = typeof source.data.credentialRef === 'string' ? source.data.credentialRef : '';
+    if (!integrations || !credentialRef) throw new Error('飞书连接凭据不可用。');
+    const credential = await integrations.get(credentialRef, source.tenantId);
+    if (!credential || credential.provider !== 'feishu') throw new Error('飞书连接凭据不存在或不属于当前租户。');
+    const result = await invokeFeishuOperation(credential, operation.operationId, args, fetchImpl);
+    await integrations.touch(credential.id, source.tenantId);
+    return result;
+  }
   const location = source.data.location === 'local' ? 'local' : 'internet';
   const endpoint = await safeEndpoint(String(source.data.endpoint ?? ''), location);
   if (operation.method === 'mcp') {
@@ -381,7 +401,8 @@ const sourceHealthStatus = (source: BusinessRecord) => source.data.healthStatus 
   : source.data.healthStatus === 'healthy' ? 'healthy' : 'healthy'; // Legacy pinned sources remain compatible until their first explicit probe.
 const sourceAuthorizationStatus = (source: BusinessRecord) => source.data.authorizationStatus === 'pending'
   ? 'pending'
-  : source.data.authType && source.data.authType !== 'none' ? 'pending' : 'not-required';
+  : source.data.authorizationStatus === 'ready' ? 'ready'
+    : source.data.authType && source.data.authType !== 'none' ? 'pending' : 'not-required';
 
 const recordExternalToolOutcome = async (
   records: BusinessCapabilityStore,
@@ -414,7 +435,7 @@ const recordExternalToolOutcome = async (
   }
 };
 
-const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolRegistry, source: BusinessRecord) => {
+const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolRegistry, source: BusinessRecord, integrations?: IntegrationCredentialStore, fetchImpl: typeof fetch = fetch) => {
   tools.unregisterPrefix(externalToolPrefix(source.id));
   if (source.kind !== 'tool-source' || source.status !== 'enabled'
     || sourceHealthStatus(source) !== 'healthy'
@@ -431,6 +452,7 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
       timeoutMs: 30_000,
       routing: {
         sourceId: source.id,
+        tenantId: source.tenantId,
         categories: stringArray(source.data.categories, 12),
         capabilityTags: stringArray(source.data.capabilityTags, 32),
         healthStatus: sourceHealthStatus(source),
@@ -453,7 +475,7 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
         if (!currentOperation) throw new Error('固定工具版本中已不存在该操作。');
         const startedAt = Date.now();
         try {
-          const result = await invokeExternalOperation(current, currentOperation, input);
+          const result = await invokeExternalOperation(current, currentOperation, input, integrations, fetchImpl);
           const durationMs = Date.now() - startedAt;
           await recordExternalToolOutcome(records, current.id, context.task.tenantId, result.ok, durationMs);
           return { stdout: result.content, stderr: result.ok ? '' : `外部工具返回 HTTP ${result.responseStatus}。`, exitCode: result.ok ? 0 : result.responseStatus, durationMs, auditId: context.auditId };
@@ -467,9 +489,22 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
   }
 };
 
-export const registerPersistedExternalTools = async (records: BusinessCapabilityStore, tools: ToolRegistry) => {
+export const registerPersistedExternalTools = async (records: BusinessCapabilityStore, tools: ToolRegistry, integrations?: IntegrationCredentialStore, fetchImpl: typeof fetch = fetch) => {
   const sources = await records.listAll('tool-source', 10_000);
-  for (const source of sources) syncExternalToolSource(records, tools, source);
+  const installations = await records.listAll('capability-pack-installation', 10_000);
+  const tenantPacks = new Map<string, string[]>();
+  for (const source of sources) if (!tenantPacks.has(source.tenantId)) tenantPacks.set(source.tenantId, [...recommendedCapabilityPackIds]);
+  for (const installation of installations.filter((item) => item.status === 'active')) {
+    const packId = typeof installation.data.packId === 'string' ? installation.data.packId : '';
+    if (!capabilityPackById(packId)) continue;
+    tenantPacks.set(installation.tenantId, [...(tenantPacks.get(installation.tenantId) ?? []), packId]);
+  }
+  for (const installation of installations.filter((item) => item.status === 'disabled')) {
+    const packId = typeof installation.data.packId === 'string' ? installation.data.packId : '';
+    tenantPacks.set(installation.tenantId, (tenantPacks.get(installation.tenantId) ?? []).filter((id) => id !== packId));
+  }
+  for (const [tenantId, packIds] of tenantPacks) tools.setTenantCapabilityPacks(tenantId, packIds);
+  for (const source of sources) syncExternalToolSource(records, tools, source, integrations, fetchImpl);
   return sources.filter((source) => source.status === 'enabled'
     && sourceHealthStatus(source) === 'healthy'
     && ['ready', 'not-required'].includes(sourceAuthorizationStatus(source)))
@@ -513,11 +548,13 @@ export const createBusinessCapabilityApi = (dependencies: {
   artifactCatalog?: ArtifactCatalog | null;
   modelRouting?: ModelRoutingPolicy;
   memory?: TencentMemoryClient;
+  integrationCredentials?: IntegrationCredentialStore;
+  integrationFetch?: typeof fetch;
   createSchedule?: (input: { tenantId: string; userId: string; taskId: string; sessionId: string; title: string; instruction: string; mode: 'analyze' | 'build' | 'decide'; intervalSeconds?: number; runAt?: string }) => Promise<Record<string, unknown>>;
   sendNotification?: (input: { tenantId: string; userId: string; taskId: string; sessionId: string; title: string; message: string; idempotencyKey: string; channelId?: string }) => Promise<Record<string, unknown>>;
 }) => {
   const api = new Hono();
-  const { records, tasks, coordinator, templates, plugins, agents, tools, artifacts, artifactCatalog, modelRouting, memory, createSchedule, sendNotification } = dependencies;
+  const { records, tasks, coordinator, templates, plugins, agents, tools, artifacts, artifactCatalog, modelRouting, memory, integrationCredentials, integrationFetch = fetch, createSchedule, sendNotification } = dependencies;
   const getProject = async (id: string, value: Principal, edit = false) => {
     const record = await records.get(id, value.tenantId);
     if (!record || record.kind !== 'project' || !(edit ? canEditProject(record, value) : canReadProject(record, value))) return null;
@@ -936,6 +973,157 @@ export const createBusinessCapabilityApi = (dependencies: {
     } catch (error) { return c.json({ error: `MemoryCore 清理失败，本地记录已保留：${error instanceof Error ? error.message : '未知错误'}` }, 502); }
   });
 
+  const refreshTenantCapabilityPacks = async (tenantId: string) => {
+    const installations = await records.list(tenantId, 'capability-pack-installation', { limit: 100 });
+    const explicit = new Map(installations.map((item) => [String(item.data.packId ?? ''), item.status]));
+    const activeIds = capabilityPackCatalog.filter((pack) => explicit.has(pack.id) ? explicit.get(pack.id) === 'active' : pack.recommended).map((pack) => pack.id);
+    tools?.setTenantCapabilityPacks(tenantId, activeIds);
+    return installations.filter((item) => item.status === 'active');
+  };
+
+  api.get('/capability-packs', async (c) => {
+    const value = principal(c.req.raw.headers);
+    const [installations, sources] = await Promise.all([
+      records.list(value.tenantId, 'capability-pack-installation', { limit: 100 }),
+      records.list(value.tenantId, 'tool-source', { limit: 200 }),
+    ]);
+    const byPack = new Map(installations.map((item) => [String(item.data.packId ?? ''), item]));
+    return c.json({
+      packs: capabilityPackCatalog.map((pack) => {
+        const installation = byPack.get(pack.id);
+        const connectedConnectorIds = [...new Set(sources.filter((source) => source.status === 'enabled' && source.data.packId === pack.id)
+          .map((source) => String(source.data.connectorId ?? '')).filter(Boolean))];
+        return { ...pack, installed: installation ? installation.status === 'active' : pack.recommended, installationId: installation?.id, revision: installation?.revision, connectedConnectorIds };
+      }),
+    });
+  });
+
+  api.post('/capability-packs/:packId/install', async (c) => {
+    const value = principal(c.req.raw.headers);
+    if (value.role === 'viewer') return c.json({ error: '只读成员不能安装能力包。' }, 403);
+    const pack = capabilityPackById(c.req.param('packId'));
+    if (!pack) return c.json({ error: '能力包不存在。' }, 404);
+    const existing = (await records.list(value.tenantId, 'capability-pack-installation', { limit: 100 }))
+      .find((item) => item.data.packId === pack.id);
+    const installation = existing
+      ? existing.status === 'active' ? existing : await records.update(existing.id, value.tenantId, { status: 'active', data: { ...existing.data, version: pack.version, installedBy: value.userId, installedAt: new Date().toISOString() } }, existing.revision)
+      : await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'capability-pack-installation', status: 'active', data: { packId: pack.id, version: pack.version, installedBy: value.userId, installedAt: new Date().toISOString() } });
+    await refreshTenantCapabilityPacks(value.tenantId);
+    return c.json({ pack: { ...pack, installed: true, installationId: installation.id, revision: installation.revision } }, existing ? 200 : 201);
+  });
+
+  api.delete('/capability-packs/:packId', async (c) => {
+    const value = principal(c.req.raw.headers);
+    if (value.role === 'viewer') return c.json({ error: '只读成员不能停用能力包。' }, 403);
+    const pack = capabilityPackById(c.req.param('packId'));
+    if (!pack) return c.json({ error: '能力包不存在。' }, 404);
+    const existing = (await records.list(value.tenantId, 'capability-pack-installation', { limit: 100 }))
+      .find((item) => item.data.packId === pack.id);
+    if (existing?.status === 'disabled' || (!existing && !pack.recommended)) return c.json({ error: '能力包尚未安装。' }, 404);
+    const installation = existing
+      ? await records.update(existing.id, value.tenantId, { status: 'disabled', data: { ...existing.data, disabledBy: value.userId, disabledAt: new Date().toISOString() } }, existing.revision)
+      : await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'capability-pack-installation', status: 'disabled', data: { packId: pack.id, version: pack.version, disabledBy: value.userId, disabledAt: new Date().toISOString() } });
+    await refreshTenantCapabilityPacks(value.tenantId);
+    return c.json({ pack: { ...pack, installed: false, installationId: installation.id, revision: installation.revision } });
+  });
+
+  api.get('/integrations', async (c) => {
+    const value = principal(c.req.raw.headers);
+    if (!integrationCredentials) return c.json({ integrations: [], available: false });
+    const credentials = await integrationCredentials.list(value.tenantId, isManager(value) ? undefined : value.userId);
+    const sources = await records.list(value.tenantId, 'tool-source', { limit: 200 });
+    return c.json({
+      available: true,
+      integrations: credentials.map((credential) => {
+        const source = sources.find((item) => item.data.credentialRef === credential.id);
+        const health = source ? sourceHealthStatus(source) : 'unknown';
+        return {
+          ...credential,
+          status: source?.status === 'enabled' && health === 'healthy' ? 'connected' : health === 'unhealthy' ? 'unhealthy' : 'disabled',
+          sourceId: source?.id,
+          healthMessage: source?.data.healthMessage,
+          lastCheckedAt: source?.data.lastCheckedAt,
+        };
+      }),
+    });
+  });
+
+  api.post('/integrations/feishu', async (c) => {
+    const value = principal(c.req.raw.headers);
+    if (value.role === 'viewer') return c.json({ error: '只读成员不能配置飞书。' }, 403);
+    if (!integrationCredentials) return c.json({ error: '加密连接凭据服务未初始化。' }, 503);
+    const parsed = feishuConnectionSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '飞书配置无效。', details: parsed.error.flatten() }, 400);
+    try {
+      const health = await acquireFeishuTenantToken({ secrets: { appId: parsed.data.appId, appSecret: parsed.data.appSecret } }, integrationFetch);
+      const currentCredential = (await integrationCredentials.list(value.tenantId, value.userId)).find((item) => item.provider === 'feishu');
+      const credential = await integrationCredentials.upsert({
+        tenantId: value.tenantId, userId: value.userId, provider: 'feishu', name: parsed.data.name,
+        authType: 'service-account', secrets: { appId: parsed.data.appId, appSecret: parsed.data.appSecret },
+        metadata: { baseUrl: 'https://open.feishu.cn', mode: 'tenant_access_token' },
+      }, currentCredential?.id);
+      const inspected = validateToolSpecification('openapi', feishuOpenApiSpecification as unknown as Record<string, unknown>);
+      const existingSource = (await records.list(value.tenantId, 'tool-source', { limit: 200 }))
+        .find((item) => item.data.connectorId === 'feishu' && item.ownerId === value.userId);
+      const sourceData = {
+        name: parsed.data.name, protocol: 'openapi', location: 'internet', version: '1.0.0', enabled: true,
+        description: '读取飞书云文档、日历和群聊消息；发送消息前需要人工确认。', categories: ['office'],
+        capabilityTags: ['飞书', '消息', '云文档', '日历', '协作'], riskLevel: 'high', authType: 'service-account',
+        authorizationStatus: 'ready', visibility: 'tenant', allowedAgentIds: parsed.data.allowedAgentIds,
+        specification: feishuOpenApiSpecification, operations: inspected.operations, endpoint: inspected.endpoint,
+        pinnedDigest: createHash('sha256').update(JSON.stringify(feishuOpenApiSpecification)).digest('hex'),
+        healthStatus: 'healthy', healthMessage: '', lastCheckedAt: new Date().toISOString(), latencyMs: health.latencyMs,
+        usageCount: Number(existingSource?.data.usageCount ?? 0), successCount: Number(existingSource?.data.successCount ?? 0),
+        successRate: existingSource?.data.successRate ?? null, connectorId: 'feishu', packId: 'office', credentialRef: credential.id,
+      };
+      const source = existingSource
+        ? await records.update(existingSource.id, value.tenantId, { status: 'enabled', data: sourceData }, existingSource.revision)
+        : await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'tool-source', status: 'enabled', data: sourceData });
+      const office = capabilityPackById('office')!;
+      const existingInstallation = (await records.list(value.tenantId, 'capability-pack-installation', { limit: 100 })).find((item) => item.data.packId === 'office');
+      if (!existingInstallation) await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'capability-pack-installation', status: 'active', data: { packId: 'office', version: office.version, installedBy: value.userId, installedAt: new Date().toISOString() } });
+      else if (existingInstallation.status !== 'active') await records.update(existingInstallation.id, value.tenantId, { status: 'active', data: { ...existingInstallation.data, installedBy: value.userId, installedAt: new Date().toISOString() } }, existingInstallation.revision);
+      await refreshTenantCapabilityPacks(value.tenantId);
+      tools && syncExternalToolSource(records, tools, source, integrationCredentials, integrationFetch);
+      return c.json({ integration: { ...credential, status: 'connected', sourceId: source.id, lastCheckedAt: source.data.lastCheckedAt }, source: presentToolSource(source) }, existingSource ? 200 : 201);
+    } catch (error) {
+      return c.json({ error: (error instanceof Error ? error.message : '飞书连接失败。').replace(/(?:app_secret|tenant_access_token)[^\s,}]*/gi, '[redacted]') }, 502);
+    }
+  });
+
+  api.post('/integrations/feishu/:credentialId/health', async (c) => {
+    const value = principal(c.req.raw.headers);
+    if (!integrationCredentials) return c.json({ error: '加密连接凭据服务未初始化。' }, 503);
+    const credential = await integrationCredentials.get(c.req.param('credentialId'), value.tenantId);
+    if (!credential || credential.provider !== 'feishu' || (!isManager(value) && credential.ownerId !== value.userId)) return c.json({ error: '飞书连接不存在。' }, 404);
+    const source = (await records.list(value.tenantId, 'tool-source', { limit: 200 })).find((item) => item.data.credentialRef === credential.id);
+    if (!source) return c.json({ error: '飞书工具源不存在。' }, 404);
+    try {
+      const health = await acquireFeishuTenantToken(credential, integrationFetch);
+      const updated = await records.update(source.id, value.tenantId, { status: 'enabled', data: { ...source.data, healthStatus: 'healthy', healthMessage: '', lastCheckedAt: new Date().toISOString(), latencyMs: health.latencyMs, authorizationStatus: 'ready' } }, source.revision);
+      tools && syncExternalToolSource(records, tools, updated, integrationCredentials, integrationFetch);
+      return c.json({ integration: { ...credential, secrets: undefined, status: 'connected', sourceId: updated.id, lastCheckedAt: updated.data.lastCheckedAt } });
+    } catch (error) {
+      const updated = await records.update(source.id, value.tenantId, { status: 'disabled', data: { ...source.data, healthStatus: 'unhealthy', healthMessage: (error instanceof Error ? error.message : '飞书连接失败。').slice(0, 500), lastCheckedAt: new Date().toISOString() } }, source.revision);
+      tools && syncExternalToolSource(records, tools, updated, integrationCredentials, integrationFetch);
+      return c.json({ error: updated.data.healthMessage }, 502);
+    }
+  });
+
+  api.delete('/integrations/feishu/:credentialId', async (c) => {
+    const value = principal(c.req.raw.headers);
+    if (!integrationCredentials) return c.json({ error: '加密连接凭据服务未初始化。' }, 503);
+    const credential = await integrationCredentials.get(c.req.param('credentialId'), value.tenantId);
+    if (!credential || credential.provider !== 'feishu' || (!isManager(value) && credential.ownerId !== value.userId)) return c.json({ error: '飞书连接不存在。' }, 404);
+    const source = (await records.list(value.tenantId, 'tool-source', { limit: 200 })).find((item) => item.data.credentialRef === credential.id);
+    if (source) {
+      const disabled = await records.update(source.id, value.tenantId, { status: 'disabled', data: { ...source.data, enabled: false, authorizationStatus: 'pending', credentialRef: undefined } }, source.revision);
+      tools && syncExternalToolSource(records, tools, disabled, integrationCredentials, integrationFetch);
+    }
+    await integrationCredentials.delete(credential.id, value.tenantId);
+    return c.body(null, 204);
+  });
+
   api.get('/tool-sources', async (c) => {
     const value = principal(c.req.raw.headers); const sources = await records.list(value.tenantId, 'tool-source', { limit: 200 });
     return c.json({ sources: sources.filter((item) => canManage(item, value) || item.status === 'enabled').map(presentToolSource) });
@@ -956,7 +1144,8 @@ export const createBusinessCapabilityApi = (dependencies: {
       const metadata = inferredToolMetadata(parsed.data, inspected.operations);
       const authorizationStatus = parsed.data.authType === 'none' ? 'not-required' : 'pending';
       const source = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'tool-source', status: parsed.data.enabled && authorizationStatus !== 'pending' ? 'enabled' : 'disabled', data: { ...parsed.data, ...metadata, specification, allowedAgentIds: stringArray(parsed.data.allowedAgentIds), operations: inspected.operations, endpoint: inspected.endpoint, pinnedDigest: createHash('sha256').update(JSON.stringify(specification)).digest('hex'), ...health, authorizationStatus, usageCount: 0, successCount: 0, successRate: null } });
-      if (tools) syncExternalToolSource(records, tools, source);
+      await refreshTenantCapabilityPacks(value.tenantId);
+      if (tools) syncExternalToolSource(records, tools, source, integrationCredentials, integrationFetch);
       return c.json({ source: presentToolSource(source) }, 201);
     } catch (error) { return c.json({ error: error instanceof Error ? error.message : '工具源校验失败。' }, 400); }
   });
@@ -990,7 +1179,7 @@ export const createBusinessCapabilityApi = (dependencies: {
       const metadata = inferredToolMetadata(normalizedInput, inspected.operations);
       const authorizationStatus = normalizedInput.authType === 'none' ? 'not-required' : 'pending';
       const updated = await records.update(source.id, value.tenantId, { status: normalizedInput.enabled && authorizationStatus !== 'pending' ? 'enabled' : 'disabled', data: { ...merged, ...normalizedInput, ...metadata, specification, operations: inspected.operations, endpoint: inspected.endpoint, pinnedDigest: createHash('sha256').update(JSON.stringify(specification)).digest('hex'), ...health, authorizationStatus } }, revision);
-      if (tools) syncExternalToolSource(records, tools, updated);
+      if (tools) syncExternalToolSource(records, tools, updated, integrationCredentials, integrationFetch);
       return c.json({ source: presentToolSource(updated) });
     } catch (error) { const result = conflict(error); return c.json(result.body, result.status); }
   });
@@ -1001,7 +1190,7 @@ export const createBusinessCapabilityApi = (dependencies: {
       const endpoint = await safeEndpoint(String(source.data.endpoint ?? ''), source.data.location === 'local' ? 'local' : 'internet');
       const health = await probeToolEndpoint(source.data.protocol === 'mcp' ? 'mcp' : 'openapi', endpoint);
       const updated = await records.update(source.id, value.tenantId, { data: { ...source.data, ...health } }, source.revision);
-      if (tools) syncExternalToolSource(records, tools, updated);
+      if (tools) syncExternalToolSource(records, tools, updated, integrationCredentials, integrationFetch);
       return c.json({ source: presentToolSource(updated) });
     } catch (error) { return c.json({ error: error instanceof Error ? error.message : '工具健康检查失败。' }, 400); }
   });
@@ -1057,7 +1246,7 @@ export const createBusinessCapabilityApi = (dependencies: {
     if (recent.length >= hourlyQuota) return c.json({ error: `该工具源每小时最多调用 ${hourlyQuota} 次。` }, 429);
     try {
       const startedAt = Date.now();
-      const response = await invokeExternalOperation(source, operation, body.data.args);
+      const response = await invokeExternalOperation(source, operation, body.data.args, integrationCredentials, integrationFetch);
       const content = response.content;
       const artifactId = `tool:${source.id}:${randomUUID()}`;
       const stored = artifacts ? await artifacts.put(artifactId, content, value.tenantId) : null;

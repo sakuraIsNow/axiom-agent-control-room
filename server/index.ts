@@ -40,6 +40,7 @@ import { CodexHarnessAdapter, DeepSeekHarnessAdapter } from './runtime/harnessCl
 import { createOutboundNotificationStore, OutboundNotificationManager } from './runtime/outboundNotifications.js';
 import { createBusinessCapabilityStore } from './runtime/businessCapabilityStore.js';
 import { registerPersistedExternalTools } from './runtime/businessCapabilities.js';
+import { createIntegrationCredentialStore } from './runtime/integrationCredentialStore.js';
 
 dotenv.config({ path: resolve(process.cwd(), '.env.local'), quiet: true });
 dotenv.config({ quiet: true });
@@ -177,6 +178,8 @@ const agentStore = createAgentStore();
 await agentStore.initialize();
 const businessCapabilityStore = createBusinessCapabilityStore();
 await businessCapabilityStore.initialize();
+const integrationCredentialStore = createIntegrationCredentialStore();
+await integrationCredentialStore.initialize();
 const outboundNotificationStore = createOutboundNotificationStore();
 await outboundNotificationStore.initialize();
 const outboundNotifications = new OutboundNotificationManager(outboundNotificationStore, fetch, logger);
@@ -228,7 +231,7 @@ try {
 }
 const runtimeTools = new ToolRegistry(undefined, runtimeArtifactStore, agentStore, runtimeArtifactCatalog);
 try {
-  const registeredExternalTools = await registerPersistedExternalTools(businessCapabilityStore, runtimeTools);
+  const registeredExternalTools = await registerPersistedExternalTools(businessCapabilityStore, runtimeTools, integrationCredentialStore);
   if (registeredExternalTools > 0) logger.info({ count: registeredExternalTools }, 'restored external MCP/OpenAPI tools');
 } catch (error) {
   logger.warn({ error }, 'external tools could not be restored; built-in tools remain available');
@@ -552,6 +555,7 @@ app.route('/api', createTaskApi({
   harnessAdapter,
   outboundNotifications,
   businessCapabilities: businessCapabilityStore,
+  integrationCredentials: integrationCredentialStore,
   modelRouting: modelRoutingPolicy,
 }));
 
@@ -1827,6 +1831,7 @@ const shutdown = async (signal: string) => {
   await pluginStore.close();
   await agentStore.close();
   await businessCapabilityStore.close();
+  await integrationCredentialStore.close();
   await templateStore.close();
   await taskStore.close();
   await providerCredentialStore.close?.();

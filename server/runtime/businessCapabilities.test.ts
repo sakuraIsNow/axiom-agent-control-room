@@ -13,6 +13,7 @@ import { TencentMemoryClient, type AgentMemory } from './memoryClient.js';
 import type { ModelClient, ModelCompletionRequest } from './modelClient.js';
 import { ToolRegistry } from './toolRegistry.js';
 import { signPrincipal } from './principal.js';
+import { createMemoryIntegrationCredentialStore } from './integrationCredentialStore.js';
 
 const principalSecret = 'business-capability-test-secret-32-bytes';
 let previousPrincipalSecret: string | undefined;
@@ -25,6 +26,93 @@ before(() => {
 after(() => {
   if (previousPrincipalSecret === undefined) delete process.env.AXIOM_PRINCIPAL_SECRET;
   else process.env.AXIOM_PRINCIPAL_SECRET = previousPrincipalSecret;
+});
+
+test('recommended capability packs are enabled by default and persist tenant overrides', async () => {
+  const harness = await createHarness();
+  const ownerHeaders = headers('tenant-packs', 'pack-owner', 'owner');
+  try {
+    let response = await harness.request('/capability-packs', { headers: ownerHeaders });
+    let packs = (await json<{ packs: Array<{ id: string; installed: boolean }> }>(response)).packs;
+    assert.deepEqual(packs.filter((pack) => pack.installed).map((pack) => pack.id), ['development', 'research', 'office', 'data']);
+    response = await harness.request('/capability-packs/office', { method: 'DELETE', headers: ownerHeaders });
+    assert.equal(response.status, 200);
+    response = await harness.request('/capability-packs', { headers: ownerHeaders });
+    packs = (await json<{ packs: Array<{ id: string; installed: boolean }> }>(response)).packs;
+    assert.equal(packs.find((pack) => pack.id === 'office')?.installed, false);
+    response = await harness.request('/capability-packs/office/install', { method: 'POST', headers: ownerHeaders });
+    assert.equal(response.status, 200);
+    assert.equal((await json<{ pack: { installed: boolean } }>(response)).pack.installed, true);
+  } finally {
+    await harness.records.close();
+    await harness.tasks.close();
+  }
+});
+
+test('Feishu connector verifies credentials without exposing secrets and registers tenant tools', async () => {
+  const previousIntegrationSecret = process.env.AXIOM_INTEGRATION_SECRET;
+  process.env.AXIOM_INTEGRATION_SECRET = 'feishu-integration-test-secret-32-bytes';
+  const credentials = createMemoryIntegrationCredentialStore();
+  await credentials.initialize();
+  const calls: Array<{ url: string; authorization?: string; body?: string }> = [];
+  const integrationFetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, authorization: new Headers(init?.headers).get('authorization') ?? undefined, body: typeof init?.body === 'string' ? init.body : undefined });
+    if (url.endsWith('/open-apis/auth/v3/tenant_access_token/internal')) {
+      return new Response(JSON.stringify({ code: 0, msg: 'ok', tenant_access_token: 'tenant-token-secret', expire: 7200 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.includes('/open-apis/calendar/v4/calendars')) {
+      return new Response(JSON.stringify({ code: 0, msg: 'ok', data: { calendar_list: [{ calendar_id: 'cal-1', summary: '团队日历' }] } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ code: 0, msg: 'ok', data: {} }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const tools = new ToolRegistry();
+  const harness = await createHarness({ tools, integrationCredentials: credentials, integrationFetch: integrationFetch as typeof fetch });
+  const ownerHeaders = headers('tenant-feishu', 'feishu-owner', 'owner');
+  try {
+    const connectedResponse = await harness.request('/integrations/feishu', {
+      method: 'POST', headers: ownerHeaders,
+      body: JSON.stringify({ name: '产品团队飞书', appId: 'cli_test_app', appSecret: 'never-return-app-secret', allowedAgentIds: [] }),
+    });
+    assert.equal(connectedResponse.status, 201);
+    const connectedText = await connectedResponse.text();
+    assert.equal(connectedText.includes('never-return-app-secret'), false);
+    assert.equal(connectedText.includes('tenant-token-secret'), false);
+    const connected = JSON.parse(connectedText) as { integration: { id: string; status: string }; source: { id: string; data: { registeredToolNames: string[]; authorizationStatus: string } } };
+    assert.equal(connected.integration.status, 'connected');
+    assert.equal(connected.source.data.authorizationStatus, 'ready');
+    assert.equal(connected.source.data.registeredToolNames.length, 4);
+    assert.ok(connected.source.data.registeredToolNames.every((name) => tools.catalog().some((tool) => tool.name === name)));
+
+    const listedResponse = await harness.request('/integrations', { headers: ownerHeaders });
+    const listedText = await listedResponse.text();
+    assert.equal(listedText.includes('never-return-app-secret'), false);
+    assert.equal((JSON.parse(listedText) as { integrations: unknown[] }).integrations.length, 1);
+
+    const called = await harness.request(`/tool-sources/${connected.source.id}/call`, {
+      method: 'POST', headers: ownerHeaders,
+      body: JSON.stringify({ operationId: 'feishu.list_calendars', agentId: 'researcher', args: { pageSize: 10 } }),
+    });
+    assert.equal(called.status, 200, await called.text());
+    assert.ok(calls.some((call) => call.url.includes('/calendar/v4/calendars') && call.authorization === 'Bearer tenant-token-secret'));
+    assert.equal(JSON.stringify(await credentials.list('tenant-feishu')).includes('never-return-app-secret'), false);
+
+    const secondManagerResponse = await harness.request('/integrations/feishu', {
+      method: 'POST', headers: headers('tenant-feishu', 'feishu-admin', 'admin'),
+      body: JSON.stringify({ name: '管理团队飞书', appId: 'cli_admin_app', appSecret: 'second-manager-secret', allowedAgentIds: [] }),
+    });
+    assert.equal(secondManagerResponse.status, 201);
+    const secondManager = await json<{ integration: { id: string }; source: { id: string } }>(secondManagerResponse);
+    assert.notEqual(secondManager.integration.id, connected.integration.id);
+    assert.notEqual(secondManager.source.id, connected.source.id);
+    assert.equal((await credentials.list('tenant-feishu')).length, 2);
+  } finally {
+    await harness.records.close();
+    await harness.tasks.close();
+    await credentials.close();
+    if (previousIntegrationSecret === undefined) delete process.env.AXIOM_INTEGRATION_SECRET;
+    else process.env.AXIOM_INTEGRATION_SECRET = previousIntegrationSecret;
+  }
 });
 
 const headers = (tenantId: string, userId: string, role: 'owner' | 'admin' | 'member' | 'viewer' = 'member') => {

@@ -1141,8 +1141,28 @@ const projectTabs = projectWorkspace.locator('.business-tabs');
 await projectTabs.getByRole('button', { name: '记忆', exact: true }).click();
 const projectMemoryVisible = await projectWorkspace.getByText('本地策略模式', { exact: true }).isVisible()
   && await projectWorkspace.getByText('发布前必须完成证据审核。', { exact: true }).isVisible();
-await projectTabs.getByRole('button', { name: '工具', exact: true }).click();
-const projectToolsVisible = await projectWorkspace.getByText('尚未导入外部工具', { exact: true }).isVisible();
+await projectTabs.getByRole('button', { name: '能力', exact: true }).click();
+const projectCapabilityPacksVisible = await projectWorkspace.locator('.business-pack-grid > article').count() === 7
+  && await projectWorkspace.getByText('开发与代码', { exact: true }).isVisible()
+  && await projectWorkspace.getByText('研究与论文', { exact: true }).isVisible()
+  && await projectWorkspace.getByText('办公协作', { exact: true }).isVisible()
+  && await projectWorkspace.getByText('数据分析', { exact: true }).isVisible();
+const projectRecommendedPacksEnabled = await projectWorkspace.locator('.business-pack-grid > article.installed').count() >= 4;
+const projectToolsVisible = projectCapabilityPacksVisible
+  && await projectWorkspace.locator('.business-advanced-tools').isVisible();
+await projectWorkspace.getByRole('button', { name: '连接飞书', exact: true }).first().click();
+const feishuModal = page.locator('.business-modal-panel');
+await feishuModal.waitFor({ state: 'visible' });
+const projectFeishuComposerVisible = await feishuModal.getByRole('heading', { name: '连接飞书', exact: true }).isVisible();
+const projectFeishuSecretMasked = await feishuModal.getByLabel('App Secret', { exact: true }).getAttribute('type') === 'password';
+const projectFeishuModalCentered = await feishuModal.evaluate((element) => {
+  const rect = element.getBoundingClientRect();
+  const centerOffsetX = Math.abs(rect.left + rect.width / 2 - innerWidth / 2);
+  const centerOffsetY = Math.abs(rect.top + rect.height / 2 - innerHeight / 2);
+  return centerOffsetX < 12 && centerOffsetY < 40;
+});
+await feishuModal.getByRole('button', { name: '关闭', exact: true }).click();
+await feishuModal.waitFor({ state: 'detached' });
 await projectTabs.getByRole('button', { name: '方案', exact: true }).click();
 const projectSolutionsVisible = await projectWorkspace.getByText('需求分析', { exact: true }).isVisible();
 await projectTabs.getByRole('button', { name: '项目', exact: true }).click();
@@ -1338,6 +1358,11 @@ const assertions = {
   taskFeedbackVisible,
   projectWorkspaceUsesGlass,
   projectWorkspaceTabsWork: projectMemoryVisible && projectToolsVisible && projectSolutionsVisible,
+  projectCapabilityPacksVisible,
+  projectRecommendedPacksEnabled,
+  projectFeishuComposerVisible,
+  projectFeishuSecretMasked,
+  projectFeishuModalCentered,
   projectNotificationNavigates,
   projectDecisionInteractionWorks,
   projectReviewInteractionWorks,

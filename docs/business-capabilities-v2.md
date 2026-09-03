@@ -1,6 +1,6 @@
 # 业务能力 V2
 
-更新时间：2026-09-03
+更新时间：2026-09-04
 
 这组升级解决的不是“页面上多 15 个开关”，而是让复杂任务从理解需求、分工执行、证据核验，到交付后的复用和协作都能形成可恢复的闭环。所有状态都复用现有 Task、Event、SSE、Artifact、Agent Registry 和人工审核体系，没有另建一套演示数据。
 
@@ -32,7 +32,9 @@ Agent Nexus 可以上传附件，也可以链接当前租户已有的 Artifact�
 
 项目空间可以导入 OpenAPI 3.x 或 HTTP MCP 服务。平台会发现或固定工具目录，推导能力分类和关键词，执行轻量健康探测，限制允许使用的 Agent，并记录成功率、延迟和使用次数。Router 不会把全部外部 schema 发给每个 Agent，而是结合任务语义、Agent 权限、健康、认证、风险和历史质量，每个步骤只注入 Top-K 相关工具；默认 6 个，硬上限 12 个。模型发起的原生工具调用仍经过参数校验、SSRF 防护、风险审批、调用配额、超时、审计事件和 Artifact lineage。
 
-当前版本不保存 MCP API Key、OAuth Token 或服务账号 Secret。需要认证的工具源可以先进入目录，但会保持“待授权”和禁用状态，直到下一批加密认证代理完成；这避免把凭据写进 specification 或模型上下文。
+七类能力包已经进入按租户安装的受控目录；开发与代码、研究与论文、办公协作、数据分析默认启用，内容创作、运维观测和企业业务按需开启。候选工具会先经过租户和能力包过滤，再执行 Agent 权限、健康、语义与 Top-K 筛选。
+
+通用 MCP API Key 和 OAuth 2 代理尚未完成，这类来源仍保持“待授权”和禁用。飞书服务账号是首个正式认证连接器：App Secret 使用独立 AES-256-GCM 凭据仓库，工具源只保存引用，真实换取 `tenant_access_token` 后才能读取云文档、日历、群消息或在人工审批后发送消息；Secret 和 token 不进入 specification、日志、模型上下文或 API 响应。
 
 ### 5. 证据图和引用质量门禁
 
@@ -82,7 +84,7 @@ Nexus 草稿可以保存测试用例并真实运行到任务终态。发布会�
 
 业务记录在 SQLite 和 PostgreSQL 使用同一份契约。SQLite 适合本地单人使用；PostgreSQL 支持多 Worker 共享状态、revision 并发冲突和跨进程资源解绑。PostgreSQL 首次初始化使用 advisory lock，避免多个 Worker 同时建表时触发系统目录唯一键竞态。
 
-动态外部工具在服务启动时从持久记录恢复；只有健康、已授权、启用且当前 Agent 有权使用的相关工具，才会按任务 Top-K 注册到模型目录。项目、记忆、Nexus 发布、附件快照、反馈和后续动作均按租户保存；归档、删除与 Artifact 清理会同步解除关联。
+动态外部工具在服务启动时从持久记录恢复；每个租户的能力包启停状态会一并恢复。只有属于当前租户、能力包已启用、健康、已授权且当前 Agent 有权使用的相关工具，才会按任务 Top-K 注册到模型目录。飞书凭据在 SQLite/PostgreSQL 中加密保存，AAD 绑定租户、凭据 ID 和 provider。项目、记忆、Nexus 发布、附件快照、反馈和后续动作均按租户保存；归档、删除与 Artifact 清理会同步解除关联。
 
 ## 验收命令
 
@@ -99,10 +101,12 @@ npm run qa:all
 
 2026-09-03 v2.1.0 最终验收：`npm test` 为 `379 passed / 0 failed / 1 skipped`，唯一跳过的 PostgreSQL 业务契约随后在独立临时数据库中补跑为 `1 passed / 0 failed / 0 skipped`；`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped`，所有可运行项目均在第一次尝试通过。Nexus 回归真实运行测试、发布固定版本，再验证二进制附件、Loop、历史恢复和会话隔离；发布测试任务不会进入用户的 Nexus 对话历史。扣除已补跑的 PostgreSQL，4 个未现场验收项仍是 MemoryCore、外部对象存储与 Harness/Codex sidecar，不计作外部生产通过。
 
+2026-09-04 v2.2.0-rc.1 验收：`npm test` 为 `384 passed / 0 failed / 1 skipped`；`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped`，所有可运行项目均在第一次尝试通过。真实复杂任务形成 520 个连续事件、421 个 SSE 增量和 30,415 Token，经过 Reviewer 与一次人工确认后完成。PostgreSQL 专项在独立临时库补跑为 `1 passed / 0 failed`，同时验证凭据跨实例恢复、跨租户覆盖拒绝和多 Worker 首次初始化；测试库已删除。扣除已补跑的 PostgreSQL，仍有 MemoryCore、外部对象存储和 Harness/Codex sidecar 四项外部现场验收未执行。
+
 ## 当前边界
 
 - 单节点可以使用本地文件 Artifact；多 Worker 必须配置 MinIO/S3/COS，并在目标环境验证二进制跨进程读取、租户隔离、超时、删除和失败恢复。
-- MCP/OpenAPI 目录已支持无认证服务。API Key、OAuth 2 和服务账号目前只会标记为“待授权”，加密 Secret 代理与 Token 刷新尚未交付。
-- Top-K 路由控制每轮上下文中的外部工具数量，但不替代租户配额、能力包审核、定时健康巡检和真实业务准确率评测。
+- MCP/OpenAPI 目录已支持无认证服务，飞书服务账号已支持加密凭据代理。任意 MCP 的 API Key 注入、通用 OAuth 2、Token 刷新和撤销尚未交付。
+- Top-K 路由控制每轮上下文中的外部工具数量，能力包控制租户可用范围，但不替代租户配额、市场签名审核、定时健康巡检和真实业务准确率评测。
 
 完成这 15 项后，项目仍定位为本地或受控环境的生产候选，而不是可直接暴露到公网的完整企业 SaaS。MemoryCore、MinIO/S3/COS 和 Harness/Codex sidecar 没有配置时会使用本地能力或明确降级；真实多 Worker 容量、外部身份系统、Secret Manager、外部可观测平台、备份恢复和灾难演练仍需要在目标部署环境完成。

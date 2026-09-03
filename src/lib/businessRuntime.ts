@@ -71,8 +71,43 @@ export type ToolSourceRecord = BusinessRecord & {
     operationRisks?: Record<string, 'low' | 'medium' | 'high'>;
     endpoint?: string;
     pinnedDigest?: string;
+    connectorId?: string;
+    packId?: string;
+    credentialRef?: string;
     specification: Record<string, unknown>;
   };
+};
+
+export type CapabilityPack = {
+  id: 'development' | 'research' | 'office' | 'data' | 'content' | 'operations' | 'business';
+  name: string;
+  summary: string;
+  version: string;
+  recommended: boolean;
+  order: number;
+  capabilities: string[];
+  connectors: Array<{ id: string; name: string; auth: 'none' | 'optional' | 'required'; status: 'builtin' | 'available' | 'planned'; note: string }>;
+  installed: boolean;
+  installationId?: string;
+  revision?: number;
+  connectedConnectorIds: string[];
+};
+
+export type IntegrationConnection = {
+  id: string;
+  ownerId: string;
+  provider: string;
+  name: string;
+  authType: 'api-key' | 'oauth2' | 'service-account';
+  metadata?: Record<string, unknown>;
+  secretFields: string[];
+  status: 'connected' | 'unhealthy' | 'disabled';
+  sourceId?: string;
+  healthMessage?: string;
+  lastCheckedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
 };
 
 export type ProjectDecisionRecord = BusinessRecord & {
@@ -251,6 +286,29 @@ export const listToolApprovals = (sourceId: string, signal?: AbortSignal) => fet
 
 export const decideToolApproval = (sourceId: string, approvalId: string, input: { approved: boolean; revision: number; note?: string }) =>
   jsonRequest<{ approval: ToolApprovalRecord }>(`/api/capabilities/tool-sources/${encodeURIComponent(sourceId)}/approvals/${encodeURIComponent(approvalId)}`, 'POST', input).then((body) => body.approval);
+
+export const listCapabilityPacks = (signal?: AbortSignal) => fetch('/api/capabilities/capability-packs', { signal })
+  .then((response) => readJson<{ packs: CapabilityPack[] }>(response, '能力包读取失败')).then((body) => body.packs);
+
+export const installCapabilityPack = (packId: CapabilityPack['id']) =>
+  jsonRequest<{ pack: CapabilityPack }>(`/api/capabilities/capability-packs/${encodeURIComponent(packId)}/install`, 'POST').then((body) => body.pack);
+
+export const disableCapabilityPack = (packId: CapabilityPack['id']) =>
+  jsonRequest<{ pack: CapabilityPack }>(`/api/capabilities/capability-packs/${encodeURIComponent(packId)}`, 'DELETE').then((body) => body.pack);
+
+export const listIntegrationConnections = (signal?: AbortSignal) => fetch('/api/capabilities/integrations', { signal })
+  .then((response) => readJson<{ integrations: IntegrationConnection[] }>(response, '连接读取失败')).then((body) => body.integrations);
+
+export const connectFeishu = (input: { name: string; appId: string; appSecret: string; allowedAgentIds: string[] }) =>
+  jsonRequest<{ integration: IntegrationConnection }>('/api/capabilities/integrations/feishu', 'POST', input).then((body) => body.integration);
+
+export const checkFeishuConnection = (credentialId: string) =>
+  jsonRequest<{ integration: IntegrationConnection }>(`/api/capabilities/integrations/feishu/${encodeURIComponent(credentialId)}/health`, 'POST').then((body) => body.integration);
+
+export const disconnectFeishu = async (credentialId: string) => {
+  const response = await fetch(`/api/capabilities/integrations/feishu/${encodeURIComponent(credentialId)}`, { method: 'DELETE' });
+  if (!response.ok) await readJson(response, '飞书断开失败');
+};
 
 export const listSolutions = (signal?: AbortSignal) => fetch('/api/capabilities/solutions', { signal })
   .then((response) => readJson<{ solutions: SolutionDefinition[] }>(response, '解决方案读取失败')).then((body) => body.solutions);

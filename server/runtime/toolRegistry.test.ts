@@ -49,6 +49,7 @@ test('semantic external-tool routing applies Top-K, health, authorization, and A
     timeoutMs: 5_000,
     routing: {
       sourceId: `source-${name}`,
+      tenantId: 'tenant-a',
       categories: ['research'],
       capabilityTags: ['天气', 'weather'],
       healthStatus: 'healthy',
@@ -65,19 +66,35 @@ test('semantic external-tool routing applies Top-K, health, authorization, and A
   addExternal('external_unhealthy', { healthStatus: 'unhealthy' });
   addExternal('external_pending_auth', { authorizationStatus: 'pending' });
   addExternal('external_wrong_agent', { allowedAgentIds: ['analyst'] });
+  addExternal('external_other_tenant', { tenantId: 'tenant-b' });
 
-  const selected = registry.catalogForTask({ query: '查询上海天气并形成简报', agentIds: ['builder'], externalLimit: 6 });
+  const selected = registry.catalogForTask({ tenantId: 'tenant-a', query: '查询上海天气并形成简报', agentIds: ['builder'], externalLimit: 6 });
   const externalNames = selected.filter((tool) => tool.routing).map((tool) => tool.name);
   assert.equal(externalNames.length, 6);
   assert.ok(externalNames.every((name) => /^external_weather_/u.test(name)));
   assert.equal(selected.some((tool) => tool.name === 'external_unhealthy'), false);
   assert.equal(selected.some((tool) => tool.name === 'external_pending_auth'), false);
   assert.equal(selected.some((tool) => tool.name === 'external_wrong_agent'), false);
+  assert.equal(selected.some((tool) => tool.name === 'external_other_tenant'), false);
 
-  const unrelated = registry.catalogForTask({ query: '修改本地文件中的标题', agentIds: ['builder'], externalLimit: 6 });
+  const unrelated = registry.catalogForTask({ tenantId: 'tenant-a', query: '修改本地文件中的标题', agentIds: ['builder'], externalLimit: 6 });
   assert.equal(unrelated.some((tool) => tool.routing), false);
-  const forbiddenExplicit = registry.catalogForTask({ query: '查询天气', agentIds: ['builder'], explicitNames: ['external_wrong_agent'] });
+  const forbiddenExplicit = registry.catalogForTask({ tenantId: 'tenant-a', query: '查询天气', agentIds: ['builder'], explicitNames: ['external_wrong_agent'] });
   assert.equal(forbiddenExplicit.some((tool) => tool.name === 'external_wrong_agent'), false);
+});
+
+test('capability-pack state filters tenant external tools before model injection', () => {
+  const registry = new ToolRegistry({ execute: async () => ({ stdout: '', stderr: '', exitCode: 0, durationMs: 1, auditId: 'fake' }) } as never);
+  registry.upsert({
+    name: 'external_office_calendar', description: '读取飞书日历', risk: 'medium',
+    parameters: { type: 'object', properties: {}, additionalProperties: false }, schema: z.object({}).strict(), timeoutMs: 5_000,
+    routing: { sourceId: 'office-source', tenantId: 'tenant-a', categories: ['office'], capabilityTags: ['飞书', '日历'], healthStatus: 'healthy', authorizationStatus: 'ready', allowedAgentIds: [], sourceRisk: 'medium' },
+    handler: async () => ({ stdout: 'ok', stderr: '', exitCode: 0, durationMs: 1, auditId: 'external' }),
+  });
+  registry.setTenantCapabilityPacks('tenant-a', ['development', 'research', 'data']);
+  assert.equal(registry.catalogForTask({ tenantId: 'tenant-a', query: '读取飞书日历', agentIds: ['researcher'] }).some((tool) => tool.name === 'external_office_calendar'), false);
+  registry.setTenantCapabilityPacks('tenant-a', ['development', 'research', 'office', 'data']);
+  assert.equal(registry.catalogForTask({ tenantId: 'tenant-a', query: '读取飞书日历', agentIds: ['researcher'] }).some((tool) => tool.name === 'external_office_calendar'), true);
 });
 
 test('agent.propose creates a private draft through the AgentStore boundary', async () => {

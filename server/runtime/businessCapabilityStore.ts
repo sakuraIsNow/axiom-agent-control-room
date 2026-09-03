@@ -11,6 +11,7 @@ export type BusinessRecordKind =
   | 'review-assignment'
   | 'memory'
   | 'tool-source'
+  | 'capability-pack-installation'
   | 'nexus-artifact'
   | 'nexus-test-case'
   | 'nexus-test-run'

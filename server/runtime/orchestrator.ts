@@ -1608,6 +1608,7 @@ Do not claim tools or evidence that are not available.`,
     const attemptsAllowed = step.failureStrategy === 'retry' ? this.stepMaxAttempts : 1;
     const availableTools = canUseTools && this.tools?.enabled()
       ? this.tools.catalogForTask({
+        tenantId: task.tenantId,
         query: `${task.input}\n${step.objective}`,
         agentIds: [step.role, step.agentContract?.agentId, agentId].filter((item): item is string => Boolean(item)),
         explicitNames: allowedTools,

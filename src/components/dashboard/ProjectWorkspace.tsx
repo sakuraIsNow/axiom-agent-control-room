@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Archive, BarChart3, Bell, BookOpenCheck, Boxes, BrainCircuit, Check, CheckCircle2, ChevronRight, CircleGauge,
-  Download, FolderKanban, Link2, LoaderCircle, MemoryStick, MessageSquarePlus, Network, Plus,
+  Archive, BarChart3, Bell, BookOpenCheck, Boxes, BrainCircuit, Cable, Check, CheckCircle2, ChevronRight, CircleGauge,
+  Download, FolderKanban, Github, Link2, LoaderCircle, MemoryStick, MessageSquarePlus, Network, PackageCheck, Plus,
   Play, RefreshCw, Save, Send, ShieldCheck, Sparkles, Trash2, UserPlus, Wrench, X, XCircle,
 } from 'lucide-react';
 import type { AgentMode } from '../../types';
 import {
-  archiveProject, assignProjectReviewer, checkToolSourceHealth, createMemory, createProject, createProjectComment, createProjectDecision,
+  archiveProject, assignProjectReviewer, checkFeishuConnection, checkToolSourceHealth, connectFeishu, createMemory, createProject, createProjectComment, createProjectDecision,
   createProjectTask, createToolSource, decideProjectReview, decideToolApproval, deleteMemory, estimateTask,
-  getModelSelection, linkProjectResource, listMemories, listProjectComments, listProjectDecisions,
+  disableCapabilityPack, disconnectFeishu, getModelSelection, installCapabilityPack, linkProjectResource, listCapabilityPacks,
+  listIntegrationConnections, listMemories, listProjectComments, listProjectDecisions,
   listProjectNotifications, listProjectReviews, listProjects, listSolutions, listToolApprovals, listToolSources,
   markProjectNotificationRead, removeProjectMember, setProjectMember, unlinkProjectResource, updateMemory,
   updateProject, updateProjectDecision, updateToolSource, type BusinessRecord, type MemoryRecord, type ModelSelection,
-  type ProjectDecisionRecord, type ProjectNotificationRecord, type ProjectRecord, type ReviewAssignmentRecord,
+  type CapabilityPack, type IntegrationConnection, type ProjectDecisionRecord, type ProjectNotificationRecord, type ProjectRecord, type ReviewAssignmentRecord,
   type SolutionDefinition, type TaskEstimate, type ToolApprovalRecord, type ToolSourceRecord,
 } from '../../lib/businessRuntime';
 import { userFacingError } from '../../lib/errorPresentation';
@@ -23,7 +24,7 @@ type WorkspaceTab = 'projects' | 'memory' | 'tools' | 'solutions' | 'intelligenc
 const tabs: Array<{ id: WorkspaceTab; label: string; icon: typeof FolderKanban }> = [
   { id: 'projects', label: '项目', icon: FolderKanban },
   { id: 'memory', label: '记忆', icon: MemoryStick },
-  { id: 'tools', label: '工具', icon: Wrench },
+  { id: 'tools', label: '能力', icon: Wrench },
   { id: 'solutions', label: '方案', icon: Boxes },
   { id: 'intelligence', label: '效能', icon: CircleGauge },
 ];
@@ -51,6 +52,8 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [memoryCore, setMemoryCore] = useState<'configured' | 'degraded-local-policy'>('degraded-local-policy');
   const [toolSources, setToolSources] = useState<ToolSourceRecord[]>([]);
+  const [capabilityPacks, setCapabilityPacks] = useState<CapabilityPack[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationConnection[]>([]);
   const [toolApprovals, setToolApprovals] = useState<Record<string, ToolApprovalRecord[]>>({});
   const [solutions, setSolutions] = useState<SolutionDefinition[]>([]);
   const [selection, setSelection] = useState<ModelSelection | null>(null);
@@ -61,6 +64,7 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
   const [memoryDraft, setMemoryDraft] = useState({ content: '', source: '用户创建', layer: 'L1' as MemoryRecord['data']['layer'], confidence: .9, scope: 'user' as MemoryRecord['data']['scope'], scopeId: '', expiresAt: '' });
   const [editingMemory, setEditingMemory] = useState<MemoryRecord | null>(null);
   const [toolDraft, setToolDraft] = useState({ name: '', description: '', protocol: 'openapi' as 'openapi' | 'mcp', location: 'internet' as 'internet' | 'local', version: '1.0.0', categories: '', capabilityTags: '', riskLevel: 'low' as 'low' | 'medium' | 'high', authType: 'none' as 'none' | 'api-key' | 'oauth2' | 'service-account', visibility: 'private' as 'private' | 'tenant', allowedAgents: '', specification: '' });
+  const [feishuDraft, setFeishuDraft] = useState({ name: '团队飞书', appId: '', appSecret: '', allowedAgents: '' });
   const [commentDraft, setCommentDraft] = useState('');
   const [memberDraft, setMemberDraft] = useState({ userId: '', role: 'viewer' as 'editor' | 'reviewer' | 'viewer' });
   const [resourceDraft, setResourceDraft] = useState({ type: 'task' as 'task' | 'session' | 'nexus' | 'schedule' | 'artifact' | 'decision', id: '' });
@@ -68,7 +72,7 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
   const [decisionDraft, setDecisionDraft] = useState({ title: '', decision: '', rationale: '' });
   const [reviewDraft, setReviewDraft] = useState({ reviewerId: '', targetType: 'task' as 'task' | 'nexus' | 'artifact', targetId: '', note: '' });
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
-  const [openComposer, setOpenComposer] = useState<'project' | 'memory' | 'tool' | null>(null);
+  const [openComposer, setOpenComposer] = useState<'project' | 'memory' | 'tool' | 'feishu' | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -82,15 +86,18 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
     setError(null);
     const controller = new AbortController();
     try {
-      const [nextProjects, memoryResult, nextTools, nextSolutions, nextSelection, nextNotifications] = await Promise.all([
+      const [nextProjects, memoryResult, nextTools, nextPacks, nextIntegrations, nextSolutions, nextSelection, nextNotifications] = await Promise.all([
         listProjects(controller.signal), listMemories(controller.signal), listToolSources(controller.signal),
-        listSolutions(controller.signal), getModelSelection(controller.signal), listProjectNotifications(controller.signal),
+        listCapabilityPacks(controller.signal), listIntegrationConnections(controller.signal), listSolutions(controller.signal),
+        getModelSelection(controller.signal), listProjectNotifications(controller.signal),
       ]);
       setProjects(nextProjects);
       setSelectedProjectId((current) => current && nextProjects.some((project) => project.id === current) ? current : nextProjects[0]?.id ?? null);
       setMemories(memoryResult.memories);
       setMemoryCore(memoryResult.memoryCore);
       setToolSources(nextTools);
+      setCapabilityPacks(nextPacks);
+      setIntegrations(nextIntegrations);
       const approvalResults = await Promise.allSettled(nextTools.map(async (source) => [source.id, await listToolApprovals(source.id, controller.signal)] as const));
       setToolApprovals(Object.fromEntries(approvalResults.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])));
       setSolutions(nextSolutions);
@@ -301,6 +308,39 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
     setToolApprovals((current) => ({ ...current, [sourceId]: (current[sourceId] ?? []).map((item) => item.id === updated.id ? updated : item) }));
   });
 
+  const toggleCapabilityPack = (pack: CapabilityPack) => void run(async () => {
+    const updated = pack.installed ? await disableCapabilityPack(pack.id) : await installCapabilityPack(pack.id);
+    setCapabilityPacks((current) => current.map((item) => item.id === pack.id ? { ...item, ...updated, connectedConnectorIds: item.connectedConnectorIds } : item));
+  });
+
+  const saveFeishu = () => void run(async () => {
+    const connection = await connectFeishu({
+      name: feishuDraft.name.trim() || '团队飞书', appId: feishuDraft.appId.trim(), appSecret: feishuDraft.appSecret,
+      allowedAgentIds: feishuDraft.allowedAgents.split(',').map((item) => item.trim()).filter(Boolean),
+    });
+    setIntegrations((current) => [connection, ...current.filter((item) => item.provider !== 'feishu' || item.ownerId !== connection.ownerId)]);
+    setCapabilityPacks((current) => current.map((pack) => pack.id === 'office'
+      ? { ...pack, installed: true, connectedConnectorIds: [...new Set([...pack.connectedConnectorIds, 'feishu'])] }
+      : pack));
+    setFeishuDraft({ name: '团队飞书', appId: '', appSecret: '', allowedAgents: '' });
+    setOpenComposer(null);
+    await load();
+  });
+
+  const verifyFeishu = (connection: IntegrationConnection) => void run(async () => {
+    const updated = await checkFeishuConnection(connection.id);
+    setIntegrations((current) => current.map((item) => item.id === updated.id ? updated : item));
+  });
+
+  const removeFeishu = (connection: IntegrationConnection) => void run(async () => {
+    await disconnectFeishu(connection.id);
+    setIntegrations((current) => current.filter((item) => item.id !== connection.id));
+    setCapabilityPacks((current) => current.map((pack) => pack.id === 'office'
+      ? { ...pack, connectedConnectorIds: pack.connectedConnectorIds.filter((id) => id !== 'feishu') }
+      : pack));
+    setToolSources((current) => current.filter((source) => source.data.connectorId !== 'feishu'));
+  });
+
   const runEstimate = () => estimateInput.trim() && void run(async () => {
     setEstimate(await estimateTask(estimateInput.trim(), estimateMode));
   });
@@ -310,7 +350,7 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
   return <div className="business-workspace">
     <header className="business-header">
       <div><span className="business-kicker"><Network size={14} />协作与业务资产</span><h1>项目空间</h1></div>
-      <div className="business-header-actions"><button type="button" className={notifications.some((item) => item.status === 'unread') ? 'has-notice' : ''} onClick={() => setNotificationsOpen((current) => !current)} title="项目通知"><Bell size={15} /><span>{notifications.filter((item) => item.status === 'unread').length}</span></button><button type="button" onClick={() => void load()} disabled={loading || busy} title="刷新"><RefreshCw size={15} className={loading ? 'spin' : ''} /></button>{tab === 'projects' && <button type="button" className="primary" onClick={() => setOpenComposer('project')}><Plus size={15} />新建项目</button>}{tab === 'memory' && <button type="button" className="primary" onClick={() => { setEditingMemory(null); setMemoryDraft({ content: '', source: '用户创建', layer: 'L1', confidence: .9, scope: 'user', scopeId: '', expiresAt: '' }); setOpenComposer('memory'); }}><Plus size={15} />添加记忆</button>}{tab === 'tools' && <button type="button" className="primary" onClick={() => setOpenComposer('tool')}><Plus size={15} />导入工具</button>}</div>
+      <div className="business-header-actions"><button type="button" className={notifications.some((item) => item.status === 'unread') ? 'has-notice' : ''} onClick={() => setNotificationsOpen((current) => !current)} title="项目通知"><Bell size={15} /><span>{notifications.filter((item) => item.status === 'unread').length}</span></button><button type="button" onClick={() => void load()} disabled={loading || busy} title="刷新"><RefreshCw size={15} className={loading ? 'spin' : ''} /></button>{tab === 'projects' && <button type="button" className="primary" onClick={() => setOpenComposer('project')}><Plus size={15} />新建项目</button>}{tab === 'memory' && <button type="button" className="primary" onClick={() => { setEditingMemory(null); setMemoryDraft({ content: '', source: '用户创建', layer: 'L1', confidence: .9, scope: 'user', scopeId: '', expiresAt: '' }); setOpenComposer('memory'); }}><Plus size={15} />添加记忆</button>}{tab === 'tools' && <><button type="button" onClick={() => setOpenComposer('tool')}><Plus size={15} />导入 MCP</button><button type="button" className="primary" onClick={() => setOpenComposer('feishu')}><Cable size={15} />连接飞书</button></>}</div>
     </header>
 
     {notificationsOpen && <section className="business-notifications glass-panel"><div className="business-pane-head"><span>项目通知</span><button type="button" aria-label="关闭通知" onClick={() => setNotificationsOpen(false)}><X size={14} /></button></div>{notifications.map((notification) => <button type="button" key={notification.id} className={notification.status === 'unread' ? 'unread' : ''} onClick={() => readNotification(notification)}><Bell size={13} /><span><strong>{notification.data.type === 'mention' ? '有人提到了你' : notification.data.type === 'review-assignment' ? '新的审核任务' : '审核已有结果'}</strong><small>{String(notification.data.preview ?? notification.data.targetId ?? '')}</small></span><em>{fmtTime(notification.updatedAt)}</em></button>)}{notifications.length === 0 && <div className="business-empty">暂无项目通知</div>}</section>}
@@ -345,8 +385,23 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
     </section>}
 
     {tab === 'tools' && <section className="business-section glass-panel">
-      <div className="business-section-head"><div><span>MCP / OpenAPI 能力目录</span><p>Agent 会按任务自动选择少量可用工具。</p></div><em>{toolSources.filter((item) => item.status === 'enabled' && item.data.healthStatus === 'healthy' && item.data.authorizationStatus !== 'pending').length} 个可用</em></div>
-      <div className="business-tool-list">{toolSources.map((source) => {
+      <div className="business-section-head"><div><span>能力包</span><p>按需要启用，Agent 每轮只选择少量相关工具。</p></div><em>{capabilityPacks.filter((pack) => pack.installed).length} / {capabilityPacks.length} 已安装</em></div>
+      <div className="business-capability-scroll">
+        <div className="business-pack-grid">{capabilityPacks.map((pack) => <article key={pack.id} className={pack.installed ? 'installed' : ''}>
+          <header><span>{pack.id === 'development' ? <Github size={18} /> : pack.id === 'office' ? <Cable size={18} /> : <PackageCheck size={18} />}</span><div><strong>{pack.name}</strong><small>v{pack.version}{pack.recommended ? ' · 推荐' : ''}</small></div><button type="button" className={pack.installed ? 'toggle active' : 'toggle'} onClick={() => toggleCapabilityPack(pack)} disabled={busy} aria-label={pack.installed ? `停用${pack.name}` : `安装${pack.name}`}><i /></button></header>
+          <p>{pack.summary}</p>
+          <div className="business-pack-capabilities">{pack.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>
+          <footer><span>{pack.connectors.filter((connector) => pack.connectedConnectorIds.includes(connector.id) || connector.status === 'builtin').length} / {pack.connectors.length} 个连接可用</span><em>{pack.installed ? '已加入路由' : '未加入路由'}</em></footer>
+        </article>)}</div>
+
+        <section className="business-connector-band">
+          <div><span className="business-connector-mark"><Cable size={19} /></span><div><strong>飞书协作</strong><p>让 Agent 读取云文档、日历和群聊；发送消息前仍需人工确认。</p></div></div>
+          {integrations.filter((item) => item.provider === 'feishu').map((connection) => <div className="business-connection-row" key={connection.id}><span><i className={connection.status} /><strong>{connection.name}</strong><small>{connection.status === 'connected' ? '已连接' : connection.status === 'unhealthy' ? '连接异常' : '已停用'} · Secret 已加密</small></span><button type="button" onClick={() => verifyFeishu(connection)} disabled={busy}><RefreshCw size={13} />检查</button><button type="button" className="danger" onClick={() => removeFeishu(connection)} disabled={busy}>断开</button></div>)}
+          {!integrations.some((item) => item.provider === 'feishu') && <button type="button" className="primary" onClick={() => setOpenComposer('feishu')}><Cable size={14} />连接飞书</button>}
+        </section>
+
+        <details className="business-advanced-tools" open={toolSources.some((source) => !source.data.connectorId)}><summary><span>高级工具目录</span><small>{toolSources.filter((source) => !source.data.connectorId).length} 个 MCP / OpenAPI 来源</small></summary>
+        <div className="business-tool-list">{toolSources.filter((source) => !source.data.connectorId).map((source) => {
         const approvals = (toolApprovals[source.id] ?? []).filter((approval) => approval.status === 'awaiting_approval');
         const health = source.data.healthStatus ?? 'unknown';
         const pendingAuthorization = source.data.authorizationStatus === 'pending';
@@ -361,7 +416,8 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
           {source.data.healthMessage && health === 'unhealthy' && <small className="business-tool-warning">{source.data.healthMessage}</small>}
           {approvals.map((approval) => <div className="business-tool-approval" key={approval.id}><span><strong>高风险调用待确认</strong><small>{approval.data.operationId} · {approval.data.agentId}</small></span><button type="button" onClick={() => decideApproval(source.id, approval, false)}>拒绝</button><button type="button" className="approve" onClick={() => decideApproval(source.id, approval, true)}>允许本次</button></div>)}
         </article>;
-      })}{!loading && toolSources.length === 0 && <div className="business-empty"><Wrench size={24} /><span>尚未导入外部工具</span></div>}</div>
+      })}{!loading && !toolSources.some((source) => !source.data.connectorId) && <div className="business-empty"><Wrench size={24} /><span>尚未导入外部工具</span></div>}</div></details>
+      </div>
     </section>}
 
     {tab === 'solutions' && <section className="business-section glass-panel solutions">
@@ -374,7 +430,7 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
       <section className="business-model-policy glass-panel"><div className="business-section-head"><div><span>模型选择</span><p>每次选择都有可解释依据。</p></div><ShieldCheck size={17} /></div><div className="business-model-list">{selection?.candidates.map((candidate) => <article key={candidate.model}><div><strong>{candidate.model}</strong><em>{candidate.attempts} 次</em></div><p>{candidate.explanation}</p><span><i style={{ width: `${Math.max(4, Math.round((candidate.successRate ?? (candidate.attempts ? candidate.successes / candidate.attempts : 0)) * 100))}%` }} /></span></article>)}{selection?.candidates.length === 0 && <div className="business-empty"><CircleGauge size={23} /><span>模型统计会在真实任务完成后出现</span></div>}</div><footer>{selection?.selectionPolicy}</footer></section>
     </div>}
 
-    {openComposer && <div className="business-modal" role="dialog" aria-modal="true" onPointerDown={(event) => { if (event.target === event.currentTarget) setOpenComposer(null); }}><form className="business-modal-panel glass-panel" onSubmit={(event) => { event.preventDefault(); if (openComposer === 'project') submitProject(); else if (openComposer === 'memory') submitMemory(); else submitTool(); }}><header><div><small>{openComposer === 'project' ? '新的协作空间' : openComposer === 'memory' ? '可控长期记忆' : '外部能力目录'}</small><h2>{openComposer === 'project' ? '创建项目' : openComposer === 'memory' ? editingMemory ? '编辑记忆' : '添加记忆' : '导入工具'}</h2></div><button type="button" aria-label="关闭" onClick={() => setOpenComposer(null)}><X size={16} /></button></header>
+    {openComposer && <div className="business-modal" role="dialog" aria-modal="true" onPointerDown={(event) => { if (event.target === event.currentTarget) setOpenComposer(null); }}><form className="business-modal-panel glass-panel" onSubmit={(event) => { event.preventDefault(); if (openComposer === 'project') submitProject(); else if (openComposer === 'memory') submitMemory(); else if (openComposer === 'feishu') saveFeishu(); else submitTool(); }}><header><div><small>{openComposer === 'project' ? '新的协作空间' : openComposer === 'memory' ? '可控长期记忆' : openComposer === 'feishu' ? '办公协作连接' : '外部能力目录'}</small><h2>{openComposer === 'project' ? '创建项目' : openComposer === 'memory' ? editingMemory ? '编辑记忆' : '添加记忆' : openComposer === 'feishu' ? '连接飞书' : '导入工具'}</h2></div><button type="button" aria-label="关闭" onClick={() => setOpenComposer(null)}><X size={16} /></button></header>
       {openComposer === 'project' && <div className="business-form"><label><span>项目名称</span><input required maxLength={120} value={projectDraft.name} onChange={(event) => setProjectDraft((current) => ({ ...current, name: event.target.value }))} /></label><label><span>目标</span><textarea required rows={4} value={projectDraft.goal} onChange={(event) => setProjectDraft((current) => ({ ...current, goal: event.target.value }))} /></label><label><span>验收标准</span><textarea rows={4} placeholder="每行一条" value={projectDraft.acceptance} onChange={(event) => setProjectDraft((current) => ({ ...current, acceptance: event.target.value }))} /></label><label><span>项目策略</span><textarea rows={3} value={projectDraft.strategy} onChange={(event) => setProjectDraft((current) => ({ ...current, strategy: event.target.value }))} /></label></div>}
       {openComposer === 'memory' && <div className="business-form"><label><span>记忆内容</span><textarea required rows={6} value={memoryDraft.content} onChange={(event) => setMemoryDraft((current) => ({ ...current, content: event.target.value }))} /></label><div className="business-form-row"><label><span>层级</span><select value={memoryDraft.layer} onChange={(event) => setMemoryDraft((current) => ({ ...current, layer: event.target.value as typeof current.layer }))}>{Object.entries(memoryLayerLabel).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>作用域</span><select value={memoryDraft.scope} onChange={(event) => setMemoryDraft((current) => ({ ...current, scope: event.target.value as typeof current.scope }))}><option value="user">用户</option><option value="project">项目</option><option value="session">会话</option><option value="agent">Agent</option></select></label></div>{memoryDraft.scope !== 'user' && <label><span>{memoryDraft.scope === 'project' ? '项目 ID' : memoryDraft.scope === 'session' ? '会话 ID' : 'Agent ID'}</span><input required value={memoryDraft.scopeId} onChange={(event) => setMemoryDraft((current) => ({ ...current, scopeId: event.target.value }))} /></label>}<div className="business-form-row"><label><span>置信度</span><input type="number" min="0" max="1" step="0.05" value={memoryDraft.confidence} onChange={(event) => setMemoryDraft((current) => ({ ...current, confidence: Number(event.target.value) }))} /></label><label><span>过期时间（可选）</span><input type="datetime-local" value={memoryDraft.expiresAt} onChange={(event) => setMemoryDraft((current) => ({ ...current, expiresAt: event.target.value }))} /></label></div><label><span>来源</span><input required value={memoryDraft.source} onChange={(event) => setMemoryDraft((current) => ({ ...current, source: event.target.value }))} /></label></div>}
       {openComposer === 'tool' && <div className="business-form">
@@ -386,7 +442,15 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
         <label><span>允许使用的 Agent</span><input value={toolDraft.allowedAgents} onChange={(event) => setToolDraft((current) => ({ ...current, allowedAgents: event.target.value }))} placeholder="逗号分隔；留空表示全部" /></label>
         <label><span>{toolDraft.protocol === 'openapi' ? 'OpenAPI JSON' : 'MCP 配置 JSON'}</span><textarea required rows={9} spellCheck={false} value={toolDraft.specification} onChange={(event) => setToolDraft((current) => ({ ...current, specification: event.target.value }))} placeholder={toolDraft.protocol === 'mcp' ? '{"endpoint":"https://.../mcp"}' : '{"openapi":"3.1.0","servers":[...],"paths":{...}}'} /></label>
       </div>}
-      <footer><button type="button" onClick={() => setOpenComposer(null)}>取消</button><button type="submit" className="primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}确认</button></footer>
+      {openComposer === 'feishu' && <div className="business-form business-feishu-form">
+        <div className="business-form-note"><ShieldCheck size={16} /><span>凭据由服务端加密保存，不会发给模型，也不会出现在工具定义和日志中。</span></div>
+        <label><span>连接名称</span><input required maxLength={120} value={feishuDraft.name} onChange={(event) => setFeishuDraft((current) => ({ ...current, name: event.target.value }))} placeholder="例如：产品团队飞书" /></label>
+        <label><span>App ID</span><input required autoComplete="off" value={feishuDraft.appId} onChange={(event) => setFeishuDraft((current) => ({ ...current, appId: event.target.value }))} placeholder="cli_xxxxxxxxxxxxxxxx" /></label>
+        <label><span>App Secret</span><input required type="password" autoComplete="new-password" value={feishuDraft.appSecret} onChange={(event) => setFeishuDraft((current) => ({ ...current, appSecret: event.target.value }))} placeholder="仅本次提交使用" /></label>
+        <label><span>允许使用的 Agent（可选）</span><input value={feishuDraft.allowedAgents} onChange={(event) => setFeishuDraft((current) => ({ ...current, allowedAgents: event.target.value }))} placeholder="留空表示由路由按任务选择；多个 ID 用逗号分隔" /></label>
+        <div className="business-feishu-scopes"><span>建议在飞书开放平台授予</span><p>云文档读取、日历读取、群消息读取、以应用身份发送消息。未获授权的操作会明确失败，不会静默降级。</p></div>
+      </div>}
+      <footer><button type="button" onClick={() => setOpenComposer(null)}>取消</button><button type="submit" className="primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{openComposer === 'feishu' ? '验证并连接' : '确认'}</button></footer>
     </form></div>}
   </div>;
 }

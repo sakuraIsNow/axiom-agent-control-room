@@ -54,6 +54,7 @@ export type RegisteredTool = {
   handler?: (input: Record<string, unknown>, context: ToolContext) => Promise<SandboxResult>;
   routing?: {
     sourceId: string;
+    tenantId: string;
     categories: string[];
     capabilityTags: string[];
     healthStatus: 'healthy' | 'unhealthy' | 'pending' | 'unknown';
@@ -202,6 +203,7 @@ const signatureFor = (taskId: string, stepId: string, name: string, args: Record
 
 export class ToolRegistry {
   private readonly tools = new Map<string, RegisteredTool>();
+  private readonly tenantCapabilityPacks = new Map<string, Set<string>>();
   private readonly workspaceRoot = resolve(process.env.AXIOM_AGENT_WORKSPACE_ROOT?.trim() || process.cwd());
   private readonly usage = new Map<string, { calls: number; windowStartedAt: number }>();
   private readonly auditLog: ToolAuditRecord[] = [];
@@ -491,11 +493,15 @@ export class ToolRegistry {
     return removed;
   }
 
+  setTenantCapabilityPacks(tenantId: string, packIds: string[]) {
+    this.tenantCapabilityPacks.set(tenantId, new Set(packIds));
+  }
+
   catalog() {
     return [...this.tools.values()].map(({ name, description, risk, parameters, timeoutMs, executionBoundary = 'sandbox', routing }) => ({ name, description, risk, parameters, timeoutMs, executionBoundary, approvalRequired: risk === 'high' || risk === 'critical', ...(routing ? { routing: { ...routing, categories: [...routing.categories], capabilityTags: [...routing.capabilityTags], allowedAgentIds: [...routing.allowedAgentIds] } } : {}) }));
   }
 
-  catalogForTask(input: { query: string; agentIds: string[]; explicitNames?: string[]; externalLimit?: number }) {
+  catalogForTask(input: { tenantId: string; query: string; agentIds: string[]; explicitNames?: string[]; externalLimit?: number }) {
     const explicit = new Set(input.explicitNames ?? []);
     const normalizedQuery = input.query.toLowerCase();
     const terms = [...new Set(normalizedQuery.match(/[a-z0-9_.-]{2,}|[\u4e00-\u9fff]{2,}/gu) ?? [])].slice(0, 80);
@@ -505,9 +511,13 @@ export class ToolRegistry {
     const candidates = catalog.flatMap((tool) => {
       const routing = tool.routing;
       if (!routing) return [];
+      if (routing.tenantId !== input.tenantId) return [];
       if (explicit.size && !explicit.has(tool.name)) return [];
       if (routing.healthStatus !== 'healthy' || !['ready', 'not-required'].includes(routing.authorizationStatus)) return [];
       if (routing.allowedAgentIds.length && !routing.allowedAgentIds.some((agentId) => identities.has(agentId))) return [];
+      const installedPacks = this.tenantCapabilityPacks.get(input.tenantId);
+      if (installedPacks && routing.categories.some((category) => ['development', 'research', 'office', 'data', 'content', 'operations', 'business'].includes(category))
+        && !routing.categories.some((category) => installedPacks.has(category))) return [];
       const haystack = `${tool.name} ${tool.description} ${routing.categories.join(' ')} ${routing.capabilityTags.join(' ')}`.toLowerCase();
       let score = explicit.has(tool.name) ? 10_000 : 0;
       for (const term of terms) if (haystack.includes(term) || normalizedQuery.includes(term) && routing.capabilityTags.some((tag) => tag.toLowerCase().includes(term))) score += term.length >= 4 ? 8 : 4;
