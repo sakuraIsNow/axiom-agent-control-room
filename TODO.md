@@ -134,7 +134,7 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [x] ACP 任务委托桥接：新增 `HarnessTaskBridge` 和任务级 start/resume/interrupt API；仅暂停任务允许委托，外部事件经租户/任务校验、去重后写入 TaskStore，并在 turn 终态回写任务结果和可恢复状态。
 - [x] Codex app-server JSON-RPC stdio/sidecar transport：已实现 v2 `initialize`/`thread`/`turn`/`item`/审批协议和可恢复事件桥接；真实 sidecar 仍需在部署环境固定 commit、workspace 与审批策略后现场验收。
 - [x] 外部 Harness 审批回放、Artifact lineage、失败补偿和跨重启恢复：已完成 durable approval、事件游标恢复、断流暂停和协议级 fake sidecar 回归；真实 sidecar 集成仍需外部服务凭据。
-- [ ] Agent Graph 持久化升级为 parent/child thread edge，支持 open/closed 状态和 breadth-first descendants。
+- [x] Agent Graph 持久化升级为 parent/child Thread edge：从持久 `RuntimeEvent` 投影 open/closed 状态、稳定父子关系和 breadth-first descendants；新增租户隔离的 `GET /api/tasks/:taskId/thread-graph` 查询，不以进程内临时 Map 作为唯一真值。
 - [x] **路线决策（新增）**：先交付 DeepSeek ACP stdio 的隔离 transport 和协议回归，保持 Builtin Runtime 为默认权威执行者；未实现的 Codex/HTTP transport 和 orchestrator 委托继续保持未完成状态，能力接口不会把“握手通过”误报为“任务已接管”。
 
 ### P1.4 记忆和模型适配
@@ -277,9 +277,9 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [ ] S3/COS/MinIO Artifact 对象存储与生命周期管理。
 - [ ] OIDC / HMAC principal / RBAC / 租户配额 / Secret Manager。
 - [ ] OpenTelemetry trace、日志关联和外部 Prometheus；`metrics.ts` 当前是纯内存 counters，进程重启即清零，多副本部署下每次滚动发布会产生假的指标断崖，需评估跨重启持久化或跨副本聚合方案。
-- [ ] 3D 节点悬停、Graph 双向联动、低性能降级和 WebGL 失败后备视图。
-- [ ] Three.js、R3F、postprocessing 按需分包，降低约 1 MB 场景 chunk。
-- [ ] 移动端 Graph 全屏、节点详情抽屉和长日志虚拟滚动。
+- [x] 3D 节点悬停、Graph 双向联动和低性能降级：生产入口采用独立于 WebGL 的 CSS 3D 渲染，按设备能力、节能模式、减少动态偏好、页面可见性和视口交叉状态自动降级或暂停。
+- [x] 场景生产分包已按真实依赖修正：当前 `AxiomDashboard` 未挂载旧 R3F/WebGL 场景，生产产物不再生成或预加载 Three.js、R3F、postprocessing chunk；`react-dom/client` 归入 React framework chunk，删除了误导性的约 1 MB 旧结论。
+- [x] 移动端 Graph 全屏、节点详情抽屉和长事件虚拟滚动：节点支持鼠标、触摸、键盘选择，桌面/移动端均可全屏；运行事件上限为 500 条并按固定行高窗口化渲染。
 - [ ] MCP / OpenAPI 工具市场；Agent Studio 阶段一和 Planner 动态角色接入已在 P1.10 完成，本节剩余工具授权打磨、用量统计与市场，详见 `docs/dashboard-agentstudio-roadmap.md` Part B.2-B.4。
 - [ ] 多租户计费、配额、审计查询和行业工作流。
 
@@ -574,7 +574,8 @@ npm run qa:search-agent
 - [x] 运行观测告警第一阶段：新增 `GET /api/runtime/alerts`，从持久化队列、Worker 租约、模型/工具失败、人工待确认、Artifact 清理和 Readiness 生成严重/关注/提示三级告警；阈值可由环境变量调整，前端运行观测已展示。
 - [ ] 插件签名、兼容性检查、版本回滚、权限声明和插件市场。
 - [ ] Provider 精确 tokenizer 与压缩质量评估；摘要版本、覆盖范围、来源 digest 和关键引用持久化已完成。
-- [ ] 登录开屏、3D Graph 降级视图、移动端节点抽屉、长日志虚拟滚动和场景按需分包。
+- [ ] 登录开屏与首次使用引导。
+- [x] 3D Graph 降级视图、移动端节点抽屉、长事件虚拟滚动和生产场景分包；当前生产 Graph 使用 CSS 3D，不依赖 WebGL，低动态与不可见状态会自动停止动画。
 
 ### 2026-08-29 运行验收与一致性修复
 - [x] 完成标准门禁：`npm run check`、`npm test`（191/191；后续回归扩展至 214/214）、`npm run build`、`qa:runtime`、`qa:visual`、`qa:operations`、`qa:routing`、`qa:business`、会话/删除/审核/Workflow/Nexus/隔离/搜索/聊天/3D Graph 回归全部通过，浏览器控制台无错误。
@@ -708,3 +709,13 @@ npm run qa:search-agent
 4. [x] HarnessEval-W 业务评测扩展：`qa:business` 改为分段评测，持续保存 metadata、partial progress 和 artifact validation；覆盖按难度路由、跨轮新增/跳过 Agent、Skill 漂移、人工要求单次应用、Harness steer 真实状态、长结果引用/存储故障、摘要恢复和 Checkpoint 冲突。当前 6/6 分段通过。
 5. [ ] DeepSeek ACP / Codex sidecar 现场验收：2026-09-02 已用本机 Codex CLI `0.149.1` 完成真实 app-server v2 stdio 握手，协议、版本、Thread/Turn/steer/审批/回放能力识别通过；DeepSeek rc.8 源码包需要 Node >=22.19 与 pnpm。仍需在目标部署固定版本、workspace、审批策略并完成真实任务 steer、断流回放、故障注入和跨 Worker 接管，不能用协议 fake sidecar 或单次握手代替。
 6. [x] 本批发布门禁：`npm run check`、`npm test`（320/320）、`npm run build` 和 `npm run qa:all` 全部通过；生产门禁为 24 passed / 0 failed / 4 skipped，跳过项均为未配置的外部服务现场验收。Checkpoint 非法 ID 统一返回 400，人工审核浏览器回归不再产生 PostgreSQL UUID 500。
+
+### 2026-09-03 Agent Graph 韧性与 Harness Thread 拓扑
+
+- [x] 改动前保存 `frontend-backup/20260903-pre-graph-resilience` 快照；生产 Agent Graph 保持 CSS 3D 单一渲染链路，不重新引入未挂载的第二套 WebGL Canvas。
+- [x] Graph 支持悬停暂停、拖拽防误触、鼠标/触摸/键盘选择、节点与详情双向联动、上一个/下一个 Agent、桌面与移动全屏，以及移动端底部详情抽屉。
+- [x] 节点详情展示真实状态、角色、Token、耗时、尝试次数、工具次数、上游 Agent、Skill 和失败原因；运行事件扩展到最多 500 条，相同短周期事件合并并使用窗口化列表控制 DOM 规模。
+- [x] 根据 `prefers-reduced-motion`、CPU 核数、设备内存和省流设置进入低动态模式；页面隐藏或 Graph 离开视口时停止旋转，视觉 QA 验证全屏层不会被页面头部遮挡。
+- [x] 新增 provider-neutral Harness Thread Graph，从持久任务事件投影父子 Thread、open/closed 状态和稳定广度优先后代；终态任务关闭全部 Thread，`thread.resumed` 可重新打开，非法循环关系被拒绝。
+- [x] 新增 `GET /api/tasks/:taskId/thread-graph` 与 `?root=<threadId>`，覆盖不存在根 Thread、跨租户 404、终态关闭和 BFS descendants；Codex `thread/closed` 已归一化为 `thread.closed`。
+- [x] 本批完整门禁通过：`npm run check`、`npm test`（339 passed / 0 failed）、`npm run build`、`npm run qa:visual`、`npm run qa:agentgraph3d` 和 `npm run qa:all`（24 passed / 0 failed / 4 skipped）。复杂 Runtime 产生 733 个连续事件、604 个流式增量和 36,556 Token；4 个跳过项仍仅对应未配置的外部服务现场验收。

@@ -1,6 +1,6 @@
 # Harness 与 Codex Transport
 
-更新时间：2026-09-02
+更新时间：2026-09-03
 
 ## 统一边界
 
@@ -26,6 +26,14 @@
 `HarnessTaskBridge` 只允许暂停任务开始外部委托，消费事件时校验 task/tenant/run 边界并按外部序列去重。异常断流会持久化 `harness.disconnected`、把任务置为 paused，并由启动恢复和 20 秒扫描从最近 `harness.connected` 事件重建 Thread、游标和输出。
 
 外部 `approval.requested` 会重建为任务级 `ToolApproval`，包含 request ID、工具名、参数、风险等级和 requestedAt；审批决定转发给活动 sidecar，同时写入 durable `approval.resolved`。同一 request ID 只能从 pending 变为 approved/rejected 一次。重启时从事件回放 pending approval，恢复订阅和游标后再次等待人工决定。
+
+## 持久 Thread Graph
+
+`thread.started`、`thread.resumed` 和 `thread.closed` 事件会从持久 `RuntimeEvent` 投影成 provider-neutral Thread Graph。每个节点包含 `threadId`、可选 `parentThreadId`、`open/closed` 状态、首次/最近事件序号和时间；任务进入 `completed`、`failed` 或 `cancelled` 后，投影中的全部 Thread 自动关闭。投影会拒绝外部 sidecar 提交的自环或父子循环关系，节点输出使用稳定的广度优先顺序。
+
+查询接口为 `GET /api/tasks/:taskId/thread-graph`；传入 `?root=<threadId>` 时只返回指定 Thread 及其 breadth-first descendants。接口先按当前 principal 的 `tenantId` 查询任务，跨租户访问和不存在的根 Thread 均返回 `404`。Graph 由持久任务事件重建，因此进程重启不会丢失拓扑；它是诊断和恢复视图，不替代 sidecar 自身的活动连接状态。
+
+Codex app-server 的 `thread/closed` 通知会归一化为 `thread.closed`。DeepSeek ACP 当前没有等价通知时，终态任务仍会关闭投影中的全部 Thread。
 
 协议级 fake sidecar 测试已覆盖消息增量、终态、跨租户丢弃、断点恢复、审批回放和重复审批拒绝。`npm run qa:harness-live` 会在配置真实命令时通过运行中的 Axiom API 检查被选择的 transport、协议兼容性、显式启用状态和能力列表；未配置命令时结果为 `skipped`，不会伪装成已接入。
 

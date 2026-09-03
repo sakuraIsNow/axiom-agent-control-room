@@ -1235,6 +1235,121 @@
   50% { transform: translateZ(22px) translateY(-1px) scale(1.035); }
 }
 
+/* Production graph controls: CSS 3D remains available without a WebGL context. */
+.dash-agent-graph-actions button:disabled { opacity: .34; cursor: not-allowed; }
+.dash-agent-signal-node:hover .dash-agent-sphere,
+.dash-agent-signal-node:focus-visible .dash-agent-sphere {
+  transform: translateZ(23px) translateY(-2px) scale(1.045);
+  box-shadow: inset -11px -13px 18px rgb(70 80 72 / 18%), inset 8px 8px 14px rgb(255 255 255 / 92%), 0 0 0 3px rgb(var(--dash-accent-rgb) / 12%), 0 18px 34px rgb(0 0 0 / 44%);
+}
+.dash-agent-signal-node:focus-visible { outline: 0; }
+.dash-agent-signal-node:focus-visible .dash-agent-node-meta { color: var(--dash-ink); text-decoration: underline; text-decoration-color: rgb(var(--dash-accent-rgb) / 52%); text-underline-offset: 3px; }
+.dash-agent-signal-graph.is-expanded {
+  position: fixed;
+  z-index: 1300;
+  inset: 12px;
+  grid-template-rows: 58px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgb(240 248 244 / 28%);
+  border-radius: 10px;
+  color: var(--dash-ink);
+  background:
+    radial-gradient(90% 75% at 6% -18%, rgb(255 255 255 / 17%), transparent 48%),
+    linear-gradient(148deg, rgb(var(--dash-surface-rgb) / 96%), rgb(var(--dash-surface-strong-rgb) / 99%));
+  box-shadow: 0 0 0 100vmax rgb(0 0 0 / 62%), 0 35px 120px rgb(0 0 0 / 82%), inset 0 1px 0 rgb(255 255 255 / 18%);
+  backdrop-filter: blur(36px) saturate(138%);
+  -webkit-backdrop-filter: blur(36px) saturate(138%);
+}
+.dash-agent-signal-graph.is-expanded > header { padding: 0 18px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-graph-stage { perspective: 1300px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-signal-node { width: 132px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-sphere { width: 82px; height: 82px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-eye { top: 28px; width: 7px; height: 16px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-eye.eye-left { left: 25px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-eye.eye-right { right: 25px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-mouth { top: 52px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-ribbon { top: 41px; width: 108px; height: 40px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-ribbon.ribbon-b { width: 94px; height: 55px; }
+.dash-agent-signal-graph.is-expanded .dash-agent-node-meta em { max-width: 104px; font-size: 12px; }
+.dash-agent-graph-panel {
+  position: absolute;
+  z-index: 20;
+  top: 55px;
+  right: 8px;
+  display: grid;
+  grid-template-rows: 42px minmax(0, 1fr);
+  width: min(360px, calc(100% - 16px));
+  max-height: calc(100% - 63px);
+  overflow: hidden;
+  border: 1px solid rgb(240 248 244 / 24%);
+  border-radius: 8px;
+  color: var(--dash-soft);
+  background:
+    radial-gradient(100% 72% at 8% -22%, rgb(255 255 255 / 17%), transparent 58%),
+    linear-gradient(145deg, rgb(var(--dash-surface-rgb) / 91%), rgb(var(--dash-surface-strong-rgb) / 96%));
+  box-shadow: 0 22px 60px rgb(0 0 0 / 56%), inset 0 1px 0 rgb(255 255 255 / 16%);
+  backdrop-filter: blur(30px) saturate(132%);
+  -webkit-backdrop-filter: blur(30px) saturate(132%);
+  animation: dash-agent-panel-in .18s cubic-bezier(.2,.8,.2,1) both;
+}
+.dash-agent-graph-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 8px 0 13px; border-bottom: 1px solid var(--dash-line); }
+.dash-agent-graph-panel > header > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.dash-agent-graph-panel > header svg { color: var(--dash-selected); }
+.dash-agent-graph-panel > header strong { overflow: hidden; color: var(--dash-ink); font-size: 13px; font-weight: 640; text-overflow: ellipsis; white-space: nowrap; }
+.dash-agent-graph-panel > header small { display: grid; min-width: 21px; height: 21px; place-items: center; border-radius: 11px; color: var(--dash-muted); background: rgb(255 255 255 / 5%); font-size: 10px; }
+.dash-agent-graph-panel > header button { display: grid; width: 27px; height: 27px; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 6px; color: var(--dash-muted); background: transparent; cursor: pointer; }
+.dash-agent-graph-panel > header button:hover { border-color: var(--dash-line); color: var(--dash-ink); background: rgb(255 255 255 / 6%); }
+.dash-agent-node-detail { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px; scrollbar-color: rgb(var(--dash-accent-rgb) / 34%) transparent; }
+.dash-agent-node-state { display: grid; grid-template-columns: 8px auto minmax(0, 1fr); align-items: center; gap: 7px; }
+.dash-agent-node-state > i { width: 7px; height: 7px; border-radius: 50%; background: var(--dash-muted); box-shadow: 0 0 8px currentColor; }
+.dash-agent-node-state > i.status-running { color: var(--dash-selected); background: var(--dash-selected); }
+.dash-agent-node-state > i.status-completed { color: #b6c2bc; background: #b6c2bc; }
+.dash-agent-node-state > i.status-failed { color: var(--dash-red); background: var(--dash-red); }
+.dash-agent-node-state strong { color: var(--dash-ink); font-size: 12px; }
+.dash-agent-node-state span { overflow: hidden; color: var(--dash-muted); font-size: 11px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.dash-agent-node-detail dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 11px 0; }
+.dash-agent-node-detail dl > div { display: grid; gap: 4px; padding: 8px 6px; border: 1px solid var(--dash-line); border-radius: 6px; background: rgb(255 255 255 / 4%); text-align: center; }
+.dash-agent-node-detail dt { color: var(--dash-muted); font-size: 9px; }
+.dash-agent-node-detail dd { margin: 0; overflow: hidden; color: var(--dash-ink); font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.dash-agent-node-links { display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 8px; overflow-x: auto; }
+.dash-agent-node-links > span,
+.dash-agent-node-detail p > span { flex: 0 0 auto; color: var(--dash-muted); font-size: 10px; }
+.dash-agent-node-links button { min-height: 26px; padding: 0 8px; border: 1px solid rgb(var(--dash-accent-rgb) / 25%); border-radius: 6px; color: var(--dash-soft); background: rgb(var(--dash-accent-rgb) / 7%); cursor: pointer; font-size: 10px; white-space: nowrap; }
+.dash-agent-node-links button:hover { border-color: rgb(var(--dash-accent-rgb) / 48%); color: var(--dash-ink); }
+.dash-agent-node-links button:disabled { opacity: .5; cursor: default; }
+.dash-agent-node-detail p { display: flex; gap: 8px; margin: 8px 0 0; overflow-wrap: anywhere; font-size: 10px; line-height: 1.5; }
+.dash-agent-node-detail p.failure { color: #e9adb1; }
+.dash-agent-event-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 7px 7px; scrollbar-color: rgb(var(--dash-accent-rgb) / 34%) transparent; contain: strict; }
+.dash-agent-event-row { display: grid; grid-template-columns: 7px 58px minmax(0, 1fr); height: 40px; align-items: center; gap: 7px; border-bottom: 1px solid var(--dash-line); }
+.dash-agent-event-row > i { width: 6px; height: 6px; border-radius: 50%; color: var(--dash-muted); background: var(--dash-muted); box-shadow: 0 0 7px currentColor; }
+.dash-agent-event-row > i.phase-routing,
+.dash-agent-event-row > i.phase-context,
+.dash-agent-event-row > i.phase-inference { color: var(--dash-selected); background: var(--dash-selected); }
+.dash-agent-event-row > i.phase-error { color: var(--dash-red); background: var(--dash-red); }
+.dash-agent-event-row time { color: var(--dash-muted); font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; }
+.dash-agent-event-row strong { overflow: hidden; color: var(--dash-soft); font-size: 10px; font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }
+.dash-agent-panel-empty { display: grid; min-height: 110px; place-items: center; padding: 14px; color: var(--dash-muted); font-size: 11px; text-align: center; }
+.dash-agent-signal-graph.motion-reduced .dash-agent-ribbon,
+.dash-agent-signal-graph.motion-reduced .dash-agent-spark,
+.dash-agent-signal-graph.motion-reduced .dash-agent-sphere,
+.dash-agent-signal-graph.motion-reduced .dash-agent-graph-world > svg path { animation: none !important; transition: none !important; }
+.dash-agent-signal-graph.motion-reduced .dash-agent-graph-world { will-change: auto; }
+@keyframes dash-agent-panel-in { from { opacity: 0; transform: translateX(8px) scale(.985); } }
+
+@media (max-width: 700px) {
+  .dash-agent-signal-graph.is-expanded { inset: 0; border-width: 0; border-radius: 0; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-signal-node { width: 104px; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-sphere { width: 64px; height: 64px; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-eye { top: 22px; width: 5px; height: 13px; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-eye.eye-left { left: 19px; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-eye.eye-right { right: 19px; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-mouth { top: 41px; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-ribbon { top: 32px; width: 84px; height: 31px; }
+  .dash-agent-signal-graph.is-expanded .dash-agent-ribbon.ribbon-b { width: 74px; height: 43px; }
+  .dash-agent-graph-panel { top: auto; right: 8px; bottom: 8px; left: 8px; width: auto; max-height: min(46%, 360px); }
+  .dash-agent-signal-graph:not(.is-expanded) .dash-agent-graph-panel { display: none; }
+}
+
 /* Full-height plugin workspace. It shares the dashboard's restrained glass language. */
 .dash-main-plugins { padding: 4px; }
 .dash-plugin-workspace { display: flex; flex-direction: column; gap: 16px; width: min(1120px, 100%); min-height: 100%; margin: 0 auto; padding: 12px 8px 28px; }

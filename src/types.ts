@@ -296,6 +296,7 @@ export type WorkflowEventType =
   | 'thread.started'
   | 'thread.resumed'
   | 'thread.forked'
+  | 'thread.closed'
   | 'turn.started'
   | 'turn.completed'
   | 'turn.interrupted'

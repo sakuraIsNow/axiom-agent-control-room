@@ -621,6 +621,7 @@ export type RuntimeEventType =
   | 'thread.started'
   | 'thread.resumed'
   | 'thread.forked'
+  | 'thread.closed'
   | 'turn.started'
   | 'turn.completed'
   | 'turn.interrupted'

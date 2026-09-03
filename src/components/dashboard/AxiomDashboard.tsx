@@ -33,7 +33,7 @@ const modeLabel: Record<DashboardProps['mode'], string> = { analyze: '分析', b
 export function AxiomDashboard(props: DashboardProps) {
   const {
     phase, mode, onModeChange, draft, onDraftChange, onSend, onNewTask, onOpenSettings, onRefreshTemplates,
-    templateWorkspace, onOpenPlugins, pluginWorkspace, onOpenReadiness, onStop, onPause, onResume, isRunning, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, agentActivity, agents, graph,
+    templateWorkspace, onOpenPlugins, pluginWorkspace, onOpenReadiness, onStop, onPause, onResume, isRunning, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, agentActivity, agents, graph, runEvents,
     selectedNodeId, onSelectAgent, taskProfile, reviewResult, reviewApprovalTaskId, reviewNote, reviewActionBusy,
     onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, onRefreshTasks, sessionId,
     sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, textModelCredentialId, theme, onThemeChange, principalUserId: principalUserIdProp,
@@ -229,6 +229,7 @@ export function AxiomDashboard(props: DashboardProps) {
           onRemoveAttachment={onRemoveAttachment}
           agents={agents}
           graph={graph}
+          events={runEvents}
           selectedNodeId={selectedNodeId}
           onSelectAgent={onSelectAgent}
           reviewResult={reviewApprovalTaskId ? reviewResult : null}

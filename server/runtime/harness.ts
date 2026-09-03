@@ -63,6 +63,7 @@ export type HarnessEventKind =
   | 'thread.started'
   | 'thread.resumed'
   | 'thread.forked'
+  | 'thread.closed'
   | 'turn.started'
   | 'turn.completed'
   | 'turn.interrupted'
@@ -212,6 +213,7 @@ const runtimeTypeForKind: Partial<Record<HarnessEventKind, RuntimeEventType>> = 
   'thread.started': 'thread.started',
   'thread.resumed': 'thread.resumed',
   'thread.forked': 'thread.forked',
+  'thread.closed': 'thread.closed',
   'turn.started': 'turn.started',
   'turn.completed': 'turn.completed',
   'turn.interrupted': 'turn.interrupted',

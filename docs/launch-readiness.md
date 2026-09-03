@@ -1,6 +1,6 @@
 # 上线就绪度与产品能力评估
 
-更新时间：2026-09-02
+更新时间：2026-09-03
 
 ## 结论
 
@@ -8,9 +8,9 @@
 
 这意味着：内部试用、单团队灰度和受控网络部署可以开始；面向多个租户、外部用户或高价值自动化任务前，必须完成下面的上线门禁。
 
-## 最新本机验证（2026-09-02）
+## 最新本机验证（2026-09-03）
 
-在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1290.18 RPS / P95 11.29ms`、Readiness `1350.02 RPS / P95 7.86ms`、运行观测 `1412.09 RPS / P95 8.87ms`、任务列表 `1918.68 RPS / P95 7.03ms`。标准门禁的单元测试为 `320/320`；本次 `npm run qa:all` 结果为 `24 passed / 0 failed / 4 skipped`。跳过项分别是未配置正式 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令。原生搜索、会话路由、本轮复杂 Runtime、Checkpoint、持久摘要、运行观测告警和视觉回归均通过；本次复杂 Runtime 产生 673 个连续事件、579 个可见流式增量和 20,906 Token，并正常交付 Artifact。该基线包含真实模型任务和浏览器回归，但不代表公网容量。运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果；生成的结果文件默认不提交到仓库。
+在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1616.91 RPS / P95 10.44ms`、Readiness `2382.89 RPS / P95 4.72ms`、运行观测 `1919.22 RPS / P95 7.11ms`、任务列表 `2699.16 RPS / P95 4.06ms`。标准单元/API 门禁为 `339 passed / 0 failed`；`npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`。本次复杂 Runtime 产生 733 个连续事件、604 个可见流式增量和 36,556 Token，通过 Reviewer 门禁并正常交付 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 
@@ -82,7 +82,7 @@
 
 ## 电影级运行外壳
 
-默认入口现在是任务台 Dashboard，沉浸模式由 `AxiomShell` 承载：核心画布只表达真实运行态，Graph/Stream/Inspector 消费 Task、Graph、Event 和 SSE；玻璃传输材质、Bloom、色差和暗角只服务于当前执行状态。旧经典工作台、旧 Studio 和遗留 Immersive 组件已物理删除，不再提供 `?view=classic`/`?view=studio` 回退入口。移动端降低 DPR、粒子数量并回退传输材质；浏览器不支持 WebGL 时由 Dashboard 的列表态继续承载任务操作。
+唯一生产入口是 `AxiomDashboard`。其中的 Agent Graph 由真实 Task、Graph、Event 和 SSE 驱动，使用独立于 WebGL 的 CSS 3D 渲染；节点保留立体体积、可拖拽旋转、双向选择、全屏和详情抽屉。系统会根据减少动态偏好、CPU 核数、设备内存、省流模式、页面可见性和视口状态自动降低或暂停动画，因此浏览器不支持 WebGL 时也不需要切换到第二套任务界面。旧 R3F 场景源码仍保留供后续实验，但未挂载到生产入口，也不会进入或预加载生产构建；旧经典工作台、旧 Studio 和遗留 Immersive 入口已删除。
 
 ## 前端改造原则
 

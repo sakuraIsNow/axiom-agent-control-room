@@ -7,8 +7,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          react: ['react', 'react-dom'],
-          three: ['three', '@react-three/fiber', '@react-three/drei', '@react-three/postprocessing', 'postprocessing'],
+          react: ['react', 'react-dom', 'react-dom/client'],
           markdown: ['react-markdown', 'remark-gfm'],
           icons: ['lucide-react'],
           motion: ['gsap'],

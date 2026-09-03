@@ -614,6 +614,33 @@ const chatSideSplit = await page.locator('.dash-chat-side').evaluate((element) =
 const sessionTimes = await page.locator('.dash-chat-session-item').evaluateAll((elements) => elements.map((element) => Number(element.getAttribute('data-updated-at') ?? 0)));
 const sessionsNewestFirst = sessionTimes.every((value, index) => index === 0 || sessionTimes[index - 1] >= value);
 const agentGraphVisible = await page.locator('.dash-agent-signal-graph').isVisible();
+const graphUsesWebglIndependentRenderer = await page.locator('.dash-agent-signal-graph').evaluate((element) => (
+  element.getAttribute('data-renderer') === 'css-3d' && element.querySelector('canvas') === null
+));
+let graphNodeDetailWorks = false;
+let graphFullscreenWorks = false;
+let graphEventPanelWorks = false;
+let graphReducedMotionWorks = false;
+const firstGraphNode = page.locator('.dash-agent-signal-node').first();
+if (await firstGraphNode.count() > 0) {
+  await firstGraphNode.focus();
+  await page.keyboard.press('Enter');
+  await page.locator('.dash-agent-graph-panel.panel-node').waitFor({ state: 'visible', timeout: 3_000 });
+  graphNodeDetailWorks = await firstGraphNode.getAttribute('aria-pressed') === 'true'
+    && await page.locator('.dash-agent-node-detail dl').isVisible();
+  await page.locator('.dash-agent-graph-expand').click();
+  const graphRect = await page.locator('.dash-agent-signal-graph.is-expanded').boundingBox();
+  graphFullscreenWorks = Boolean(graphRect && graphRect.width >= 1_300 && graphRect.height >= 820);
+  await page.locator('.dash-agent-graph-events').click();
+  const eventPanel = page.locator('.dash-agent-graph-panel.panel-events');
+  graphEventPanelWorks = await eventPanel.isVisible()
+    && (await eventPanel.locator('.dash-agent-event-list[data-total-events], .dash-agent-panel-empty').count()) === 1;
+  await page.locator('.dash-agent-graph-expand').click();
+}
+await page.emulateMedia({ reducedMotion: 'reduce' });
+await page.waitForFunction(() => document.querySelector('.dash-agent-signal-graph')?.getAttribute('data-motion') === 'reduced');
+graphReducedMotionWorks = await page.locator('.dash-agent-graph-auto').isDisabled();
+await page.emulateMedia({ reducedMotion: 'no-preference' });
 const morphIconMounted = await page.locator('.dash-chat-controls .send svg path').count() > 0;
 const sessionDeleteAvailable = await page.locator('.dash-chat-session-delete').count() > 0;
 let glassDeleteConfirmation = false;
@@ -844,6 +871,10 @@ await page.screenshot({ path: resolve(outputDir, 'dashboard-schedules-mobile.png
 await page.getByRole('button', { name: '对话', exact: true }).click();
 await page.locator('.dash-chat-workspace').waitFor({ state: 'visible', timeout: 5_000 });
 const mobileLayout = await layout(page);
+await page.locator('.dash-agent-graph-expand').click();
+const mobileGraphRect = await page.locator('.dash-agent-signal-graph.is-expanded').boundingBox();
+const mobileGraphFullscreenWorks = Boolean(mobileGraphRect && mobileGraphRect.width >= 380 && mobileGraphRect.height >= 820);
+await page.locator('.dash-agent-graph-expand').click();
 await page.screenshot({ path: resolve(outputDir, 'dashboard-chat-mobile.png'), fullPage: false });
 
 const assertions = {
@@ -874,6 +905,12 @@ const assertions = {
   recentSessionsUseHalfHeight: chatSideSplit >= .43 && chatSideSplit <= .53,
   sessionsNewestFirst,
   agentGraphVisible,
+  graphUsesWebglIndependentRenderer,
+  graphNodeDetailWorks,
+  graphFullscreenWorks,
+  graphEventPanelWorks,
+  graphReducedMotionWorks,
+  mobileGraphFullscreenWorks,
   morphIconMounted,
   sessionDeleteAvailable,
   glassDeleteConfirmation,

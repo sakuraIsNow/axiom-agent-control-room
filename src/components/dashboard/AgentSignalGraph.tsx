@@ -1,20 +1,50 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { Focus, Network, Rotate3D } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Activity, ChevronLeft, ChevronRight, Focus, Maximize2, Minimize2, Network, Rotate3D, X } from 'lucide-react';
 import { MorphIcon } from 'morphicons/react';
-import type { AgentGraph, AgentPhase, TopologyAgent } from '../../types';
+import type { CSSProperties } from 'react';
+import type { AgentGraph, AgentPhase, RunEvent, TopologyAgent } from '../../types';
 import { agentDisplayName } from '../../lib/agentPresentation';
+import { graphVirtualWindow, shouldReduceGraphMotion, type GraphRuntimeSignals } from '../../lib/graphRuntime';
 import { visibleGraphNodes } from '../../lib/workflowGraphState';
 
 type SignalNode = {
   id: string;
   label: string;
+  role: string;
+  title: string;
   status: NonNullable<AgentGraph['nodes'][number]['status']>;
+  dependsOn: string[];
+  skillIds: string[];
+  executionWave?: number;
+  tokens?: number;
+  durationMs?: number;
+  attempts?: number;
+  toolCalls?: number;
+  failureReason?: string;
 };
 
 type GraphPosition = { x: number; y: number; angle: number };
+type GraphPanel = 'node' | 'events' | null;
+type NavigatorRuntime = Navigator & {
+  deviceMemory?: number;
+  connection?: EventTarget & { saveData?: boolean };
+};
 
 const TAU = Math.PI * 2;
+const EVENT_ROW_HEIGHT = 40;
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const readRuntimeSignals = (): GraphRuntimeSignals => {
+  if (typeof window === 'undefined') return { prefersReducedMotion: false };
+  const runtimeNavigator = navigator as NavigatorRuntime;
+  return {
+    prefersReducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    hardwareConcurrency: runtimeNavigator.hardwareConcurrency,
+    deviceMemory: runtimeNavigator.deviceMemory,
+    saveData: runtimeNavigator.connection?.saveData,
+  };
+};
 
 const positionsFor = (count: number): GraphPosition[] => {
   if (count === 1) return [{ x: 50, y: 52, angle: -Math.PI / 2 }];
@@ -52,6 +82,15 @@ const statusIcons: Record<TopologyAgent['status'], string> = {
   failed: 'M6 6l12 12 M18 6L6 18',
 };
 const statusIcon = (status: SignalNode['status']) => statusIcons[status as TopologyAgent['status']] ?? statusIcons.queued;
+const statusLabels: Record<SignalNode['status'], string> = {
+  queued: '等待',
+  running: '执行中',
+  completed: '已完成',
+  failed: '失败',
+  skipped: '本轮跳过',
+  waiting_for_human: '等待确认',
+  cancelled: '已取消',
+};
 
 const phaseIcons: Record<AgentPhase, string> = {
   idle: 'M5 5h14v14H5z',
@@ -74,19 +113,74 @@ const curvePath = (from: GraphPosition, to: GraphPosition, index: number) => {
   return `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} Q ${controlX.toFixed(2)} ${controlY.toFixed(2)} ${to.x.toFixed(2)} ${to.y.toFixed(2)}`;
 };
 
-export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelectAgent }: {
+const formatDuration = (durationMs?: number) => {
+  if (!durationMs) return '—';
+  if (durationMs < 1_000) return `${Math.round(durationMs)} ms`;
+  return `${(durationMs / 1_000).toFixed(durationMs < 10_000 ? 1 : 0)} 秒`;
+};
+
+function VirtualEventList({ events }: { events: RunEvent[] }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(240);
+  const orderedEvents = useMemo(() => [...events].reverse(), [events]);
+  const windowRange = graphVirtualWindow(orderedEvents.length, scrollTop, viewportHeight, EVENT_ROW_HEIGHT);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+    const measure = () => setViewportHeight(viewport.clientHeight || 240);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (viewportRef.current && viewportRef.current.scrollTop <= EVENT_ROW_HEIGHT) viewportRef.current.scrollTop = 0;
+  }, [events.length]);
+
+  if (orderedEvents.length === 0) return <div className="dash-agent-panel-empty">当前会话还没有运行事件</div>;
+  return <div
+    ref={viewportRef}
+    className="dash-agent-event-list"
+    onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+    data-total-events={orderedEvents.length}
+  >
+    <div style={{ height: windowRange.paddingTop }} aria-hidden="true" />
+    {orderedEvents.slice(windowRange.start, windowRange.end).map((event) => <div className="dash-agent-event-row" key={event.id}>
+      <i className={`phase-${event.phase}`} />
+      <time>{new Date(event.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
+      <strong title={event.label}>{event.label}</strong>
+    </div>)}
+    <div style={{ height: windowRange.paddingBottom }} aria-hidden="true" />
+  </div>;
+}
+
+export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId, onSelectAgent }: {
   agents: TopologyAgent[];
   graph: AgentGraph | null;
   phase: AgentPhase;
+  events: RunEvent[];
   selectedNodeId: string | null;
   onSelectAgent: (id: string) => void;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
+  const [runtimeSignals, setRuntimeSignals] = useState(readRuntimeSignals);
+  const reducedMotion = shouldReduceGraphMotion(runtimeSignals);
+  const [autoRotate, setAutoRotate] = useState(() => !shouldReduceGraphMotion(readRuntimeSignals()));
+  const [stageVisible, setStageVisible] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+  const [panel, setPanel] = useState<GraphPanel>(null);
   const stateRef = useRef({
     yaw: -4,
     pitch: 2,
-    auto: true,
+    focusX: 0,
+    focusY: 0,
+    auto: autoRotate,
+    hovering: false,
     dragging: false,
     moved: false,
     pointerId: -1,
@@ -95,7 +189,7 @@ export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelec
     startYaw: -4,
     startPitch: 2,
     targetId: null as string | null,
-    lastFrame: performance.now(),
+    lastFrame: 0,
   });
   const agentByStep = useMemo(() => new Map(agents.map((agent) => [agent.stepId ?? agent.id, agent])), [agents]);
   const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
@@ -104,42 +198,137 @@ export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelec
     return {
       id: node.id,
       label: agentDisplayName(node.role, node.title),
+      role: node.role,
+      title: node.title,
       status: runtime?.status ?? node.status ?? 'queued',
+      dependsOn: node.dependsOn,
+      skillIds: runtime?.skillIds ?? node.skillIds ?? [],
+      executionWave: node.executionWave,
+      tokens: runtime?.tokens ?? node.tokens,
+      durationMs: runtime?.durationMs ?? node.durationMs,
+      attempts: runtime?.attempts ?? node.attempts,
+      toolCalls: runtime?.toolCalls?.length ?? node.toolCalls,
+      failureReason: runtime?.failureReason ?? node.failureReason,
     };
   }) : agents.map((agent) => ({
     id: agent.stepId ?? agent.id,
     label: agentDisplayName(agent.role, agent.label),
+    role: agent.role,
+    title: agent.title ?? agent.label,
     status: agent.status,
+    dependsOn: agent.dependsOn ?? [],
+    skillIds: agent.skillIds ?? [],
+    tokens: agent.tokens,
+    durationMs: agent.durationMs,
+    attempts: agent.attempts,
+    toolCalls: agent.toolCalls?.length,
+    failureReason: agent.failureReason,
   }))), [agentById, agentByStep, agents, graph]);
   const nodes = useMemo(() => visibleGraphNodes(allNodes), [allNodes]);
   const truncated = nodes.length < allNodes.length;
   const positions = useMemo(() => positionsFor(nodes.length), [nodes.length]);
   const positionById = useMemo(() => new Map(nodes.map((node, index) => [node.id, positions[index]!])), [nodes, positions]);
   const edges = useMemo(() => (graph?.edges ?? []).filter((edge) => positionById.has(edge.from) && positionById.has(edge.to)), [graph, positionById]);
+  const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const live = phase === 'routing' || phase === 'context' || phase === 'inference';
+
+  const applyWorldTransform = useCallback(() => {
+    const state = stateRef.current;
+    if (!worldRef.current) return;
+    worldRef.current.style.transform = `translate3d(${state.focusX.toFixed(1)}px, ${state.focusY.toFixed(1)}px, 0) rotateX(${state.pitch.toFixed(2)}deg) rotateY(${state.yaw.toFixed(2)}deg)`;
+    worldRef.current.style.setProperty('--dash-graph-yaw-inverse', `${(-state.yaw).toFixed(2)}deg`);
+    worldRef.current.style.setProperty('--dash-graph-pitch-inverse', `${(-state.pitch).toFixed(2)}deg`);
+  }, []);
+
+  const focusNode = useCallback((id?: string | null) => {
+    const state = stateRef.current;
+    const position = id ? positionById.get(id) : undefined;
+    const bounds = stageRef.current?.getBoundingClientRect();
+    state.auto = false;
+    state.yaw = 0;
+    state.pitch = 0;
+    state.focusX = position && bounds ? (50 - position.x) / 100 * bounds.width : 0;
+    state.focusY = position && bounds ? (52 - position.y) / 100 * bounds.height : 0;
+    setAutoRotate(false);
+    applyWorldTransform();
+  }, [applyWorldTransform, positionById]);
+
+  const selectNode = useCallback((id: string) => {
+    onSelectAgent(id);
+    setPanel('node');
+    if (window.matchMedia('(max-width: 700px)').matches) setExpanded(true);
+    focusNode(id);
+  }, [focusNode, onSelectAgent]);
+
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const runtimeNavigator = navigator as NavigatorRuntime;
+    const update = () => setRuntimeSignals(readRuntimeSignals());
+    query.addEventListener('change', update);
+    runtimeNavigator.connection?.addEventListener?.('change', update);
+    return () => {
+      query.removeEventListener('change', update);
+      runtimeNavigator.connection?.removeEventListener?.('change', update);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!reducedMotion) return;
+    stateRef.current.auto = false;
+    setAutoRotate(false);
+  }, [reducedMotion]);
+
+  useEffect(() => {
+    stateRef.current.auto = autoRotate;
+  }, [autoRotate]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver(([entry]) => setStageVisible(entry?.isIntersecting ?? true), { threshold: 0.01 });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [expanded, nodes.length]);
 
   useEffect(() => {
     const state = stateRef.current;
     state.lastFrame = performance.now();
+    applyWorldTransform();
+    if (reducedMotion || !stageVisible) return undefined;
     let frame = 0;
     const tick = (timestamp: number) => {
       const delta = Math.min(.05, Math.max(.001, (timestamp - state.lastFrame) / 1000));
       state.lastFrame = timestamp;
-      if (state.auto && !state.dragging) state.yaw += delta * 3.3;
-      if (worldRef.current) {
-        worldRef.current.style.transform = `rotateX(${state.pitch.toFixed(2)}deg) rotateY(${state.yaw.toFixed(2)}deg)`;
-        worldRef.current.style.setProperty('--dash-graph-yaw-inverse', `${(-state.yaw).toFixed(2)}deg`);
-        worldRef.current.style.setProperty('--dash-graph-pitch-inverse', `${(-state.pitch).toFixed(2)}deg`);
-      }
+      if (!document.hidden && state.auto && !state.dragging && !state.hovering) state.yaw += delta * 3.3;
+      applyWorldTransform();
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [nodes.length]);
+  }, [applyWorldTransform, expanded, nodes.length, reducedMotion, stageVisible]);
+
+  useEffect(() => {
+    if (!selectedNodeId || !positionById.has(selectedNodeId)) return;
+    setPanel('node');
+    focusNode(selectedNodeId);
+  }, [focusNode, positionById, selectedNodeId]);
+
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [expanded]);
 
   const beginDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
-    if ((event.target as HTMLElement).closest('.dash-agent-graph-focus, .dash-agent-graph-auto')) return;
     const state = stateRef.current;
     const target = (event.target as HTMLElement).closest('.dash-agent-signal-node');
     state.dragging = true;
@@ -160,8 +349,11 @@ export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelec
     const dx = event.clientX - state.startX;
     const dy = event.clientY - state.startY;
     if (Math.hypot(dx, dy) > 5) state.moved = true;
+    state.focusX = 0;
+    state.focusY = 0;
     state.yaw = state.startYaw + dx * .22;
     state.pitch = clamp(state.startPitch - dy * .14, -22, 22);
+    applyWorldTransform();
   };
 
   const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -174,29 +366,42 @@ export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelec
     state.targetId = null;
     stageRef.current?.classList.remove('is-dragging');
     if (stageRef.current?.hasPointerCapture(event.pointerId)) stageRef.current.releasePointerCapture(event.pointerId);
-    if (shouldSelect) onSelectAgent(targetId);
+    if (shouldSelect) selectNode(targetId);
   };
 
-  const toggleAuto = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
-    stateRef.current.auto = !stateRef.current.auto;
-    event.currentTarget.setAttribute('aria-pressed', String(stateRef.current.auto));
-  };
-
-  const focusScene = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
+  const toggleAuto = () => {
+    if (reducedMotion) return;
+    const next = !autoRotate;
     const state = stateRef.current;
-    state.auto = false;
-    state.yaw = 0;
-    state.pitch = 0;
+    state.auto = next;
+    if (next) {
+      state.focusX = 0;
+      state.focusY = 0;
+    }
+    setAutoRotate(next);
   };
 
-  return <section className="dash-agent-signal-graph" aria-label="当前对话 Agent Graph">
+  const selectRelativeNode = (offset: number) => {
+    if (!nodes.length) return;
+    const currentIndex = Math.max(0, nodes.findIndex((node) => node.id === selectedNodeId));
+    selectNode(nodes[(currentIndex + offset + nodes.length) % nodes.length]!.id);
+  };
+
+  const content = <section
+    className={`dash-agent-signal-graph ${expanded ? 'is-expanded' : ''} ${reducedMotion ? 'motion-reduced' : ''}`}
+    aria-label="当前对话 Agent Graph"
+    role={expanded ? 'dialog' : undefined}
+    aria-modal={expanded ? 'true' : undefined}
+    data-renderer="css-3d"
+    data-motion={reducedMotion ? 'reduced' : 'full'}
+  >
     <header>
       <span><MorphIcon icon={phaseIcons[phase]} size={15} strokeWidth={1.8} spring="snappy" reducedMotion="user" /><Network size={14} />Agent Graph</span>
       <div className="dash-agent-graph-actions">
-        <button type="button" className="dash-agent-graph-auto" aria-pressed="true" onClick={toggleAuto} title="切换自动旋转"><Rotate3D size={13} /></button>
-        <button type="button" className="dash-agent-graph-focus" onClick={focusScene} title="恢复正面视角"><Focus size={13} /></button>
+        <button type="button" className="dash-agent-graph-events" aria-pressed={panel === 'events'} onClick={() => setPanel((current) => current === 'events' ? null : 'events')} title="查看运行事件"><Activity size={13} /></button>
+        <button type="button" className="dash-agent-graph-auto" aria-pressed={autoRotate} onClick={toggleAuto} disabled={reducedMotion} title={reducedMotion ? '设备已启用低动态模式' : '切换自动旋转'}><Rotate3D size={13} /></button>
+        <button type="button" className="dash-agent-graph-focus" onClick={() => focusNode(selectedNodeId)} title={selectedNode ? '聚焦选中 Agent' : '恢复正面视角'}><Focus size={13} /></button>
+        <button type="button" className="dash-agent-graph-expand" onClick={() => setExpanded((current) => !current)} title={expanded ? '退出全屏' : '全屏查看'}>{expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
         <strong title={truncated ? `显示 ${nodes.length} 个，共 ${allNodes.length} 个 Agent` : `${nodes.length} 个 Agent`}>{truncated ? `${nodes.length}/${allNodes.length}` : nodes.length}</strong>
       </div>
     </header>
@@ -230,9 +435,18 @@ export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelec
               left: `${position.x}%`,
               top: `${position.y}%`,
               '--dash-node-depth': `${(Math.cos(position.angle) * 24).toFixed(2)}px`,
-            } as React.CSSProperties}
-            title={node.label}
-            onClick={() => onSelectAgent(node.id)}
+            } as CSSProperties}
+            title={`${node.label} · ${statusLabels[node.status]}`}
+            aria-label={`${node.label}，${statusLabels[node.status]}`}
+            aria-pressed={selected}
+            onPointerEnter={() => { stateRef.current.hovering = true; }}
+            onPointerLeave={() => { stateRef.current.hovering = false; }}
+            onFocus={() => { stateRef.current.hovering = true; }}
+            onBlur={() => { stateRef.current.hovering = false; }}
+            onClick={(event) => {
+              if (stateRef.current.moved && event.detail !== 0) return;
+              selectNode(node.id);
+            }}
           >
             <span className="dash-agent-ribbon ribbon-a" /><span className="dash-agent-ribbon ribbon-b" />
             <span className="dash-agent-spark spark-a" /><span className="dash-agent-spark spark-b" />
@@ -242,10 +456,36 @@ export function AgentSignalGraph({ agents, graph, phase, selectedNodeId, onSelec
               <span className="dash-agent-mouth" />
               <b className="dash-agent-status-dot" />
             </span>
-              <span className="dash-agent-node-meta"><MorphIcon icon={statusIcon(node.status)} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" /><em>{node.label}</em></span>
+            <span className="dash-agent-node-meta"><MorphIcon icon={statusIcon(node.status)} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" /><em>{node.label}</em></span>
           </button>;
         })}
       </div>
     </div>}
+    {panel && <aside className={`dash-agent-graph-panel panel-${panel}`} aria-label={panel === 'events' ? '运行事件' : 'Agent 详情'}>
+      <header>
+        <div>{panel === 'events' ? <><Activity size={14} /><strong>运行事件</strong><small>{events.length}</small></> : <><Network size={14} /><strong>{selectedNode?.label ?? 'Agent 详情'}</strong></>}</div>
+        <div>
+          {panel === 'node' && nodes.length > 1 && <><button type="button" title="上一个 Agent" onClick={() => selectRelativeNode(-1)}><ChevronLeft size={14} /></button><button type="button" title="下一个 Agent" onClick={() => selectRelativeNode(1)}><ChevronRight size={14} /></button></>}
+          <button type="button" title="关闭" onClick={() => setPanel(null)}><X size={14} /></button>
+        </div>
+      </header>
+      {panel === 'events' ? <VirtualEventList events={events} /> : selectedNode ? <div className="dash-agent-node-detail">
+        <div className="dash-agent-node-state"><i className={`status-${selectedNode.status}`} /><strong>{statusLabels[selectedNode.status]}</strong><span>{agentDisplayName(selectedNode.role)}</span></div>
+        <dl>
+          <div><dt>Token</dt><dd>{selectedNode.tokens?.toLocaleString() ?? '—'}</dd></div>
+          <div><dt>耗时</dt><dd>{formatDuration(selectedNode.durationMs)}</dd></div>
+          <div><dt>尝试</dt><dd>{selectedNode.attempts ?? 0}</dd></div>
+          <div><dt>工具</dt><dd>{selectedNode.toolCalls ?? 0}</dd></div>
+        </dl>
+        {selectedNode.dependsOn.length > 0 && <div className="dash-agent-node-links"><span>上游</span>{selectedNode.dependsOn.map((id) => <button type="button" key={id} disabled={!positionById.has(id)} onClick={() => selectNode(id)}>{nodes.find((node) => node.id === id)?.label ?? id}</button>)}</div>}
+        {selectedNode.skillIds.length > 0 && <p><span>Skill</span>{selectedNode.skillIds.join(' · ')}</p>}
+        {selectedNode.failureReason && <p className="failure"><span>原因</span>{selectedNode.failureReason}</p>}
+      </div> : <div className="dash-agent-panel-empty">选择一个 Agent 查看执行详情</div>}
+    </aside>}
   </section>;
+
+  const dashboardRoot = expanded && typeof document !== 'undefined'
+    ? document.querySelector('.axiom-dashboard')
+    : null;
+  return dashboardRoot ? createPortal(content, dashboardRoot) : content;
 }

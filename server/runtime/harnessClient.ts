@@ -618,7 +618,8 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     const threadId = String(params.threadId ?? params.thread_id ?? '');
     if (!threadId) return;
     const method = message.method ?? '';
-    if (method === 'turn/started') this.publish(threadId, 'turn.started', { ...params });
+    if (method === 'thread/closed') this.publish(threadId, 'thread.closed', { ...params });
+    else if (method === 'turn/started') this.publish(threadId, 'turn.started', { ...params });
     else if (method === 'turn/completed') this.publish(threadId, 'turn.completed', { ...params });
     else if (method === 'turn/interrupted') this.publish(threadId, 'turn.interrupted', { ...params });
     else if (method === 'error') this.publish(threadId, 'turn.failed', { ...params });

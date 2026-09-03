@@ -34,6 +34,7 @@ import { attachPersistedContextMetadata, buildPersistedContextSummary, type Dura
 import { buildOperationsAlerts } from './operationsAlerts.js';
 import { buildInAppNotifications } from './inAppNotifications.js';
 import { buildScheduleInsights } from './scheduleInsights.js';
+import { breadthFirstThreadDescendants, buildHarnessThreadGraph } from './harnessThreadGraph.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -3585,6 +3586,18 @@ export const createTaskApi = (dependencies: {
         storage: stored ? { kind: artifactStore?.kind, key: stored.key, bytes: stored.bytes } : { kind: 'database' },
       },
     });
+  });
+
+  api.get('/tasks/:taskId/thread-graph', async (c) => {
+    const taskId = c.req.param('taskId');
+    const { tenantId } = identity(c.req.raw.headers);
+    const task = await store.getTask(taskId, tenantId);
+    if (!task) return c.json({ error: 'Task not found.' }, 404);
+    const graph = buildHarnessThreadGraph(await store.getEvents(task.id));
+    const rootThreadId = c.req.query('root')?.trim().slice(0, 200);
+    const descendants = rootThreadId ? breadthFirstThreadDescendants(graph, rootThreadId) : undefined;
+    if (rootThreadId && descendants === null) return c.json({ error: 'Thread not found.' }, 404);
+    return c.json({ taskId: task.id, graph, ...(descendants ? { rootThreadId, descendants } : {}) });
   });
 
   api.get('/tasks/:taskId/events', async (c) => {

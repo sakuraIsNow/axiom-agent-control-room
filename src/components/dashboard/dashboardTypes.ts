@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, Session, TaskProfile, TopologyAgent, WorkflowTaskSummary } from '../../types';
+import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, RunEvent, Session, TaskProfile, TopologyAgent, WorkflowTaskSummary } from '../../types';
 import type { UiTheme } from '../../lib/uiTheme';
 
 export type ReviewResultState = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
@@ -47,6 +47,7 @@ export type DashboardProps = {
   theme: UiTheme;
   agents: TopologyAgent[];
   graph: AgentGraph | null;
+  runEvents: RunEvent[];
   selectedNodeId: string | null;
   onSelectAgent: (id: string) => void;
   taskProfile: TaskProfile | null;

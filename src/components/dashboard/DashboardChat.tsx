@@ -1,7 +1,7 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import { Bot, Check, Copy, FileText, MessageSquareText, Paperclip, Pause, Play, Plus, Route, RotateCcw, Trash2, UserCheck, X } from 'lucide-react';
 import { MorphIcon } from 'morphicons/react';
-import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, Session, TopologyAgent } from '../../types';
+import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, RunEvent, Session, TopologyAgent } from '../../types';
 import type { GuidanceState, ReviewResultState, RouteInsightState } from './dashboardTypes';
 import { AgentSignalGraph } from './AgentSignalGraph';
 import { InferenceOrb } from './InferenceOrb';
@@ -53,6 +53,7 @@ type Props = {
   onRemoveAttachment: (id: string) => void;
   agents: TopologyAgent[];
   graph: AgentGraph | null;
+  events: RunEvent[];
   selectedNodeId: string | null;
   onSelectAgent: (id: string) => void;
   reviewResult: ReviewResultState | null;
@@ -67,7 +68,7 @@ export function DashboardChat(props: Props) {
   const {
     sessions, activeSession, provider, phase, mode, draft, isRunning, agentActivity, error, onDraftChange, onModeChange,
     onSend, onStop, onPause, onResume, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, onNewTask, onSelectSession, onDeleteSession, attachments, onAddAttachments, onRemoveAttachment,
-    agents, graph, selectedNodeId, onSelectAgent, reviewResult, reviewNote, reviewBusy, onReviewNoteChange, onRequestApprove, onRequestReject,
+    agents, graph, events, selectedNodeId, onSelectAgent, reviewResult, reviewNote, reviewBusy, onReviewNoteChange, onRequestApprove, onRequestReject,
   } = props;
   const messageListRef = useRef<HTMLDivElement>(null);
   const sortedSessions = useMemo(() => {
@@ -119,7 +120,7 @@ export function DashboardChat(props: Props) {
           </div>)}
         </div>
       </aside>
-      <AgentSignalGraph agents={agents} graph={graph} phase={phase} selectedNodeId={selectedNodeId} onSelectAgent={onSelectAgent} />
+      <AgentSignalGraph agents={agents} graph={graph} phase={phase} events={events} selectedNodeId={selectedNodeId} onSelectAgent={onSelectAgent} />
     </div>
 
     <div className="dash-chat-panel">

@@ -213,6 +213,38 @@ test('Harness delegation APIs enforce availability, ownership, pause state, and 
   }
 });
 
+test('Harness Thread Graph API returns tenant-scoped breadth-first descendants from durable events', async () => {
+  const { store, api } = await createHarness();
+  const headers = { 'x-axiom-tenant-id': 'local', 'x-axiom-user-id': 'operator' };
+  try {
+    const task = await seedTask(store, 'paused');
+    await store.appendEvent(task, { type: 'harness.connected', payload: { threadId: 'root-thread' } });
+    await store.appendEvent(task, { type: 'thread.forked', payload: { childThreadId: 'child-a', harness: { threadId: 'child-a', parentThreadId: 'root-thread' } } });
+    await store.appendEvent(task, { type: 'thread.forked', payload: { childThreadId: 'child-b', harness: { threadId: 'child-b', parentThreadId: 'root-thread' } } });
+    await store.appendEvent(task, { type: 'thread.forked', payload: { childThreadId: 'grandchild', harness: { threadId: 'grandchild', parentThreadId: 'child-a' } } });
+    await store.appendEvent(task, { type: 'thread.closed', payload: { harness: { threadId: 'child-a' } } });
+
+    const response = await request(api, `/tasks/${task.id}/thread-graph?root=root-thread`, { headers });
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      graph: { nodes: Array<{ threadId: string; state: string }>; edges: unknown[] };
+      descendants: Array<{ threadId: string }>;
+    };
+    assert.deepEqual(body.descendants.map((node) => node.threadId), ['child-a', 'child-b', 'grandchild']);
+    assert.equal(body.graph.nodes.find((node) => node.threadId === 'child-a')?.state, 'closed');
+    assert.equal(body.graph.edges.length, 3);
+
+    const missingRoot = await request(api, `/tasks/${task.id}/thread-graph?root=missing`, { headers });
+    assert.equal(missingRoot.status, 404);
+    const foreignTenant = await request(api, `/tasks/${task.id}/thread-graph`, {
+      headers: { 'x-axiom-tenant-id': 'another-tenant', 'x-axiom-user-id': 'operator' },
+    });
+    assert.equal(foreignTenant.status, 404);
+  } finally {
+    await store.close();
+  }
+});
+
 test('live guidance enforces identity boundaries and rejects terminal tasks', async () => {
   const store = new SqliteTaskStore(':memory:');
   await store.initialize();

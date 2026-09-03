@@ -235,6 +235,7 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'thread.started': '外部 Thread 已启动',
     'thread.resumed': '外部 Thread 已恢复',
     'thread.forked': '外部 Thread 已创建分支',
+    'thread.closed': '外部 Thread 已关闭',
     'turn.started': 'Harness Turn 已开始',
     'turn.completed': 'Harness Turn 已完成',
     'turn.interrupted': 'Harness Turn 已中断',
@@ -1709,10 +1710,14 @@ function App() {
   const formatTaskDuration = (duration: number) => duration < 1_000 ? '不足 1 秒' : `${(duration / 1_000).toFixed(duration >= 60_000 ? 0 : 1)} 秒`;
 
   const addRunEvent = useCallback((eventPhase: AgentPhase, label: string) => {
-    setRunEvents((current) => [
-      ...current,
-      { id: makeId(), phase: eventPhase, label, at: Date.now() },
-    ].slice(-30));
+    setRunEvents((current) => {
+      const at = Date.now();
+      const previous = current[current.length - 1];
+      if (previous?.phase === eventPhase && previous.label === label && at - previous.at < 1_000) {
+        return [...current.slice(0, -1), { ...previous, at }];
+      }
+      return [...current, { id: makeId(), phase: eventPhase, label, at }].slice(-500);
+    });
   }, []);
 
   const applyWorkflowEvent = useCallback((event: WorkflowEvent, sessionId: string, assistantId: string) => {
@@ -3403,6 +3408,7 @@ function App() {
             theme={uiTheme}
             agents={topologyAgents}
             graph={agentGraph}
+            runEvents={runEvents}
             selectedNodeId={selectedNodeId}
             onSelectAgent={(agentId) => { setSelectedNodeId(agentId); setInspectorView('graph'); }}
             taskProfile={taskProfile}
