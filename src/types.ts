@@ -225,7 +225,32 @@ export type CollaborationMessage = {
   kind: string;
   content: string;
   artifactIds: string[];
+  handoff?: AgentHandoff;
   at: string;
+};
+
+export type EvidenceItem = {
+  id: string;
+  claim: string;
+  kind: 'user-fact' | 'tool-result' | 'external-source' | 'artifact' | 'dependency' | 'model-inference';
+  source: string;
+  verification: 'verified' | 'supported' | 'unverified' | 'contradicted';
+  confidence: number;
+  uri?: string;
+  title?: string;
+  locator?: string;
+  artifactId?: string;
+  publishedAt?: string;
+  retrievedAt?: string;
+};
+
+export type AgentHandoff = {
+  summary: string;
+  status: 'complete' | 'partial' | 'blocked';
+  artifactIds: string[];
+  evidenceIds: string[];
+  openQuestions: string[];
+  completionCriteria: string[];
 };
 
 export type CollaborationConflict = {
@@ -338,6 +363,11 @@ export type WorkflowEventType =
   | 'node.skip_requested'
   | 'node.completed_manually'
   | 'node.rerun_requested'
+  | 'node.pause_requested'
+  | 'node.resume_requested'
+  | 'node.replace_requested'
+  | 'node.result_locked'
+  | 'node.result_unlocked'
   | 'review.started'
   | 'review.completed'
   | 'review.approval_requested'
@@ -352,10 +382,12 @@ export type WorkflowEventType =
   | 'memory.capture.completed'
   | 'memory.capture.skipped'
   | 'memory.capture.failed'
+  | 'memory.policy_updated'
   | 'model.delta'
   | 'model.completed'
   | 'budget.exceeded'
   | 'budget.constrained'
+  | 'estimate.updated'
   | 'human.note'
   | 'human.guidance_accepted'
   | 'human.guidance_applied'
@@ -402,10 +434,12 @@ export type WorkflowTask = {
   model?: string;
   modelCredentialId?: string;
   status: WorkflowTaskStatus;
+  controlState?: Record<string, { paused: boolean; locked: boolean; lastActionAt: string; requestedBy?: string }>;
+  memoryPolicy?: { enabled: boolean; disabledAgentIds: string[]; updatedAt?: string; updatedBy?: string };
   plan?: {
     summary: string;
     routingReason: string;
-    steps?: Array<{ id: string; title: string; role: string; objective: string; dependsOn: string[]; acceptanceCriteria: string[]; skillIds?: string[] }>;
+    steps?: Array<{ id: string; title: string; role: string; objective: string; dependsOn: string[]; acceptanceCriteria: string[]; skillIds?: string[]; recoveryForStepId?: string }>;
     profile?: TaskProfile;
     graph?: AgentGraph;
     version?: number;
@@ -426,6 +460,8 @@ export type WorkflowTask = {
     outputChars?: number;
     outputTruncated?: boolean;
     evidence: string[];
+    evidenceDetails?: EvidenceItem[];
+    handoff?: AgentHandoff;
     confidence: number;
     attempts: number;
     durationMs: number;
@@ -433,6 +469,7 @@ export type WorkflowTask = {
     toolCalls?: ToolCall[];
     artifacts?: ArtifactRef[];
     skipped?: boolean;
+    recoveredByStepId?: string;
   }>;
   policy?: ExecutionPolicy;
   toolApprovals?: ToolApproval[];
@@ -482,6 +519,13 @@ export type WorkflowTaskSummary = {
   modelCalls: number;
   queueWaitMs: number;
   attempts: number;
+  estimate?: {
+    progress: number;
+    remainingSteps: number;
+    durationMs: { low: number; likely: number; high: number };
+    confidence: 'low' | 'medium' | 'high';
+    updatedAt: string;
+  };
   toolCalls: number;
   completedSteps: number;
   totalSteps: number;
@@ -496,6 +540,11 @@ export type WorkflowTaskSummary = {
     skippedSteps: number;
     acceptanceCriteria: number;
     evidenceItems: number;
+    verifiedEvidenceItems?: number;
+    supportedEvidenceItems?: number;
+    unverifiedEvidenceItems?: number;
+    contradictedEvidenceItems?: number;
+    recoveredFailures?: number;
     artifactRefs: number;
     toolReceipts: number;
     review: 'approved' | 'not-required' | 'pending' | 'rejected';
@@ -925,6 +974,8 @@ export type UserPlugin = {
     model?: string;
     toolNames?: string[];
     inputSchema?: { fields: PluginInputField[] };
+    workflowId?: string;
+    workflowVersion?: number;
     htmlContent?: string;
     width?: number;
     height?: number;

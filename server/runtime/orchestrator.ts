@@ -13,7 +13,9 @@ import type {
   AgentGraphNode,
   AgentGraphEdge,
   AgentMessage,
+  AgentHandoff,
   ArtifactRef,
+  EvidenceItem,
   WorkflowPlan,
   WorkflowStep,
   WorkflowTask,
@@ -34,6 +36,7 @@ import { selectNonConflictingSteps } from './workflowConcurrency.js';
 import type { ModelRoutingPolicy } from './modelRouting.js';
 import type { ArtifactStore } from './artifactStore.js';
 import type { ArtifactCatalog } from './artifactCatalog.js';
+import type { BusinessCapabilityStore } from './businessCapabilityStore.js';
 
 const nativeToolNameMaxLength = 64;
 
@@ -138,16 +141,100 @@ const buildPlanSchema = (customRoleIds: string[] = []) => z.object({
   })).min(1).max(8),
 });
 
+const evidenceOutputSchema = z.union([
+  z.string().min(1).max(2_000),
+  z.object({
+    claim: z.string().min(1).max(2_000),
+    kind: z.enum(['user-fact', 'tool-result', 'external-source', 'artifact', 'dependency', 'model-inference']).default('model-inference'),
+    source: z.string().min(1).max(500).default('model'),
+    verification: z.enum(['verified', 'supported', 'unverified', 'contradicted']).default('unverified'),
+    confidence: z.number().min(0).max(1).default(0.65),
+    uri: z.string().url().max(2_000).optional(),
+    title: z.string().max(500).optional(),
+    locator: z.string().max(500).optional(),
+    artifactId: z.string().max(500).optional(),
+    publishedAt: z.string().max(100).optional(),
+    retrievedAt: z.string().max(100).optional(),
+  }),
+]);
+
+const handoffOutputSchema = z.union([
+  z.string().min(1).max(2_000),
+  z.object({
+    summary: z.string().min(1).max(2_000),
+    status: z.enum(['complete', 'partial', 'blocked']).default('complete'),
+    artifactIds: z.array(z.string().min(1).max(500)).max(32).default([]),
+    evidenceIds: z.array(z.string().min(1).max(500)).max(64).default([]),
+    openQuestions: z.array(z.string().min(1).max(500)).max(12).default([]),
+    completionCriteria: z.array(z.string().min(1).max(500)).max(12).default([]),
+  }),
+]);
+
 const stepOutputSchema = z.object({
   output: z.string().min(1),
-  evidence: z.array(z.string()).max(20).default([]),
+  evidence: z.array(evidenceOutputSchema).max(20).default([]),
   confidence: z.number().min(0).max(1).default(0.65),
   toolCalls: z.array(z.object({
     name: z.string().min(1).max(80),
     args: z.record(z.string(), z.unknown()).default({}),
   })).max(4).default([]),
-  handoff: z.string().max(2_000).optional(),
+  handoff: handoffOutputSchema.optional(),
 });
+
+const evidenceId = (agentId: string, item: { claim: string; source: string }, index: number) => {
+  const digest = createHash('sha256').update(`${agentId}\0${item.source}\0${item.claim}`).digest('hex').slice(0, 16);
+  return `${agentId}:evidence:${index + 1}:${digest}`;
+};
+
+const normalizeEvidence = (
+  agentId: string,
+  evidence: z.infer<typeof evidenceOutputSchema>[],
+  fallbackConfidence: number,
+): { evidence: string[]; evidenceDetails: EvidenceItem[] } => {
+  const details = evidence.map((item, index): EvidenceItem => {
+    const normalized = typeof item === 'string'
+      ? {
+          claim: limitText(item, 1_000),
+          kind: 'model-inference' as const,
+          source: agentId,
+          verification: 'unverified' as const,
+          confidence: fallbackConfidence,
+        }
+      : {
+          ...item,
+          claim: limitText(item.claim, 1_000),
+          source: limitText(item.source, 500),
+          confidence: item.confidence,
+        };
+    return { id: evidenceId(agentId, normalized, index), ...normalized };
+  });
+  return { evidence: details.map((item) => item.claim), evidenceDetails: details };
+};
+
+const normalizeHandoff = (
+  handoff: z.infer<typeof handoffOutputSchema> | undefined,
+  fallback: { output: string; artifacts: ArtifactRef[]; evidence: EvidenceItem[]; completionCriteria: string[] },
+): AgentHandoff => {
+  const value = typeof handoff === 'string'
+    ? {
+        summary: handoff,
+        status: 'complete' as const,
+        artifactIds: [] as string[],
+        evidenceIds: [] as string[],
+        openQuestions: [] as string[],
+        completionCriteria: [] as string[],
+      }
+    : handoff;
+  return {
+    summary: limitText(value?.summary?.trim() || fallback.output, 2_000),
+    status: value?.status ?? 'complete',
+    artifactIds: [...new Set([...(value?.artifactIds ?? []), ...fallback.artifacts.map((artifact) => artifact.id)])].slice(0, 32),
+    evidenceIds: [...new Set([...(value?.evidenceIds ?? []), ...fallback.evidence.map((item) => item.id)])].slice(0, 64),
+    openQuestions: (value?.openQuestions ?? []).map((item) => limitText(item, 500)).slice(0, 12),
+    completionCriteria: (value?.completionCriteria?.length ? value.completionCriteria : fallback.completionCriteria)
+      .map((item) => limitText(item, 500)).slice(0, 12),
+  };
+};
 
 const reviewSchema = z.object({
   approved: z.boolean(),
@@ -554,10 +641,13 @@ const retryDelay = (ms: number, signal: AbortSignal) => new Promise<void>((resol
 
 export class WorkflowOrchestrator {
   private readonly taskModels = new Map<string, Promise<ModelClient>>();
+  private readonly activeStepControllers = new Map<string, Map<string, AbortController>>();
   private readonly guidanceLocks = new Map<string, Promise<void>>();
+  private readonly memoryPolicies = new Map<string, { enabled: boolean; disabledAgentIds: Set<string> }>();
   private readonly stepConcurrency: number;
   private readonly reasoningStepConcurrency: number;
   private readonly stepMaxAttempts: number;
+  private readonly maxAutoReplans: number;
   private readonly reasoningStepTimeoutMs: number;
   private readonly reviewCorrectionRounds: number;
   private readonly requireReviewApproval: boolean;
@@ -566,6 +656,84 @@ export class WorkflowOrchestrator {
   private readonly synthesisContinuationRounds: number;
   private readonly stepResultArtifactThreshold: number;
   private readonly stepResultPreviewChars: number;
+
+  pauseStep(taskId: string, stepId: string) {
+    const controller = this.activeStepControllers.get(taskId)?.get(stepId);
+    if (!controller || controller.signal.aborted) return false;
+    controller.abort(new DOMException('目标 Agent 已由操作员暂停。', 'AgentPaused'));
+    return true;
+  }
+
+  private async executeControlledStep(
+    task: WorkflowTask,
+    step: WorkflowStep,
+    results: StepResult[],
+    notes: string,
+    taskSignal: AbortSignal,
+  ) {
+    const controller = new AbortController();
+    const taskControllers = this.activeStepControllers.get(task.id) ?? new Map<string, AbortController>();
+    taskControllers.set(step.id, controller);
+    this.activeStepControllers.set(task.id, taskControllers);
+    try {
+      return await this.executeStep(task, step, results, notes, AbortSignal.any([taskSignal, controller.signal]));
+    } finally {
+      taskControllers.delete(step.id);
+      if (taskControllers.size === 0) this.activeStepControllers.delete(task.id);
+    }
+  }
+
+  private async recallMemory(task: WorkflowTask, agentId: string, query: string, signal: AbortSignal) {
+    const policy = this.memoryPolicies.get(task.id);
+    if (policy && (!policy.enabled || policy.disabledAgentIds.has(agentId))) {
+      return {
+        context: '', itemCount: 0, available: false, items: [],
+        quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } },
+        disabledByPolicy: true,
+      };
+    }
+    const recalled = await this.memory.recall(task, agentId, query, signal).catch(() => ({
+      context: '', itemCount: 0, available: false, items: [],
+      quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } },
+    }));
+    const managed = this.businessCapabilities ? await this.businessCapabilities.list(task.tenantId, 'memory', { userId: task.userId, limit: 500 }).catch(() => []) : [];
+    const now = Date.now();
+    const applicable = managed.filter((record) => {
+      if (record.status !== 'active' || record.data.enabled === false) return false;
+      if (typeof record.data.expiresAt === 'string' && Date.parse(record.data.expiresAt) <= now) return false;
+      if (record.data.scope === 'session') return record.data.scopeId === task.sessionId;
+      if (record.data.scope === 'agent') return record.data.scopeId === agentId;
+      if (record.data.scope === 'project') return typeof record.data.scopeId === 'string' && task.input.includes(`[项目ID:${record.data.scopeId}]`);
+      return record.data.scope === 'user';
+    }).slice(0, 20);
+    if (!applicable.length) return recalled;
+    const localContext = applicable.map((record) => `- [${String(record.data.layer)} · ${String(record.data.source)}] ${String(record.data.content)}`).join('\n');
+    return {
+      ...recalled,
+      context: [recalled.context, `平台管理的长期记忆：\n${localContext}`].filter(Boolean).join('\n\n'),
+      itemCount: recalled.itemCount + applicable.length,
+      available: true,
+      items: [...recalled.items, ...applicable.map((record) => ({
+        memoryId: record.id,
+        layer: (['L1', 'L2', 'L3'].includes(String(record.data.layer)) ? record.data.layer : 'L1') as 'L1' | 'L2' | 'L3',
+        source: `axiom-managed:${String(record.data.source)}`,
+        content: String(record.data.content),
+        confidence: Number(record.data.confidence ?? 0.8),
+        updatedAt: record.updatedAt,
+        ...(typeof record.data.expiresAt === 'string' ? { expiresAt: record.data.expiresAt } : {}),
+      }))],
+      quality: {
+        ...recalled.quality,
+        candidates: recalled.quality.candidates + applicable.length,
+        byLayer: {
+          ...recalled.quality.byLayer,
+          L1: recalled.quality.byLayer.L1 + applicable.filter((record) => !['L2', 'L3'].includes(String(record.data.layer))).length,
+          L2: recalled.quality.byLayer.L2 + applicable.filter((record) => record.data.layer === 'L2').length,
+          L3: recalled.quality.byLayer.L3 + applicable.filter((record) => record.data.layer === 'L3').length,
+        },
+      },
+    };
+  }
 
   constructor(
     private readonly store: TaskStore,
@@ -579,6 +747,7 @@ export class WorkflowOrchestrator {
     private readonly modelRouting?: ModelRoutingPolicy,
     private readonly artifactStore?: ArtifactStore | null,
     private readonly artifactCatalog?: ArtifactCatalog | null,
+    private readonly businessCapabilities?: BusinessCapabilityStore,
   ) {
     // Dependency-ready steps define the useful parallelism; six is the
     // system safety ceiling, not a setting ordinary users need to tune.
@@ -591,6 +760,8 @@ export class WorkflowOrchestrator {
     );
     const configuredStepAttempts = Number(process.env.AGENT_STEP_MAX_ATTEMPTS ?? 2);
     this.stepMaxAttempts = Math.min(4, Math.max(1, Number.isFinite(configuredStepAttempts) ? configuredStepAttempts : 2));
+    const configuredAutoReplans = Number(process.env.AXIOM_MAX_AUTO_REPLANS ?? 2);
+    this.maxAutoReplans = Math.min(3, Math.max(0, Number.isFinite(configuredAutoReplans) ? configuredAutoReplans : 2));
     const configuredReasoningStepTimeout = Number(process.env.AGENT_REASONING_STEP_TIMEOUT_MS ?? 300_000);
     this.reasoningStepTimeoutMs = Math.max(
       120_000,
@@ -669,7 +840,7 @@ export class WorkflowOrchestrator {
     task: WorkflowTask,
     result: StepResult,
     fullOutput: string,
-    handoff?: string,
+    handoff?: AgentHandoff,
   ): Promise<StepResult> {
     const outputChars = fullOutput.length;
     if (outputChars <= this.stepResultArtifactThreshold) return { ...result, output: fullOutput, outputChars };
@@ -708,7 +879,7 @@ export class WorkflowOrchestrator {
         this.logger.warn({ taskId: task.id, stepId: result.stepId, artifactId, error }, 'step result Artifact catalog registration failed');
       }
       const existingArtifacts = (result.artifacts ?? []).filter((artifact) => artifact.id !== artifactId);
-      const previewSource = handoff?.trim() || fullOutput;
+      const previewSource = handoff?.summary.trim() || fullOutput;
       const preview = `${limitText(previewSource, this.stepResultPreviewChars)}\n\n[完整结果已保存为 Artifact：${artifactId}，共 ${outputChars} 字符]`;
       await this.emit(task, {
         type: 'artifact.created',
@@ -771,6 +942,39 @@ export class WorkflowOrchestrator {
     const persisted = await this.store.appendEvent(task, event);
     this.hub.publish(persisted);
     return persisted;
+  }
+
+  private async emitEstimate(task: WorkflowTask, plan: WorkflowPlan, results: StepResult[], stage: string) {
+    const settledIds = new Set(results.map((result) => result.stepId));
+    const remainingSteps = plan.steps.filter((step) => !settledIds.has(step.id));
+    const measured = results.map((result) => result.durationMs).filter((duration) => Number.isFinite(duration) && duration > 0);
+    const averageMeasured = measured.length ? measured.reduce((sum, duration) => sum + duration, 0) / measured.length : 0;
+    const plannedAverage = remainingSteps.length
+      ? remainingSteps.reduce((sum, step) => sum + Math.min(step.maxDurationMs ?? this.reasoningStepTimeoutMs, this.reasoningStepTimeoutMs), 0) / remainingSteps.length
+      : 0;
+    const observedStepMs = averageMeasured || plannedAverage || 30_000;
+    const concurrency = Math.max(1, Math.min(task.policy.maxConcurrentSteps ?? this.stepConcurrency, remainingSteps.length || 1));
+    const likely = Math.max(0, Math.round((observedStepMs * remainingSteps.length) / concurrency));
+    const uncertainty = measured.length >= 6 ? .25 : measured.length >= 2 ? .5 : .8;
+    await this.emit(task, {
+      type: 'estimate.updated',
+      agentId: 'scheduler-agent',
+      payload: {
+        stage,
+        progress: plan.steps.length ? Math.min(1, settledIds.size / plan.steps.length) : 1,
+        completedSteps: settledIds.size,
+        remainingSteps: remainingSteps.length,
+        activeConcurrency: concurrency,
+        observedSamples: measured.length,
+        durationMs: {
+          low: Math.max(0, Math.round(likely * (1 - uncertainty * .55))),
+          likely,
+          high: Math.max(likely, Math.round(likely * (1 + uncertainty))),
+        },
+        confidence: measured.length >= 6 ? 'high' : measured.length >= 2 ? 'medium' : 'low',
+        basis: measured.length ? '当前任务已完成 Agent 的真实耗时' : '当前计划的 Agent 超时边界',
+      },
+    });
   }
 
   private async saveCheckpoint(task: WorkflowTask, results: StepResult[], stage: string, totalSteps: number) {
@@ -1146,10 +1350,7 @@ Do not claim tools or evidence that are not available.`,
       },
     });
     await this.emit(task, { type: 'memory.recall.started', agentId, payload: { query: limitText(step.objective, 500) } });
-    const recall = await this.memory.recall(task, agentId, `${task.input}\n${step.objective}`, signal).catch(() => ({
-      context: '', itemCount: 0, available: false, items: [],
-      quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } },
-    }));
+    const recall = await this.recallMemory(task, agentId, `${task.input}\n${step.objective}`, signal);
     await this.emit(task, {
       type: 'memory.recall.completed',
       agentId,
@@ -1157,14 +1358,44 @@ Do not claim tools or evidence that are not available.`,
     });
 
     const dependencyResults = completed.filter((result) => step.dependsOn.includes(result.stepId));
-    const dependencyMessages: AgentMessage[] = dependencyResults.map((result) => ({
-      id: `${task.id}:${step.id}:handoff:${result.stepId}`,
-      fromAgentId: result.agentId,
-      toAgentId: agentId,
-      kind: result.artifacts?.length ? 'artifact-share' : 'dependency-context',
-      content: limitText(result.output, this.stepResultPreviewChars),
-      artifactIds: (result.artifacts ?? []).map((artifact) => artifact.id),
-      createdAt: new Date().toISOString(),
+    const dependencyMessages: AgentMessage[] = await Promise.all(dependencyResults.map(async (result) => {
+      const artifactIds = [...new Set([
+        ...(result.handoff?.artifactIds ?? []),
+        ...(result.artifacts ?? []).map((artifact) => artifact.id),
+      ])];
+      const handoff = result.handoff ?? normalizeHandoff(undefined, {
+        output: result.output,
+        artifacts: result.artifacts ?? [],
+        evidence: result.evidenceDetails ?? [],
+        completionCriteria: [],
+      });
+      const transfer = step.agentContract?.dependencyTransfers?.[result.stepId] ?? { mode: 'summary' as const };
+      let content = handoff.summary;
+      if (transfer.mode === 'full') {
+        const stored = result.resultRef && this.artifactStore
+          ? await this.artifactStore.get(result.resultRef.id, task.tenantId).catch(() => null)
+          : null;
+        content = limitText(stored ?? result.output, 48_000);
+      } else if (transfer.mode === 'fields') {
+        try {
+          const parsed = JSON.parse(result.output) as Record<string, unknown>;
+          content = JSON.stringify(Object.fromEntries((transfer.fields ?? []).filter((field) => field in parsed).map((field) => [field, parsed[field]])));
+        } catch {
+          content = `指定字段无法从非 JSON 输出中读取。可用交接摘要：${handoff.summary}`;
+        }
+      } else if (transfer.mode === 'reference') {
+        content = `上游结果仅通过引用传递：${result.resultRef?.id ?? (artifactIds.join(', ') || '没有可用 Artifact 引用')}`;
+      }
+      return {
+        id: `${task.id}:${step.id}:handoff:${result.stepId}`,
+        fromAgentId: result.agentId,
+        toAgentId: agentId,
+        kind: artifactIds.length ? 'artifact-share' : 'handoff',
+        content,
+        artifactIds,
+        handoff,
+        createdAt: new Date().toISOString(),
+      };
     }));
     for (const message of dependencyMessages) {
       await this.emit(task, {
@@ -1177,11 +1408,16 @@ Do not claim tools or evidence that are not available.`,
           kind: message.kind,
           content: message.content,
           artifactIds: message.artifactIds,
+          handoff: message.handoff,
         },
       });
     }
     const dependencyContext = dependencyResults
-      .map((result) => `### ${result.stepId} (${result.role})\n${limitText(result.output, this.stepResultPreviewChars)}\nresult_ref: ${result.resultRef?.id ?? 'None.'}\nArtifact refs: ${(result.artifacts ?? []).map((artifact) => artifact.id).join(', ') || 'None.'}`)
+      .map((result) => {
+        const message = dependencyMessages.find((candidate) => candidate.fromAgentId === result.agentId);
+        const handoff = message?.handoff;
+        return `### ${result.stepId} (${result.role})\n交接状态：${handoff?.status ?? 'complete'}\n交接摘要：${handoff?.summary ?? limitText(result.output, this.stepResultPreviewChars)}\n按连线传递的内容：${message?.content ?? handoff?.summary ?? limitText(result.output, this.stepResultPreviewChars)}\n未决问题：${handoff?.openQuestions.join('；') || '无'}\n证据引用：${handoff?.evidenceIds.join(', ') || '无'}\nresult_ref: ${result.resultRef?.id ?? 'None.'}\nArtifact refs: ${handoff?.artifactIds.join(', ') || (result.artifacts ?? []).map((artifact) => artifact.id).join(', ') || 'None.'}`;
+      })
       .join('\n\n');
     const specialistId = step.agentContract?.agentId;
     if (specialistId && isWorkflowSpecialist(specialistId)) {
@@ -1241,20 +1477,29 @@ Do not claim tools or evidence that are not available.`,
           serviceAgent: specialistId,
         },
       });
+      const normalizedEvidence = normalizeEvidence(agentId, specialistResult.evidence, specialistResult.confidence);
+      const handoff = normalizeHandoff(undefined, {
+        output: specialistResult.output,
+        artifacts: [],
+        evidence: normalizedEvidence.evidenceDetails,
+        completionCriteria: step.acceptanceCriteria,
+      });
       let result: StepResult = {
         stepId: step.id,
         agentId,
         role: step.role,
         status: 'completed',
         output: specialistResult.output,
-        evidence: specialistResult.evidence.map((item) => limitText(item, 1_000)),
+        evidence: normalizedEvidence.evidence,
+        evidenceDetails: normalizedEvidence.evidenceDetails,
+        handoff,
         confidence: specialistResult.confidence,
         attempts: specialistAttempt,
         durationMs,
         tokens: 0,
         messages: dependencyMessages,
       };
-      result = await this.materializeStepResult(task, result, specialistResult.output);
+      result = await this.materializeStepResult(task, result, specialistResult.output, handoff);
       await this.emit(task, {
         type: 'agent.completed',
         agentId,
@@ -1267,6 +1512,8 @@ Do not claim tools or evidence that are not available.`,
           skillIds: step.skillIds,
           output: limitText(result.output, 8_000),
           evidence: result.evidence,
+          evidenceDetails: result.evidenceDetails,
+          handoff: result.handoff,
           confidence: result.confidence,
           stepAttempts: result.attempts,
           durationMs,
@@ -1314,7 +1561,8 @@ Do not claim tools or evidence that are not available.`,
           temperature: step.role === 'builder' ? 0.25 : 0.15,
            system: `You are a ${step.role} sub-agent inside a production workflow.${roleGuidance ? `\nRole guidance: ${roleGuidance}` : ''}${selectedSkillInstructions.length ? `\nSelected skills for this turn (follow only these):\n- ${selectedSkillInstructions.join('\n- ')}` : ''}${detailedResearchReport ? '\nThis is a detailed research report task. Preserve concrete evidence, source URLs, numerical ranges, maturity assessments, cost components, risks, and every requested delivery dimension. Do not replace substantive work with a short summary.' : ''}
 Work only on the assigned objective. Use dependency outputs as scoped evidence, not as unquestioned truth.
-Return JSON only: {"output":"complete result","evidence":["specific supporting fact or dependency"],"confidence":0.0,"toolCalls":[],"handoff":"optional concise handoff for downstream agents"}.
+Return JSON only: {"output":"complete result","evidence":[{"claim":"specific supporting claim","kind":"user-fact|tool-result|external-source|artifact|dependency|model-inference","source":"URL, Artifact id, tool audit id, dependency Agent, user input, or model","verification":"verified|supported|unverified|contradicted","confidence":0.0,"uri":"optional https URL","locator":"optional page, section, line, or field","artifactId":"optional Artifact id"}],"confidence":0.0,"toolCalls":[],"handoff":{"summary":"concise downstream handoff","status":"complete|partial|blocked","artifactIds":[],"evidenceIds":[],"openQuestions":[],"completionCriteria":[]}}.
+Never mark a model inference as verified. Use verified only for direct tool receipts or user-provided facts, supported for traceable external sources or dependency evidence, and contradicted when supplied evidence conflicts.
            ${canUseTools && this.tools?.enabled()
            ? `When workspace inspection or verification is required, request up to four tools from this catalog: ${JSON.stringify(availableTools)}. Use bounded arguments and do not claim results before the runtime returns them. Legacy JSON toolCalls must use the exact registry names shown in the catalog. Native function calls must use one of these protocol-safe aliases: ${JSON.stringify(Object.fromEntries(nativeToolAliases.actualToAlias.entries()))}.${allowedTools.length ? ` Allowed step tools: ${allowedTools.join(', ')}` : ''}`
   : 'Set toolCalls to an empty array. Never claim to have executed tools, accessed systems, or verified facts unless the supplied context proves it.'}`,
@@ -1337,6 +1585,7 @@ Return JSON only: {"output":"complete result","evidence":["specific supporting f
             objective: step.objective,
             dependsOn: step.dependsOn,
             skillIds: step.skillIds,
+            model: step.model ?? task.model ?? this.model.model,
             failedAttempt: stepAttempt,
             nextAttempt: stepAttempt + 1,
             error: limitText(caught instanceof Error ? caught.message : 'Sub-agent attempt failed.', 1_000),
@@ -1446,7 +1695,7 @@ Return JSON only: {"output":"complete result","evidence":["specific supporting f
         temperature: 0.1,
         system: `You are a builder finalizing a workflow step from real sandbox tool results.
 Do not claim a tool succeeded when its exit code is non-zero. Cite audit IDs in evidence.
-Return JSON only: {"output":"complete result","evidence":["specific verified fact"],"confidence":0.0,"toolCalls":[]}.`,
+Return JSON only: {"output":"complete result","evidence":[{"claim":"specific verified fact","kind":"tool-result","source":"tool audit id","verification":"verified","confidence":0.0}],"confidence":0.0,"toolCalls":[],"handoff":{"summary":"verified tool outcome","status":"complete","artifactIds":[],"evidenceIds":[],"openQuestions":[],"completionCriteria":[]}}.`,
         user: `Original objective:\n${step.objective}\n\nAcceptance criteria:\n- ${step.acceptanceCriteria.join('\n- ')}\n\nVerified tool results:\n${verifiedToolContext}`,
       });
       try {
@@ -1457,13 +1706,34 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
     }
     const artifacts = toolExecutions.flatMap((execution) => execution.artifact ? [execution.artifact] : []);
     const toolCalls = toolExecutions.map((execution) => execution.call);
+    const normalizedEvidence = normalizeEvidence(agentId, structured.evidence, structured.confidence);
+    const toolEvidence: EvidenceItem[] = toolExecutions.map((execution, index) => ({
+      id: `${agentId}:tool-evidence:${index + 1}:${execution.auditId}`,
+      claim: limitText(execution.output || `${execution.call.name} 已执行。`, 1_000),
+      kind: 'tool-result',
+      source: `${execution.call.name} · ${execution.auditId}`,
+      verification: execution.exitCode === 0 ? 'verified' : 'contradicted',
+      confidence: execution.exitCode === 0 ? 1 : 0,
+      ...(execution.artifact ? { artifactId: execution.artifact.id } : {}),
+    }));
+    const evidenceDetails = [...normalizedEvidence.evidenceDetails, ...toolEvidence]
+      .filter((item, index, values) => values.findIndex((candidate) => candidate.id === item.id) === index)
+      .slice(0, 32);
+    const handoff = normalizeHandoff(structured.handoff, {
+      output: structured.output,
+      artifacts,
+      evidence: evidenceDetails,
+      completionCriteria: step.acceptanceCriteria,
+    });
     let result: StepResult = {
       stepId: step.id,
       agentId,
       role: step.role,
       status: 'completed',
       output: structured.output,
-      evidence: structured.evidence.map((item) => limitText(item, 1_000)),
+      evidence: evidenceDetails.map((item) => item.claim),
+      evidenceDetails,
+      handoff,
       confidence: structured.confidence,
       attempts: stepAttempt,
       durationMs: Date.now() - startedAt,
@@ -1472,7 +1742,7 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
       artifacts,
       messages: dependencyMessages,
     };
-    result = await this.materializeStepResult(task, result, structured.output, structured.handoff);
+    result = await this.materializeStepResult(task, result, structured.output, handoff);
     await this.emit(task, {
       type: 'agent.completed',
       agentId,
@@ -1485,6 +1755,7 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
         skillIds: step.skillIds,
         output: limitText(result.output, 8_000),
         evidence: result.evidence,
+        evidenceDetails: result.evidenceDetails,
         confidence: result.confidence,
         stepAttempts: result.attempts,
         upstreamAttempts: completion.attempts,
@@ -1492,7 +1763,7 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
         toolCalls: result.toolCalls,
         artifacts: result.artifacts,
         messages: result.messages,
-        handoff: structured.handoff,
+        handoff: result.handoff,
         usage: completion.usage,
       },
     });
@@ -1503,18 +1774,20 @@ Return JSON only: {"output":"complete result","evidence":["specific verified fac
     task: WorkflowTask,
     results: StepResult[],
     signal: AbortSignal,
+    attempt = 1,
   ): Promise<ReviewResult> {
     const reviewerId = 'reviewer-final';
-    await this.emit(task, { type: 'review.started', agentId: reviewerId, payload: { resultCount: results.length } });
-    const recall = await this.memory.recall(task, reviewerId, `${task.input}\n${results.map((result) => result.output).join('\n')}`, signal).catch(() => ({
-      context: '', itemCount: 0, available: false, items: [],
-      quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } },
-    }));
+    const reviewerModel = task.model
+      ?? this.modelRouting?.select(this.plannerModelCatalog(task), { kind: task.plan?.profile?.kind, role: 'reviewer' })
+      ?? (await this.modelForTask(task)).model;
+    await this.emit(task, { type: 'review.started', agentId: reviewerId, payload: { resultCount: results.length, model: reviewerModel, attempt } });
+    const recall = await this.recallMemory(task, reviewerId, `${task.input}\n${results.map((result) => result.output).join('\n')}`, signal);
     const guidance = await this.applyPendingGuidance(task, 'reviewer', [reviewerId]);
     const reviewedWork = await this.buildResultContext(task, results, { maxPerResult: 10_000, maxTotal: 52_000, dereference: true });
     const completion = await this.complete(task, 'reviewer', {
       signal,
       responseFormat: 'json',
+      model: reviewerModel,
       temperature: 0.05,
       cacheNamespace: 'axiom:reviewer:v1',
       artifactRefs: reviewedWork.artifactRefs,
@@ -1551,7 +1824,7 @@ Return JSON only: {"approved":true,"score":0,"summary":"...","gaps":[],"required
     await this.emit(task, {
       type: 'review.completed',
       agentId: reviewerId,
-      payload: review,
+      payload: { ...review, model: reviewerModel, attempt },
     });
     return review;
   }
@@ -1896,6 +2169,17 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
     try {
       await this.assertActive(task.id, signal);
       const priorControlEvents = await this.store.getEvents(task.id);
+      const memoryPolicyEvent = priorControlEvents.filter((event) => event.type === 'memory.policy_updated').at(-1);
+      if (memoryPolicyEvent) {
+        this.memoryPolicies.set(task.id, {
+          enabled: memoryPolicyEvent.payload.enabled !== false,
+          disabledAgentIds: new Set(Array.isArray(memoryPolicyEvent.payload.disabledAgentIds)
+            ? memoryPolicyEvent.payload.disabledAgentIds.filter((item): item is string => typeof item === 'string')
+            : []),
+        });
+      } else {
+        this.memoryPolicies.delete(task.id);
+      }
       const profile = task.plan?.profile ?? classifyTask(task.input, task.mode);
       const routingDecision = task.plan?.routingDecision;
       const schedulingDecision = task.plan?.schedulingDecision;
@@ -1943,10 +2227,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
 
       let plan = task.plan;
       if (!plan) {
-        const recall = await this.memory.recall(task, 'planner', task.input, signal).catch(() => ({
-          context: '', itemCount: 0, available: false, items: [],
-          quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } },
-        }));
+        const recall = await this.recallMemory(task, 'planner', task.input, signal);
         try {
           plan = await this.plan(task, recall.context, signal, profile);
         } catch (error) {
@@ -2010,6 +2291,8 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       task = await this.store.updateTask(task.id, { status: 'running' });
       let results = [...task.stepResults];
       const workflowFailures: Array<{ stepId: string; title: string; error: unknown }> = [];
+      let autoReplanGeneration = priorControlEvents.filter((event) => event.type === 'plan.replanned'
+        && event.payload.trigger === 'automatic-failure').length;
       const pending = new Map(plan.steps
         .filter((step) => !results.some((result) => result.stepId === step.id && (result.status === 'completed' || result.skipped)))
         .map((step) => [step.id, step]));
@@ -2032,10 +2315,19 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           graph,
         },
       });
+      await this.emitEstimate(task, plan, results, 'execution-started');
       let loopIteration = priorIterations;
       while (pending.size > 0) {
         await this.assertActive(task.id, signal);
         loopIteration += 1;
+        const latestStepControls = new Map<string, 'paused' | 'resumed'>();
+        for (const event of await this.store.getEvents(task.id)) {
+          const stepId = typeof event.payload.stepId === 'string' ? event.payload.stepId : '';
+          if (!stepId) continue;
+          if (event.type === 'node.pause_requested') latestStepControls.set(stepId, 'paused');
+          if (event.type === 'node.resume_requested') latestStepControls.set(stepId, 'resumed');
+        }
+        const pausedStepIds = new Set([...latestStepControls.entries()].filter(([, state]) => state === 'paused').map(([stepId]) => stepId));
         // A failed step is also a durable checkpoint. Downstream Agents receive
         // its diagnostic output and can continue with a bounded partial result
         // instead of becoming stuck on an unresolved dependency join.
@@ -2043,8 +2335,13 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           .filter((result) => result.status === 'completed' || result.status === 'failed' || result.skipped)
           .map((result) => result.stepId));
         const readyCandidates = [...pending.values()]
-          .filter((step) => step.dependsOn.every((dependency) => completedIds.has(dependency)))
+          .filter((step) => !pausedStepIds.has(step.id) && step.dependsOn.every((dependency) => completedIds.has(dependency)))
           .slice(0, Math.min(waveConcurrency, task.policy.maxConcurrentSteps ?? waveConcurrency));
+        if (!readyCandidates.length && [...pending.keys()].some((stepId) => pausedStepIds.has(stepId))) {
+          task = await this.store.updateTask(task.id, { status: 'paused', stepResults: results, error: '一个或多个 Agent 已由操作员暂停。' });
+          await this.emit(task, { type: 'task.paused', payload: { stepIds: [...pausedStepIds].filter((stepId) => pending.has(stepId)), reason: 'agent-level-pause', preservedCompletedSteps: results.map((result) => result.stepId) } });
+          return task;
+        }
         if (!readyCandidates.length) throw new Error('Workflow plan contains an unresolved dependency cycle.');
 
         // Condition edges are evaluated only after all source Agents have a
@@ -2161,13 +2458,21 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
             guidanceIds: guidance.guidanceIds,
           },
         });
-        const batch = await Promise.allSettled(ready.map((step) => this.executeStep(task, step, results, notes, signal)));
+        const batch = await Promise.allSettled(ready.map((step) => this.executeControlledStep(task, step, results, notes, signal)));
+        const preservedSettledSiblingResults = batch.flatMap((outcome, index) => outcome.status === 'fulfilled'
+          ? [ready[index]!.id]
+          : []);
         const completedBatchResults: StepResult[] = [];
+        const failedBatchSteps: Array<{ step: WorkflowStep; result: StepResult; error: unknown }> = [];
         let approvalPause: ToolApprovalRequiredError | undefined;
         let humanPause = false;
         for (let index = 0; index < batch.length; index += 1) {
           const outcome = batch[index]!;
           const step = ready[index]!;
+          if (outcome.status === 'rejected' && outcome.reason instanceof DOMException && outcome.reason.name === 'AgentPaused') {
+            await this.emit(task, { type: 'agent.interrupted', agentId: `${step.role}-${step.id}`, payload: { stepId: step.id, reason: 'operator-pause', preservedSiblingResults: preservedSettledSiblingResults.filter((stepId) => stepId !== step.id) } });
+            continue;
+          }
           if (outcome.status === 'rejected' && outcome.reason instanceof ToolApprovalRequiredError) {
             // Keep the blocked step pending. Completed siblings can still be checkpointed,
             // while the outer run exits through the durable waiting_for_human state.
@@ -2186,6 +2491,11 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           if (outcome.status === 'fulfilled') {
             results.push(outcome.value);
             completedBatchResults.push(outcome.value);
+            if (step.recoveryForStepId) {
+              results = results.map((result) => result.stepId === step.recoveryForStepId && result.status === 'failed'
+                ? { ...result, recoveredByStepId: step.id }
+                : result);
+            }
           } else {
             const failed: StepResult = {
               stepId: step.id,
@@ -2201,6 +2511,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
               skipped: step.failureStrategy === 'skip',
             };
             results.push(failed);
+            if (!failed.skipped) failedBatchSteps.push({ step, result: failed, error: outcome.reason });
             if (!failed.skipped) workflowFailures.push({ stepId: step.id, title: step.title, error: outcome.reason });
             await this.emit(task, {
               type: 'agent.failed',
@@ -2220,6 +2531,76 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
               },
             });
           }
+        }
+        for (const failure of failedBatchSteps) {
+          if (autoReplanGeneration >= this.maxAutoReplans) break;
+          const downstream = [...pending.values()].filter((candidate) => candidate.dependsOn.includes(failure.step.id));
+          if (!downstream.length) continue;
+          autoReplanGeneration += 1;
+          const originalFailedStepId = failure.step.recoveryForStepId ?? failure.step.id;
+          const recoveryId = `${originalFailedStepId}-recovery-${autoReplanGeneration}`;
+          const recoveryStep: WorkflowStep = {
+            id: recoveryId,
+            title: `恢复 · ${failure.step.title}`,
+            role: failure.step.role,
+            objective: `诊断步骤“${failure.step.title}”的失败原因，在不扩大工具权限、写入范围或预算的前提下完成原目标。失败诊断：${limitText(failure.result.output, 1_000)}`,
+            dependsOn: [failure.step.id],
+            acceptanceCriteria: [...failure.step.acceptanceCriteria],
+            skillIds: [...(failure.step.skillIds ?? [])],
+            model: failure.step.model,
+            toolNames: [],
+            writeScopes: [],
+            maxTokens: failure.step.maxTokens,
+            maxDurationMs: failure.step.maxDurationMs,
+            failureStrategy: 'retry',
+            recoveryForStepId: originalFailedStepId,
+            agentContract: failure.step.agentContract ? {
+              ...failure.step.agentContract,
+              toolAllowlist: [],
+              completionCriteria: [...failure.step.acceptanceCriteria],
+            } : undefined,
+          };
+          const rewiredStepIds = downstream.map((candidate) => candidate.id);
+          const nextSteps: WorkflowStep[] = plan.steps.map((candidate): WorkflowStep => rewiredStepIds.includes(candidate.id)
+            ? { ...candidate, dependsOn: candidate.dependsOn.map((dependency) => dependency === failure.step.id ? recoveryId : dependency) }
+            : candidate);
+          nextSteps.push(recoveryStep);
+          for (const candidate of downstream) {
+            pending.set(candidate.id, nextSteps.find((step: WorkflowStep) => step.id === candidate.id)!);
+          }
+          pending.set(recoveryId, recoveryStep);
+          const oldPlanVersion: number = plan.version ?? task.planVersion ?? 1;
+          const newPlanVersion: number = oldPlanVersion + 1;
+          plan = {
+            ...plan,
+            steps: nextSteps,
+            version: newPlanVersion,
+            approvalStatus: 'approved',
+            approvedAt: new Date().toISOString(),
+            approvedBy: 'bounded-auto-replanner',
+          };
+          const replannedGraph = nextGraph(results);
+          plan = { ...plan, graph: replannedGraph };
+          task = await this.store.updateTask(task.id, { plan, planVersion: newPlanVersion, stepResults: results });
+          await this.emit(task, {
+            type: 'plan.replanned',
+            agentId: 'replanner-agent',
+            payload: {
+              trigger: 'automatic-failure',
+              generation: autoReplanGeneration,
+              failedStepIds: [failure.step.id],
+              addedSteps: [recoveryId],
+              rewiredSteps: rewiredStepIds,
+              preservedCompletedSteps: results.filter((result) => result.status === 'completed').map((result) => result.stepId),
+              oldPlanVersion,
+              newPlanVersion,
+              riskIncreased: false,
+              budgetIncreased: false,
+              reason: failureLabel(failure.error),
+              graph: replannedGraph,
+            },
+          });
+          await this.emit(task, { type: 'graph.updated', agentId: 'replanner-agent', payload: { graph: replannedGraph, reason: 'automatic-replan' } });
         }
         for (const conflict of detectParallelConflicts(completedBatchResults)) {
           await this.emit(task, {
@@ -2242,6 +2623,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
             iteration: loopIteration,
           },
         });
+        await this.emitEstimate(task, plan, results, `loop:${loopIteration}`);
         if (approvalPause) throw approvalPause;
         if (humanPause) {
           task = await this.store.updateTask(task.id, { status: 'waiting_for_human', stepResults: results, error: '步骤失败策略要求人工处理。' });
@@ -2251,8 +2633,13 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
 
       await this.assertActive(task.id, signal);
       const completedResults = results.filter((result) => result.status === 'completed' && !result.skipped);
-      if (workflowFailures.length > 0 && completedResults.length === 0) {
-        throw new Error(failureSummary(workflowFailures));
+      const unresolvedWorkflowFailures = workflowFailures.filter((failure) => {
+        const failedResult = results.find((result) => result.stepId === failure.stepId && result.status === 'failed');
+        return !failedResult?.recoveredByStepId
+          || !results.some((result) => result.stepId === failedResult.recoveredByStepId && result.status === 'completed');
+      });
+      if (unresolvedWorkflowFailures.length > 0 && completedResults.length === 0) {
+        throw new Error(failureSummary(unresolvedWorkflowFailures));
       }
       let review: ReviewResult;
       if (profile.requiresReview && task.review?.approved) {
@@ -2261,9 +2648,46 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         review = task.review;
       } else if (profile.requiresReview) {
         task = await this.store.updateTask(task.id, { status: 'reviewing' });
-        review = await this.review(task, results, signal);
+        review = await this.review(task, results, signal, 1);
         for (let round = 1; !review.approved && round <= this.reviewCorrectionRounds; round += 1) {
           if (review.requiredCorrections.length === 0 && review.gaps.length === 0) break;
+          const correctionId = `review-correction-${round}`;
+          const oldPlanVersion: number = plan.version ?? task.planVersion ?? 1;
+          const correctionModel = task.model
+            ?? this.modelRouting?.select(this.plannerModelCatalog(task), { kind: profile.kind, role: 'builder' });
+          const correctionStep: WorkflowStep = {
+            id: correctionId,
+            title: `处理审查意见（第 ${round} 轮）`,
+            role: 'builder',
+            objective: `处理以下审查意见：\n${review.requiredCorrections.concat(review.gaps).join('\n')}`,
+            dependsOn: results.map((result) => result.stepId),
+            acceptanceCriteria: ['所有必须整改项均已处理', '缺少证据的结论已删除或明确限定'],
+            toolNames: [],
+            writeScopes: [],
+            ...(correctionModel ? { model: correctionModel } : {}),
+            failureStrategy: 'retry',
+          };
+          plan = {
+            ...plan,
+            version: oldPlanVersion + 1,
+            approvalStatus: 'approved',
+            approvedAt: new Date().toISOString(),
+            approvedBy: 'review-evidence-replanner',
+            steps: [...plan.steps.filter((step) => step.id !== correctionId), correctionStep],
+          };
+          task = await this.store.updateTask(task.id, { plan, planVersion: oldPlanVersion + 1, stepResults: results });
+          await this.emit(task, {
+            type: 'plan.replanned',
+            agentId: 'replanner-agent',
+            payload: {
+              trigger: 'review-evidence-gap', generation: round,
+              failedStepIds: [], addedSteps: [correctionId], rewiredSteps: [],
+              preservedCompletedSteps: results.filter((result) => result.status === 'completed').map((result) => result.stepId),
+              oldPlanVersion, newPlanVersion: oldPlanVersion + 1,
+              riskIncreased: false, budgetIncreased: false,
+              reason: review.requiredCorrections.concat(review.gaps).join('；'),
+            },
+          });
           const correction = await this.repair(task, results, review, signal, round);
           results = [...results, correction];
           loopIteration += 1;
@@ -2272,7 +2696,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
             payload: { iteration: loopIteration, phase: 'review-correction', round, readySteps: [correction.stepId] },
           });
           task = await this.store.updateTask(task.id, { stepResults: results });
-          review = await this.review(task, results, signal);
+          review = await this.review(task, results, signal, round + 1);
         }
       } else {
         review = {
@@ -2306,7 +2730,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       task = await this.store.updateTask(task.id, {
         status: 'completed',
         result,
-        error: workflowFailures.length ? failureSummary(workflowFailures) : null,
+        error: unresolvedWorkflowFailures.length ? failureSummary(unresolvedWorkflowFailures) : null,
         review,
         stepResults: results,
         plan: { ...plan, graph: finalGraph },
@@ -2330,9 +2754,9 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           profile,
           graph: finalGraph,
           evidenceSummary: summarizeCompletionEvidence(plan, results, review, profile.requiresReview),
-          partial: workflowFailures.length > 0,
-          ...(workflowFailures.length ? {
-            failures: workflowFailures.map((failure) => ({ stepId: failure.stepId, title: failure.title, diagnosis: failureLabel(failure.error) })),
+          partial: unresolvedWorkflowFailures.length > 0,
+          ...(unresolvedWorkflowFailures.length ? {
+            failures: unresolvedWorkflowFailures.map((failure) => ({ stepId: failure.stepId, title: failure.title, diagnosis: failureLabel(failure.error) })),
           } : {}),
         },
       });
@@ -2377,6 +2801,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
       return task;
     } finally {
       this.taskModels.delete(initialTask.id);
+      this.activeStepControllers.delete(initialTask.id);
     }
   }
 }

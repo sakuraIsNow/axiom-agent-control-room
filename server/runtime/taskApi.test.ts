@@ -15,6 +15,7 @@ import { TencentMemoryClient } from './memoryClient.js';
 import { SqliteMemoryCaptureReceiptStore } from './memoryCaptureStore.js';
 import { SqliteArtifactCatalog } from './artifactCatalog.js';
 import { FileArtifactStore } from './artifactStore.js';
+import { SqliteBusinessCapabilityStore } from './businessCapabilityStore.js';
 import { signPrincipal } from './principal.js';
 import { signWebhookPayload } from './webhookSecurity.js';
 import type { HarnessAdapter, HarnessCapabilities, HarnessCommandResult, HarnessEvent, HarnessThread, HarnessThreadInput, HarnessTurn, HarnessTurnInput } from './harness.js';
@@ -1315,21 +1316,28 @@ test('mini-app builder SSE streams immediate status and progress before persisti
 test('visual Agent workflows stay separate from templates and enqueue their compiled plan', async () => {
   const store = new SqliteTaskStore(':memory:');
   const templates = new SqliteTemplateStore(':memory:');
+  const businessCapabilities = new SqliteBusinessCapabilityStore(':memory:');
+  const artifactCatalog = new SqliteArtifactCatalog(':memory:');
   await store.initialize();
   await templates.initialize();
+  await businessCapabilities.initialize();
+  await artifactCatalog.initialize();
   let nudges = 0;
   const deletedArtifacts: string[] = [];
+  const storedArtifacts = new Map<string, string>();
   const artifactStore = {
     kind: 'filesystem' as const,
-    async put(id: string, content: string) { return { key: id, bytes: Buffer.byteLength(content, 'utf8') }; },
-    async get() { return null; },
-    async delete(id: string) { deletedArtifacts.push(id); },
+    async put(id: string, content: string, tenantId?: string) { storedArtifacts.set(`${tenantId ?? ''}:${id}`, content); return { key: id, bytes: Buffer.byteLength(content, 'utf8') }; },
+    async get(id: string, tenantId?: string) { return storedArtifacts.get(`${tenantId ?? ''}:${id}`) ?? null; },
+    async delete(id: string, tenantId?: string) { storedArtifacts.delete(`${tenantId ?? ''}:${id}`); deletedArtifacts.push(id); },
     async health() { return { configured: true, reachable: true, detail: 'test' }; },
   };
   const api = createTaskApi({
     store,
     templates,
+    businessCapabilities,
     artifactStore,
+    artifactCatalog,
     hub: new EventHub(),
     coordinator: { nudge() { nudges += 1; }, abort() {} } as never,
   });
@@ -1369,15 +1377,61 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     });
     assert.equal(createdResponse.status, 201);
     const created = await createdResponse.json() as { workflow: { id: string; status: string; definition: { kind: string; plan: { steps: Array<{ agentContract?: { source: string; systemPromptTemplate?: string } }> } } } };
-    assert.equal(created.workflow.status, 'published');
+    assert.equal(created.workflow.status, 'draft');
     assert.equal(created.workflow.definition.kind, 'agent-workflow');
     assert.equal(created.workflow.definition.plan.steps[0]?.agentContract?.source, 'workflow');
     assert.match(created.workflow.definition.plan.steps[0]?.agentContract?.systemPromptTemplate ?? '', /专业绘图提示/);
+
+    await artifactStore.put('result:existing', '# 已有交付', 'tenant-workflow');
+    await artifactCatalog.register({ id: 'result:existing', tenantId: 'tenant-workflow', taskId: 'existing-task', source: 'result', bytes: 16, mimeType: 'text/markdown', referenceKey: 'result' });
+    const reusableResponse = await request(api, '/runtime/artifacts?limit=10', { headers });
+    assert.equal(reusableResponse.status, 200);
+    assert.deepEqual((await reusableResponse.json() as { artifacts: Array<{ id: string }> }).artifacts.map((artifact) => artifact.id), ['result:existing']);
+    const linkedResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts/link`, {
+      method: 'POST', headers, body: JSON.stringify({ artifactId: 'result:existing', name: '已有交付' }),
+    });
+    assert.equal(linkedResponse.status, 201);
+    const duplicateLink = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts/link`, {
+      method: 'POST', headers, body: JSON.stringify({ artifactId: 'result:existing', name: '重复绑定' }),
+    });
+    assert.equal(duplicateLink.status, 200);
+    assert.equal((await duplicateLink.json() as { idempotent: boolean }).idempotent, true);
+    const linkedArtifacts = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts`, { headers });
+    assert.equal((await linkedArtifacts.json() as { artifacts: unknown[] }).artifacts.length, 1);
+    const crossTenantLink = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts/link`, {
+      method: 'POST', headers: { ...headers, 'x-axiom-tenant-id': 'other-tenant' }, body: JSON.stringify({ artifactId: 'result:existing' }),
+    });
+    assert.equal(crossTenantLink.status, 404);
 
     const templateList = await request(api, '/templates', { headers });
     assert.equal((await templateList.json() as { templates: unknown[] }).templates.length, 0);
     const workflowList = await request(api, '/workflows', { headers });
     assert.equal((await workflowList.json() as { workflows: unknown[] }).workflows.length, 1);
+
+    const draftRunResponse = await request(api, `/workflows/${created.workflow.id}/run`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ sessionId: 'workflow-session', input: '画一座雨夜中的未来城市' }),
+    });
+    assert.equal(draftRunResponse.status, 409);
+
+    const testCaseResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/tests`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ name: '绘图验收', input: '生成一张测试图', expectedIncludes: ['绘图测试通过'] }),
+    });
+    assert.equal(testCaseResponse.status, 201);
+    const testRunResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/test-run`, { method: 'POST', headers });
+    assert.equal(testRunResponse.status, 202);
+    const testRunBody = await testRunResponse.json() as { runs: Array<{ taskId: string }> };
+    assert.equal(testRunBody.runs.length, 1);
+    await store.updateTask(testRunBody.runs[0]!.taskId, { status: 'completed', result: '绘图测试通过' });
+    const testRunsResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/test-runs`, { headers });
+    assert.equal(testRunsResponse.status, 200);
+    assert.equal((await testRunsResponse.json() as { runs: Array<{ status: string }> }).runs[0]?.status, 'passed');
+    const releaseResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/releases`, {
+      method: 'POST', headers, body: JSON.stringify({ note: '首个稳定版本' }),
+    });
+    assert.equal(releaseResponse.status, 201);
+    const firstRelease = (await releaseResponse.json() as { release: { id: string } }).release;
 
     const runResponse = await request(api, `/workflows/${created.workflow.id}/run`, {
       method: 'POST', headers,
@@ -1388,7 +1442,7 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     assert.equal(run.task.templateId, created.workflow.id);
     assert.equal(run.task.plan?.profile?.route, 'full-workflow');
     assert.equal(run.task.plan?.steps.length, 2);
-    assert.equal(nudges, 1);
+    assert.equal(nudges, 2);
     assert.ok((await store.getEvents(run.task.id)).some((event) => event.type === 'task.queued' && event.payload.source === 'agent-workflow'));
     const taskList = await request(api, '/tasks', { headers });
     const summary = (await taskList.json() as { tasks: Array<{ id: string; source?: string }> }).tasks.find((task) => task.id === run.task.id);
@@ -1397,14 +1451,39 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     // A completed Nexus run belongs to its workflow. Removing the workflow
     // must remove that run from the task board as well.
     await store.updateTask(run.task.id, { status: 'completed', result: '绘图流程已完成。' });
+    const updatedCanvas = {
+      ...canvas,
+      nodes: canvas.nodes.map((node) => node.id === 'describe' ? { ...node, objective: '生成包含光影与构图要求的绘图描述' } : node),
+    };
     const renamed = await request(api, `/workflows/${created.workflow.id}`, {
       method: 'PATCH', headers,
-      body: JSON.stringify({ name: '绘图流水线（新版）', description: '更新后的绘图流程', visibility: 'private', canvas }),
+      body: JSON.stringify({ name: '绘图流水线（新版）', description: '更新后的绘图流程', visibility: 'private', canvas: updatedCanvas }),
     });
     assert.equal(renamed.status, 200);
     const renamedTaskList = await request(api, '/tasks', { headers });
     const renamedSummary = (await renamedTaskList.json() as { tasks: Array<{ id: string; title: string }> }).tasks.find((item) => item.id === run.task.id);
     assert.equal(renamedSummary?.title, '绘图流水线（新版） · 执行');
+
+    const secondCaseResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/tests`, {
+      method: 'POST', headers, body: JSON.stringify({ name: '新版验收', input: '生成新版测试图', expectedIncludes: ['新版绘图测试通过'] }),
+    });
+    assert.equal(secondCaseResponse.status, 201);
+    const secondRunResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/test-run`, { method: 'POST', headers });
+    const secondRuns = (await secondRunResponse.json() as { runs: Array<{ taskId: string }> }).runs;
+    for (const testRun of secondRuns) await store.updateTask(testRun.taskId, { status: 'completed', result: '绘图测试通过；新版绘图测试通过' });
+    await request(api, `/capabilities/nexus/${created.workflow.id}/test-runs`, { headers });
+    const secondReleaseResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/releases`, {
+      method: 'POST', headers, body: JSON.stringify({ note: '第二个稳定版本' }),
+    });
+    assert.equal(secondReleaseResponse.status, 201);
+    const secondRelease = (await secondReleaseResponse.json() as { release: { id: string } }).release;
+    const diffResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/releases/${firstRelease.id}/diff/${secondRelease.id}`, { headers });
+    assert.equal(diffResponse.status, 200);
+    const diff = await diffResponse.json() as { changed: boolean; stepCount: { left: number; right: number }; nodeCount: { left: number; right: number }; changes: { steps: { changed: string[] } } };
+    assert.equal(diff.changed, true);
+    assert.deepEqual(diff.stepCount, { left: 2, right: 2 });
+    assert.deepEqual(diff.nodeCount, { left: 4, right: 4 });
+    assert.ok(diff.changes.steps.changed.length > 0);
 
     // The task board is intentionally capped at 100 rows. Workflow deletion
     // must still clean every terminal run and its Artifact lineage beyond
@@ -1437,6 +1516,8 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     assert.ok(deletedArtifacts.includes(`tool:${run.task.id}`) === false);
     assert.ok(deletedArtifacts.length >= 106, `expected every Nexus result and lineage Artifact to be deleted, got ${deletedArtifacts.length}`);
   } finally {
+    await artifactCatalog.close();
+    await businessCapabilities.close();
     await templates.close();
     await store.close();
   }
@@ -2041,9 +2122,11 @@ test('persists session Agent Graph snapshots with validation, tenant isolation, 
     nodes: [{
       id: 'direct-search', stepId: 'direct-response', agentId: 'search-agent', role: 'search-agent',
       title: '搜索 Agent', dependsOn: [], skillIds: ['web-search'], status: 'completed' as const,
+      parentId: 'router-agent', executionWave: 2, writeScopes: ['artifact:research'],
       tokens: 128, durationMs: 420, attempts: 1, toolCalls: 1,
     }],
     edges: [],
+    revision: 4,
   };
   const session = { id: 'graph-session', title: 'Graph 会话', messages: [{ id: 'user-1', role: 'user' as const, content: '搜索资料', createdAt: 1_000 }], updatedAt: 2_000, agentGraph: graph };
   try {

@@ -5,6 +5,17 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const configuredQaUrl = process.env.QA_URL?.trim().replace(/\/$/, '');
+if (configuredQaUrl) {
+  process.env.AXIOM_API_ORIGIN ??= configuredQaUrl;
+  process.env.AXIOM_WEB_ORIGIN ??= configuredQaUrl;
+  process.env.AXIOM_API_BASE ??= configuredQaUrl;
+  process.env.QA_API ??= configuredQaUrl;
+  process.env.QA_URL_A ??= configuredQaUrl;
+  const alternateUrl = new URL(configuredQaUrl);
+  alternateUrl.hostname = alternateUrl.hostname === '127.0.0.1' ? 'localhost' : alternateUrl.hostname;
+  process.env.QA_URL_B ??= alternateUrl.toString().replace(/\/$/, '');
+}
 const checks = [
   ['静态检查', 'check'],
   ['单元与集成测试', 'test'],
@@ -81,6 +92,18 @@ for (const [name, script] of checks) {
   // Keep the order deterministic: later checks depend on the same running API
   // and sequential execution prevents QA fixtures from racing each other.
   results.push(await run(name, script));
+}
+
+const businessPostgresUrl = (process.env.AXIOM_TEST_DATABASE_URL ?? '').trim();
+if (businessPostgresUrl) {
+  results.push(await run('PostgreSQL 业务能力与多 Worker 一致性', 'qa:business-postgres'));
+} else {
+  results.push({
+    name: 'PostgreSQL 业务能力与多 Worker 一致性',
+    script: 'qa:business-postgres',
+    status: 'skipped',
+    reason: 'AXIOM_TEST_DATABASE_URL 未配置；SQLite 回归已执行，但 PostgreSQL 现场验收未执行',
+  });
 }
 
 const memoryEndpoint = (process.env.TDAI_MEMORY_ENDPOINT ?? '').trim();

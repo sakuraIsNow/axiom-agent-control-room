@@ -160,7 +160,7 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [x] Mini App 插件：`kind=mini-app`、HTML 200KB 限制、sandbox iframe（不授予 `allow-same-origin`）和可拖拽弹窗。
 - [x] 插件管理与运行迁入左侧完整工作区，保留版本标识和插件运行 lineage 元数据；Mini App 运行结果仍使用隔离窗口。
 - [x] 插件参数 schema 校验；工具引用必须来自 Tool Registry。
-- [ ] Workflow Plugin 复用 Task/Run/Event/SSE 的图形化编排。
+- [x] Workflow Plugin 复用 Task/Run/Event/SSE 的图形化编排：已发布 Agent Nexus 可生成固定工作流版本的插件，运行继续使用统一任务、事件、SSE、Artifact 与审批链路。
 - [x] 插件失败恢复、签名和兼容性检查：Agent 流式失败不保存半成品；发布前检查完整 HTML、禁止直连网络、工具可用性、字段冲突和权限；支持 HMAC 发布证明、运行时完整性复核与历史版本恢复。
 - [x] 租户内插件市场：插件按不可变审核版本上架，用户安装后固定到具体版本；新版需要显式升级，被撤回版本立即停止运行，并可回退到仍有效的安全版本。Agent Studio 和 Planner 动态角色接入已完成，不再与市场建设混为一项。
 
@@ -768,3 +768,27 @@ npm run qa:search-agent
 - [x] 删除渠道时擦除密文、地址和签名密钥，但保留脱敏投递审计；默认保留 90 天，可由 `AXIOM_NOTIFICATION_RETENTION_DAYS` 在 1 至 365 天内调整。
 - [x] 单元与 API 回归覆盖加密不泄漏、租户/用户隔离、签名、幂等、测试消息、成功投递、4xx 死信、人工重投、多 Worker 单次认领、SSRF 边界和软删除审计保留；在 Docker Engine `28.0.1` 与 `ubuntu:22.04` 沙箱镜像从门禁开始前就可用的条件下，最终 `npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`，24 个可运行项均在第一次尝试通过，标准单元/API 测试为 `358 passed / 0 failed`。
 - [ ] 邮件通知和平台运营级告警外发仍未完成；正式公网接收端与真实 PostgreSQL 多 Worker 故障演练也必须在部署环境单独验收。
+
+### 2026-09-03 业务能力 V2：15 项生产升级
+
+原则：复用现有 Task/Run/Event/SSE、Artifact、Template、Agent Registry 与人工审核事实源，不建立只供页面展示的第二套状态。以下条目只有在 SQLite/PostgreSQL 契约、API、前端真实交互和回归测试同时完成后才可勾选。
+
+1. [x] 动态 Replanner：失败、证据不足或人工要求触发有界重新规划；保留仍有效的完成步骤，持久化新旧计划差异、代次和触发原因，风险或预算上升时等待确认。
+2. [x] 结构化 Agent 交接：Agent 契约声明输入、输出、证据和完成条件；handoff 持久化结构化摘要、Artifact 引用、未决问题和验证状态，下游按契约消费。
+3. [x] Agent Nexus 附件与 Artifact：支持选择或上传持久文件，连线声明传递全文、摘要、字段或引用；跨刷新/恢复保留版本并严格校验租户归属、大小和 MIME。
+4. [x] MCP/OpenAPI 工具目录：支持导入、校验、启停和版本固定；Agent 独立授权，调用继续经过参数校验、SSRF、审批、配额、审计和 Artifact lineage。
+5. [x] 证据图与引用质量门禁：关键结论关联来源、时间、位置和 Artifact；区分用户事实、工具事实、外部来源与模型推断，缺失或矛盾证据不能被标记为已验证。
+6. [x] 项目空间：项目聚合目标、验收条件、任务、会话、Nexus、日程、Artifact 和决策；支持项目级策略、归档与完整导出。
+7. [x] 长期记忆管理：用户能查看来源、层级、置信度、过期时间和作用域，并可更新、停用、删除或在本轮禁用；未配置 MemoryCore 时诚实降级。
+8. [x] Agent Nexus 测试、版本与发布：草稿校验、测试用例、发布版本固定、历史比较和恢复；生产运行不跟随草稿，已发布 Nexus 可生成 Workflow Plugin。
+9. [x] 交付后续动作：根据真实任务状态提供继续分析、局部重跑、换模型复核、导出报告、保存为 Nexus/插件、创建日程和发送通知，动作保持幂等。
+10. [x] Agent 级人工干预：运行中支持暂停、恢复、跳过、替换和锁定结果；展示受影响后代、成本/风险变化并持久化操作者决定。
+11. [x] 多人协作与交接：项目成员、负责人、评论、提及、审核人和角色权限持久化；并发编辑使用 revision，跨用户访问遵守租户与项目成员边界。
+12. [x] 业务反馈闭环：保存结果评分、问题类型、证据纠错和修订答案，并进入 Router、Scheduler、Reviewer、Agent、Skill 与模型版本评测聚合。
+13. [x] 垂直解决方案：内置行业资讯、论文调研、GitHub 评估、竞品研究、需求分析、数据报告、营销素材、工作总结、文档审查和插件生成方案；每个方案包含输入、流程、验收和交付定义。
+14. [x] Agent/模型智能选择：基于持久成功率、Reviewer 首次通过率、时延、Token、费用、重试和人工接管统计选择，并保留可解释理由与用户覆盖。
+15. [x] 成本、时间与成功率预估：任务运行前按历史同类任务返回区间、Agent 数量、预计人工确认和可信度；运行中用真实事件修正，不使用固定倒计时。
+
+验收：新增业务能力必须加入 `npm test`、针对性 API/浏览器回归和 `npm run qa:all`；未配置外部依赖只能标记降级或跳过，不能用模拟结果冒充生产通过。
+
+- [x] 最终验收：独立 PostgreSQL 测试库下 `npm test` 为 `373 passed / 0 failed / 0 skipped`；`npm run qa:all` 为 `25 passed / 0 failed / 4 skipped`。真实复杂任务产生 874 个连续事件、761 个 SSE 增量和 58,899 Token，经过 Reviewer 与一次人工确认后完成；路由评测 4/4、业务过程评测 6/6、Nexus 测试/发布/固定版本运行、用户历史隔离、浏览器视觉回归和 PostgreSQL 多 Worker 一致性均通过。4 个跳过项只对应未配置的 MemoryCore、外部对象存储和 Harness/Codex sidecar 现场验收。

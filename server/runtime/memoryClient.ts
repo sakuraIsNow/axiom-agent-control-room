@@ -207,6 +207,10 @@ export class TencentMemoryClient implements AgentMemory {
     }
   }
 
+  configured() {
+    return Boolean(this.endpoint);
+  }
+
   private headers() {
     return {
       'Content-Type': 'application/json',
@@ -455,6 +459,14 @@ export class TencentMemoryClient implements AgentMemory {
   async updateAtomic(scope: MemoryScope, memoryId: string, content: string, background: string | undefined, signal: AbortSignal) {
     return this.post<{ id: string; version: string; updated_at: string }>('/v3/atomic/update', {
       ...this.isolation(scope), id: memoryId, content: normalizeMemoryText(content).slice(0, 8_192), ...(background !== undefined ? { background } : {}),
+    }, signal);
+  }
+
+  async addConversation(scope: MemoryScope, content: string, signal: AbortSignal) {
+    const timestamp = new Date().toISOString();
+    return this.post<{ accepted_ids?: string[]; accepted_versions?: string[]; total_count?: number }>('/v3/conversation/add', {
+      ...this.isolation(scope),
+      messages: [{ role: 'user', content: normalizeMemoryText(content).slice(0, 8_192), timestamp }],
     }, signal);
   }
 

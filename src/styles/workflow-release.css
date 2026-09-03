@@ -1,0 +1,54 @@
+.workflow-release-modal { z-index: 125; }
+.workflow-release-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr); width: min(720px, calc(100vw - 40px)); max-height: min(760px, calc(100vh - 50px)); overflow: hidden; padding: 17px; }
+.workflow-release-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 0 1px 14px; border-bottom: 1px solid var(--dash-line); }
+.workflow-release-panel header small { color: var(--dash-accent); font-size: 10px; }
+.workflow-release-panel header h2 { margin: 4px 0 0; color: var(--dash-ink); font-size: 22px; font-weight: 580; }
+.workflow-release-panel header button { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid var(--dash-line); border-radius: 50%; color: var(--dash-muted); background: rgb(255 255 255 / 4%); }
+.workflow-release-panel > nav { display: flex; gap: 4px; padding: 10px 0; border-bottom: 1px solid var(--dash-line); }
+.workflow-release-panel > nav button { display: inline-flex; min-width: 92px; height: 33px; align-items: center; justify-content: center; gap: 7px; border: 1px solid transparent; border-radius: 6px; color: var(--dash-muted); background: transparent; font-size: 11px; }
+.workflow-release-panel > nav button.active { border-color: rgb(var(--dash-accent-rgb) / 26%); color: var(--dash-ink); background: rgb(var(--dash-accent-rgb) / 9%); }
+.workflow-release-content { display: grid; align-content: start; gap: 11px; min-height: 0; overflow-y: auto; padding: 13px 1px 1px; }
+.workflow-test-form { display: grid; grid-template-columns: .65fr 1.3fr 1fr auto; gap: 7px; align-items: start; }
+.workflow-test-form input, .workflow-test-form textarea, .workflow-publish-row input { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid var(--dash-line-strong); border-radius: 7px; outline: none; color: var(--dash-ink); background: rgb(0 0 0 / 24%); font: inherit; font-size: 11px; resize: vertical; }
+.workflow-test-form input { height: 36px; }
+.workflow-test-form input:focus, .workflow-test-form textarea:focus, .workflow-publish-row input:focus { border-color: rgb(var(--dash-accent-rgb) / 45%); }
+.workflow-test-form button, .workflow-publish-row button, .workflow-release-actions button, .workflow-release-primary, .workflow-artifact-link button { display: inline-flex; min-height: 35px; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid rgb(var(--dash-accent-rgb) / 30%); border-radius: 7px; color: var(--dash-accent); background: rgb(var(--dash-accent-rgb) / 7%); font-size: 10px; white-space: nowrap; }
+.workflow-release-list { display: grid; align-content: start; gap: 5px; }
+.workflow-release-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-height: 56px; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--dash-line); border-radius: 7px; background: rgb(255 255 255 / 3%); }
+.workflow-release-list article > span { display: grid; min-width: 0; gap: 4px; }
+.workflow-release-list strong, .workflow-release-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-release-list strong { color: var(--dash-ink); font-size: 12px; }
+.workflow-release-list small { color: var(--dash-muted); font-size: 9px; }
+.workflow-release-list em { padding: 4px 7px; border-radius: 5px; color: var(--dash-muted); background: rgb(255 255 255 / 5%); font-size: 9px; font-style: normal; }
+.workflow-release-list em.passed { color: var(--dash-accent); background: rgb(var(--dash-accent-rgb) / 9%); }
+.workflow-release-list em.failed { color: var(--dash-red); background: rgb(216 120 125 / 9%); }
+.workflow-release-list em.running { color: var(--dash-copper); }
+.workflow-release-list > p { display: flex; min-height: 88px; align-items: center; justify-content: center; margin: 0; color: var(--dash-muted); font-size: 11px; }
+.workflow-release-primary { justify-self: end; min-width: 138px; color: #05120c; background: var(--dash-selected); font-weight: 650; }
+.workflow-release-primary.secondary { color: var(--dash-accent); background: rgb(var(--dash-accent-rgb) / 8%); }
+.workflow-release-panel button:disabled { opacity: .4; cursor: not-allowed; }
+.workflow-artifact-upload { display: flex; min-height: 76px; align-items: center; gap: 12px; padding: 13px; border: 1px dashed rgb(var(--dash-accent-rgb) / 34%); border-radius: 7px; color: var(--dash-accent); background: rgb(var(--dash-accent-rgb) / 5%); cursor: pointer; }
+.workflow-artifact-upload > span { display: grid; gap: 4px; color: var(--dash-soft); font-size: 12px; }
+.workflow-artifact-upload small { color: var(--dash-muted); font-size: 9px; }
+.workflow-artifact-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.workflow-artifact-link { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.workflow-artifact-link select { width: 100%; min-width: 0; height: 36px; padding: 0 9px; border: 1px solid var(--dash-line-strong); border-radius: 7px; outline: none; color: var(--dash-ink); background: rgb(0 0 0 / 24%); font: inherit; font-size: 11px; }
+.workflow-release-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.workflow-release-diff { display: grid; gap: 9px; padding: 11px; border: 1px solid rgb(var(--dash-accent-rgb) / 24%); border-radius: 7px; background: rgb(var(--dash-accent-rgb) / 5%); }
+.workflow-release-diff header { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; }
+.workflow-release-diff header strong { color: var(--dash-ink); font-size: 12px; }
+.workflow-release-diff header span { color: var(--dash-accent); font-size: 10px; }
+.workflow-release-diff header button { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid var(--dash-line); border-radius: 50%; color: var(--dash-muted); background: transparent; }
+.workflow-release-diff > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflow-release-diff > div span { padding: 5px 7px; border-radius: 5px; color: var(--dash-soft); background: rgb(255 255 255 / 4%); font-size: 10px; }
+.workflow-release-diff p { margin: 0; color: var(--dash-muted); font-size: 10px; }
+.workflow-publish-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.workflow-publish-row input { height: 36px; padding-block: 0; }
+@media (max-width: 760px) {
+  .workflow-test-form { grid-template-columns: 1fr; }
+  .workflow-release-panel { width: calc(100vw - 20px); max-height: calc(100vh - 24px); padding: 13px; }
+  .workflow-publish-row { grid-template-columns: 1fr; }
+  .workflow-artifact-link { grid-template-columns: 1fr; }
+  .workflow-release-actions { justify-content: stretch; }
+  .workflow-release-actions button { flex: 1; }
+}

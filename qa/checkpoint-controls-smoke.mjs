@@ -54,6 +54,7 @@ const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 820 } });
 const page = await context.newPage();
 const consoleErrors = [];
+const failedResponses = [];
 let nativeDialogOpened = false;
 let branchRequests = 0;
 let mergeRequests = 0;
@@ -61,12 +62,23 @@ let branchOperationId = '';
 
 page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
 page.on('pageerror', (error) => consoleErrors.push(error.message));
+page.on('response', async (response) => {
+  if (response.status() < 500) return;
+  const body = await response.text().catch(() => '');
+  failedResponses.push({
+    method: response.request().method(),
+    status: response.status(),
+    url: response.url(),
+    body: body.slice(0, 500),
+  });
+});
 page.on('dialog', (dialog) => { nativeDialogOpened = true; void dialog.dismiss(); });
 
 await page.route('**/api/tasks?limit=30', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tasks: [summary] }) }));
 await page.route('**/api/sessions?limit=50', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: [session], deletedSessionIds: [] }) }));
 await page.route(`**/api/sessions/${sessionId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session }) }));
 await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task }) }));
+await page.route(`**/api/capabilities/tasks/${taskId}/actions`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ actions: [] }) }));
 await page.route(`**/api/tasks/${branchTaskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task: branchTask }) }));
 await page.route(`**/api/tasks/${taskId}/checkpoints`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(checkpointState) }));
 await page.route(`**/api/tasks/${taskId}/checkpoints/${checkpointId}/diff**`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ diff }) }));
@@ -120,7 +132,7 @@ try {
     noNativeBrowserDialog: !nativeDialogOpened,
     noBrowserErrors: consoleErrors.length === 0,
   };
-  process.stdout.write(`${JSON.stringify({ assertions, diffText, branchRequests, mergeRequests, branchOperationId, consoleErrors }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ assertions, diffText, branchRequests, mergeRequests, branchOperationId, consoleErrors, failedResponses }, null, 2)}\n`);
   if (Object.values(assertions).some((passed) => !passed)) process.exitCode = 1;
 } finally {
   await browser.close();

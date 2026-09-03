@@ -23,6 +23,14 @@ P1.2 adds a bounded Tool Registry to the runtime. Builder agents can request onl
 
 Workspace paths are relative to `AXIOM_AGENT_WORKSPACE_ROOT`. Absolute paths, `..` traversal, and paths outside the root are rejected. Write operations use a temporary file and rename, so a partial file is not exposed.
 
+## Dynamic MCP and OpenAPI sources
+
+The project workspace can persist OpenAPI 3.x documents and HTTP MCP endpoints as tenant-scoped tool sources. MCP sources either import a pinned `tools` catalog or perform `initialize` and `tools/list` discovery before saving. Executable shell-based MCP configuration is intentionally rejected.
+
+Every saved specification is hashed and version-pinned. Enabling a source registers its operations in the same `ToolRegistry` instance used by the Orchestrator and Task API; disabling or updating it removes the old registration. A service restart restores enabled sources before tasks are accepted.
+
+Dynamic operations do not call external endpoints directly from the UI. Native model tool calls still enter `ToolRegistry.execute()`, so Agent allowlists, JSON schema validation, SSRF controls, quotas, timeouts, task-bound approval, durable audit events and Artifact lineage remain in force. Local endpoints require an explicit `location=local` source and are still constrained by endpoint validation.
+
 `workspace.patch` deliberately uses exact text replacement rather than a shell patch command. The caller must provide `expectedMatches` (default `1`); a mismatch fails the tool without changing the file.
 
 ## Approval flow

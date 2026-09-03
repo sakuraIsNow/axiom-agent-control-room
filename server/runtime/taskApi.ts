@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
+import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type InAppNotification, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
 import { isBuiltinRoleId } from './agentStore.js';
 import type { TaskCoordinator } from './coordinator.js';
 import type { EventHub } from './eventHub.js';
@@ -37,6 +37,9 @@ import { createPluginRelease, inspectPluginCompatibility } from './pluginCompati
 import { buildScheduleInsights } from './scheduleInsights.js';
 import { breadthFirstThreadDescendants, buildHarnessThreadGraph } from './harnessThreadGraph.js';
 import { outboundNotificationKinds, type NotificationEndpointLocation, type OutboundNotificationManager } from './outboundNotifications.js';
+import { createBusinessCapabilityApi } from './businessCapabilities.js';
+import type { BusinessCapabilityStore } from './businessCapabilityStore.js';
+import type { ModelRoutingPolicy } from './modelRouting.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -209,6 +212,8 @@ const promptPluginDefinitionSchema = z.object({
   model: z.string().min(1).max(160).optional(),
   toolNames: z.array(z.string().min(1).max(80)).max(32).default([]),
   inputSchema: z.object({ fields: z.array(pluginFieldSchema).max(16) }).optional(),
+  workflowId: z.string().uuid().optional(),
+  workflowVersion: z.number().int().positive().optional(),
 }).strict();
 const pluginAppearanceSchema = z.object({
   effect: z.enum(['aurora', 'plasma', 'liquid', 'prism', 'solar', 'nebula', 'chrome', 'pulse']),
@@ -426,6 +431,10 @@ const memoryConversationDeleteSchema = memoryAgentScopeSchema.extend({
 }).strict().refine((value) => Boolean(value.messageIds?.length || value.sessionIds?.length), {
   message: 'messageIds or sessionIds is required.',
 });
+const taskMemoryPolicySchema = z.object({
+  enabled: z.boolean(),
+  disabledAgentIds: z.array(z.string().min(1).max(160)).max(100).default([]),
+}).strict();
 
 const safeMemoryPath = z.string().min(1).max(500).refine((value) => (
   !value.startsWith('/') && !value.startsWith('\\') && !value.split(/[\\/]/).includes('..')
@@ -465,6 +474,8 @@ const nodeControlSchema = z.object({
   output: z.string().max(48_000).optional(),
   evidence: z.array(z.string().max(1_000)).max(20).default([]),
   confidence: z.number().min(0).max(1).default(1),
+  replacementAgentId: z.string().min(1).max(160).optional(),
+  replacementModel: z.string().min(1).max(160).optional(),
 });
 
 const checkpointBranchSchema = z.object({
@@ -514,11 +525,14 @@ const sessionGraphNodeSchema = z.object({
   id: z.string().min(1).max(160),
   stepId: z.string().max(160).optional(),
   agentId: z.string().max(160).optional(),
+  parentId: z.string().max(160).optional(),
+  executionWave: z.number().int().nonnegative().max(256).optional(),
   role: z.string().min(1).max(120),
   title: z.string().max(240),
   dependsOn: z.array(z.string().max(160)).max(32),
   skillIds: z.array(z.string().max(160)).max(32).optional(),
-  status: z.enum(['queued', 'running', 'completed', 'failed']).optional(),
+  writeScopes: z.array(z.string().max(500)).max(64).optional(),
+  status: z.enum(['queued', 'running', 'completed', 'failed', 'skipped', 'waiting_for_human', 'cancelled']).optional(),
   tokens: z.number().int().nonnegative().max(10_000_000).optional(),
   durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
   attempts: z.number().int().nonnegative().max(100).optional(),
@@ -535,6 +549,7 @@ const sessionGraphEdgeSchema = z.object({
 const sessionGraphSchema = z.object({
   nodes: z.array(sessionGraphNodeSchema).max(32),
   edges: z.array(sessionGraphEdgeSchema).max(64),
+  revision: z.number().int().nonnegative().max(1_000_000).optional(),
 }).strict().superRefine((graph, ctx) => {
   const nodeIds = new Set(graph.nodes.map((node) => node.id));
   if (nodeIds.size !== graph.nodes.length) {
@@ -682,6 +697,8 @@ export const createTaskApi = (dependencies: {
   resolveModelCredential?: (credentialId: string, tenantId: string, userId: string) => Promise<{ id: string; model: string } | null>;
   harnessAdapter?: HarnessAdapter;
   outboundNotifications?: OutboundNotificationManager;
+  businessCapabilities?: BusinessCapabilityStore;
+  modelRouting?: ModelRoutingPolicy;
 }) => {
   const api = new Hono();
   const { store, hub, coordinator } = dependencies;
@@ -908,6 +925,7 @@ export const createTaskApi = (dependencies: {
       modelCalls: summary.modelCalls,
       queueWaitMs: queuedAt && startedAt ? Math.max(0, new Date(startedAt).getTime() - new Date(queuedAt).getTime()) : 0,
       attempts,
+      ...(summary.estimate ? { estimate: summary.estimate } : {}),
       toolCalls: summary.toolCalls,
       pendingToolApprovals: task.toolApprovals?.filter((approval) => approval.status === 'pending').length ?? 0,
       completedSteps: task.stepResults.filter((result) => result.status === 'completed').length,
@@ -960,15 +978,16 @@ export const createTaskApi = (dependencies: {
     metadata: Record<string, unknown> = {},
     idempotencyKey?: string,
     access: TemplateAccess = { userId, role: 'member' },
+    templateOverride?: WorkflowTemplate,
   ) => {
     const normalizedIdempotencyKey = idempotencyKey?.trim().slice(0, 160);
     if (normalizedIdempotencyKey) {
       const existing = await store.findTaskByIdempotency(tenantId, normalizedIdempotencyKey);
       if (existing) return { task: existing, eventsUrl: `/api/tasks/${existing.id}/events`, deduplicated: true };
     }
-    const template = input.templateId && templates
+    const template = templateOverride ?? (input.templateId && templates
       ? await templates.getTemplate(input.templateId, tenantId, access)
-      : null;
+      : null);
     if (input.templateId && !template) throw new Error('Workflow template not found.');
     if (template && template.status !== 'published') throw new Error('Only published workflow templates can create tasks.');
     let credentialModel: string | undefined;
@@ -1180,6 +1199,42 @@ export const createTaskApi = (dependencies: {
       await enqueueScheduledTrigger(trigger);
     }));
   void scheduler.ready().then(() => scheduler.start()).catch(() => undefined);
+
+  if (dependencies.businessCapabilities) {
+    api.route('/capabilities', createBusinessCapabilityApi({
+      records: dependencies.businessCapabilities,
+      tasks: store,
+      coordinator,
+      templates,
+      plugins,
+      agents,
+      tools: toolRegistry,
+      artifacts: artifactStore,
+      artifactCatalog,
+      modelRouting: dependencies.modelRouting,
+      memory,
+      createSchedule: async (input) => {
+        const cadence = input.runAt
+          ? { kind: 'once' as const, runAt: input.runAt, timezone: 'Asia/Shanghai' }
+          : { kind: 'interval' as const, intervalSeconds: input.intervalSeconds ?? 86_400, timezone: 'Asia/Shanghai' };
+        const schedule = await scheduler.upsert({ tenantId: input.tenantId, userId: input.userId, sessionId: input.sessionId, title: input.title, input: `${input.instruction}\n\n来源任务：${input.taskId}`, mode: input.mode, cadence, enabled: true });
+        return { scheduleId: schedule.id, nextRunAt: schedule.nextRunAt, cadence: schedule.cadence };
+      },
+      sendNotification: async (input) => {
+        if (!outboundNotifications) throw new Error('外发通知服务尚未初始化。');
+        const notification: InAppNotification = {
+          id: `manual:${input.taskId}:${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 20)}`,
+          kind: 'task_completed', severity: 'info', title: input.title, message: input.message,
+          createdAt: new Date().toISOString(), read: false,
+          target: { view: 'tasks', taskId: input.taskId, sessionId: input.sessionId },
+          action: { kind: 'open', label: '查看任务', resourceId: input.taskId },
+        };
+        const deliveryIds = await outboundNotifications.store.enqueue(input.tenantId, input.userId, notification, input.channelId);
+        await outboundNotifications.flush().catch(() => 0);
+        return { notificationId: notification.id, deliveryIds };
+      },
+    }));
+  }
 
   const notificationProjection = async (principal: Pick<ReturnType<typeof identity>, 'tenantId' | 'userId'>) => {
     const [tenantTasks, schedules, artifactCleanup] = await Promise.all([
@@ -1741,14 +1796,33 @@ export const createTaskApi = (dependencies: {
     try {
       const input = pluginPrompt(plugin, parsed.data.input ?? '', parsed.data.values);
       if (!input.trim()) return c.json({ error: 'Plugin input is required.' }, 400);
+      const workflowId = 'workflowId' in plugin.definition ? plugin.definition.workflowId : undefined;
+      const workflowVersion = 'workflowVersion' in plugin.definition ? plugin.definition.workflowVersion : undefined;
+      const workflowDraft = workflowId
+        ? await templates?.getTemplate(workflowId, principal.tenantId, templateAccess(principal))
+        : null;
+      if (workflowId && (!workflowDraft || workflowDraft.definition.kind !== 'agent-workflow')) {
+        return c.json({ error: 'Workflow Plugin 引用的 Agent Nexus 不存在。' }, 409);
+      }
+      const pinnedRelease = workflowId && workflowVersion && dependencies.businessCapabilities
+        ? (await dependencies.businessCapabilities.list(principal.tenantId, 'nexus-release', { limit: 500 }))
+          .find((record) => record.status === 'published' && record.data.workflowId === workflowId && Number(record.data.workflowVersion) === workflowVersion)
+        : null;
+      const workflowPlugin: WorkflowTemplate | null = workflowDraft && pinnedRelease?.data.definition && typeof pinnedRelease.data.definition === 'object'
+        ? { ...workflowDraft, status: 'published', version: workflowVersion!, definition: pinnedRelease.data.definition as WorkflowTemplateDefinition }
+        : workflowDraft?.status === 'published' && workflowDraft.version === workflowVersion ? workflowDraft : null;
+      if (workflowId && !workflowPlugin) {
+        return c.json({ error: `Workflow Plugin 固定的 Nexus v${workflowVersion ?? '?'} 发布快照不存在或已撤回。` }, 409);
+      }
       const result = await enqueueTask({
         sessionId: parsed.data.sessionId,
+        ...(workflowPlugin ? { templateId: workflowPlugin.id } : {}),
         title: parsed.data.title?.trim() || plugin.name,
         input,
-        mode: plugin.definition.mode,
-        model: plugin.definition.model,
-        policy: parsed.data.policy,
-      }, principal.tenantId, principal.userId, { source: 'plugin', pluginId: plugin.id, pluginVersion: plugin.version }, c.req.header('idempotency-key'), templateAccess(principal));
+        mode: workflowPlugin?.definition.mode ?? plugin.definition.mode,
+        model: workflowPlugin?.definition.model ?? plugin.definition.model,
+        policy: parsed.data.policy ?? workflowPlugin?.definition.policy,
+      }, principal.tenantId, principal.userId, { source: 'plugin', pluginId: plugin.id, pluginVersion: plugin.version, nexusReleaseId: pinnedRelease?.id }, c.req.header('idempotency-key'), templateAccess(principal), workflowPlugin ?? undefined);
       return c.json({ ...result, pluginId: plugin.id, pluginVersion: plugin.version }, 202);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Plugin run failed.';
@@ -2036,7 +2110,8 @@ export const createTaskApi = (dependencies: {
   api.get('/runtime/stats', (c) => c.json(metrics?.snapshot() ?? null));
 
   api.get('/runtime/operations', async (c) => {
-    const { tenantId, userId } = identity(c.req.raw.headers);
+    const controlPrincipal = identity(c.req.raw.headers);
+    const { tenantId, userId } = controlPrincipal;
     const requestedHours = Number(c.req.query('hours') ?? 24);
     const hours = Number.isFinite(requestedHours) ? Math.min(168, Math.max(1, Math.floor(requestedHours))) : 24;
     const [snapshot, sessions, artifactStats] = await Promise.all([
@@ -2070,7 +2145,12 @@ export const createTaskApi = (dependencies: {
     const { tenantId } = identity(c.req.raw.headers);
     const requestedLimit = Number(c.req.query('limit') ?? 50);
     const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 50;
-    return c.json({ stats: await artifactCatalog.stats(tenantId), orphans: await artifactCatalog.listOrphans(tenantId, limit) });
+    const [stats, artifacts, orphans] = await Promise.all([
+      artifactCatalog.stats(tenantId),
+      artifactCatalog.listActive(tenantId, limit),
+      artifactCatalog.listOrphans(tenantId, limit),
+    ]);
+    return c.json({ stats, artifacts, orphans });
   });
 
   api.post('/runtime/artifacts/cleanup', async (c) => {
@@ -2088,6 +2168,7 @@ export const createTaskApi = (dependencies: {
         if (!artifactStore) throw new Error('Artifact 存储未配置。');
         await artifactStore.delete(candidate.id, principal.tenantId);
         await artifactCatalog.markDeleted(principal.tenantId, candidate.id);
+        await dependencies.businessCapabilities?.unlinkProjectResource(principal.tenantId, 'artifact', candidate.id);
         deleted += 1;
       } catch (error) {
         await artifactCatalog.recordCleanupFailure(principal.tenantId, candidate.id, error instanceof Error ? error.message : 'Artifact 删除失败。');
@@ -2172,8 +2253,7 @@ export const createTaskApi = (dependencies: {
         workflow: canvas,
       },
     });
-    const workflow = await templates.updateTemplate(created.id, principal.tenantId, { status: 'published', updatedBy: principal.userId });
-    return c.json({ workflow }, 201);
+    return c.json({ workflow: created }, 201);
   });
 
   api.patch('/workflows/:workflowId', async (c) => {
@@ -2193,7 +2273,7 @@ export const createTaskApi = (dependencies: {
       name: parsed.data.name.trim(),
       description: parsed.data.description.trim(),
       visibility: principal.role === 'viewer' ? 'private' : parsed.data.visibility,
-      status: 'published',
+      status: 'draft',
       updatedBy: principal.userId,
       definition: {
         kind: 'agent-workflow',
@@ -2217,6 +2297,7 @@ export const createTaskApi = (dependencies: {
     if (!canManageTemplate(current, principal)) return c.json({ error: '只有工作流创建者或租户管理员可以删除。' }, 403);
     await templates.updateTemplate(current.id, principal.tenantId, { status: 'archived', updatedBy: principal.userId });
     await deleteTerminalWorkflowTasks(store, current.id, principal.tenantId, cleanupTaskArtifacts);
+    await dependencies.businessCapabilities?.unlinkProjectResource(principal.tenantId, 'nexus', current.id);
     return c.body(null, 204);
   });
 
@@ -2226,18 +2307,33 @@ export const createTaskApi = (dependencies: {
     if (!parsed.success) return c.json({ error: '工作流输入无效。', details: parsed.error.flatten() }, 400);
     const principal = identity(c.req.raw.headers);
     const workflow = await templates.getTemplate(c.req.param('workflowId'), principal.tenantId, templateAccess(principal));
-    if (!workflow || !isAgentWorkflow(workflow) || workflow.status !== 'published') return c.json({ error: '工作流不存在或尚未发布。' }, 404);
+    if (!workflow || !isAgentWorkflow(workflow)) return c.json({ error: '工作流不存在。' }, 404);
+    const releases = dependencies.businessCapabilities
+      ? (await dependencies.businessCapabilities.list(principal.tenantId, 'nexus-release', { limit: 500 }))
+        .filter((record) => record.status === 'published' && record.data.workflowId === workflow.id)
+      : [];
+    const latestRelease = releases[0];
+    const releaseDefinition = latestRelease?.data.definition;
+    const releasedWorkflow: WorkflowTemplate | null = latestRelease && releaseDefinition && typeof releaseDefinition === 'object'
+      ? {
+        ...workflow,
+        status: 'published',
+        version: Number(latestRelease.data.workflowVersion) || workflow.version,
+        definition: releaseDefinition as WorkflowTemplateDefinition,
+      }
+      : workflow.status === 'published' ? workflow : null;
+    if (!releasedWorkflow) return c.json({ error: 'Agent Nexus 尚未发布；请先通过测试并发布固定版本。' }, 409);
     try {
       return c.json(await enqueueTask({
         sessionId: parsed.data.sessionId,
         templateId: workflow.id,
         title: parsed.data.title ?? `${workflow.name} · 执行`,
         input: parsed.data.input,
-        mode: workflow.definition.mode,
+        mode: releasedWorkflow.definition.mode,
         model: parsed.data.model,
         modelCredentialId: parsed.data.modelCredentialId,
         policy: parsed.data.policy,
-      }, principal.tenantId, principal.userId, { source: 'agent-workflow', workflowId: workflow.id, workflowVersion: workflow.version }, c.req.header('idempotency-key'), templateAccess(principal)), 202);
+      }, principal.tenantId, principal.userId, { source: 'agent-workflow', workflowId: workflow.id, workflowVersion: releasedWorkflow.version, nexusReleaseId: latestRelease?.id }, c.req.header('idempotency-key'), templateAccess(principal), releasedWorkflow), 202);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : '工作流启动失败。' }, 409);
     }
@@ -2755,6 +2851,7 @@ export const createTaskApi = (dependencies: {
     if (schedule.inputArtifact) {
       await artifactCatalog?.removeTaskReferences(principal.tenantId, schedule.id, [schedule.inputArtifact.artifactId]);
     }
+    await dependencies.businessCapabilities?.unlinkProjectResource(principal.tenantId, 'schedule', schedule.id);
     return c.body(null, 204);
   });
 
@@ -3084,8 +3181,12 @@ export const createTaskApi = (dependencies: {
     const sessionTasks = await store.listTasks(tenantId, 100);
     for (const task of sessionTasks.filter((item) => item.userId === userId && item.sessionId === sessionId && terminalStatuses.has(item.status))) {
       const events = await store.getEvents(task.id).catch(() => []);
-      if (await store.deleteTask(task.id, tenantId)) await cleanupTaskArtifacts(task, events);
+      if (await store.deleteTask(task.id, tenantId)) {
+        await cleanupTaskArtifacts(task, events);
+        await dependencies.businessCapabilities?.unlinkProjectResource(tenantId, 'task', task.id);
+      }
     }
+    await dependencies.businessCapabilities?.unlinkProjectResource(tenantId, 'session', sessionId);
     return c.body(null, 204);
   });
 
@@ -3111,7 +3212,29 @@ export const createTaskApi = (dependencies: {
     const { tenantId } = identity(c.req.raw.headers);
     const task = await store.getTask(c.req.param('taskId'), tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
-    return c.json({ task });
+    const events = await store.getEvents(task.id);
+    const memoryPolicyEvent = events.filter((event) => event.type === 'memory.policy_updated').at(-1);
+    const memoryPolicy = {
+      enabled: memoryPolicyEvent?.payload.enabled !== false,
+      disabledAgentIds: Array.isArray(memoryPolicyEvent?.payload.disabledAgentIds)
+        ? memoryPolicyEvent.payload.disabledAgentIds.filter((item): item is string => typeof item === 'string')
+        : [],
+      ...(memoryPolicyEvent ? { updatedAt: memoryPolicyEvent.timestamp, updatedBy: typeof memoryPolicyEvent.payload.updatedBy === 'string' ? memoryPolicyEvent.payload.updatedBy : undefined } : {}),
+    };
+    const controls = new Map<string, { paused: boolean; locked: boolean; lastActionAt: string; requestedBy?: string }>();
+    for (const event of events) {
+      const stepId = typeof event.payload.stepId === 'string' ? event.payload.stepId : '';
+      if (!stepId || !['node.pause_requested', 'node.resume_requested', 'node.result_locked', 'node.result_unlocked'].includes(event.type)) continue;
+      const current = controls.get(stepId) ?? { paused: false, locked: false, lastActionAt: event.timestamp };
+      if (event.type === 'node.pause_requested') current.paused = true;
+      if (event.type === 'node.resume_requested') current.paused = false;
+      if (event.type === 'node.result_locked') current.locked = true;
+      if (event.type === 'node.result_unlocked') current.locked = false;
+      current.lastActionAt = event.timestamp;
+      if (typeof event.payload.requestedBy === 'string') current.requestedBy = event.payload.requestedBy;
+      controls.set(stepId, current);
+    }
+    return c.json({ task: { ...task, controlState: Object.fromEntries(controls), memoryPolicy } });
   });
 
   api.get('/tasks/:taskId/checkpoints', async (c) => {
@@ -3402,6 +3525,7 @@ export const createTaskApi = (dependencies: {
     const events = await store.getEvents(task.id).catch(() => []);
     if (!await store.deleteTask(taskId, principal.tenantId)) return c.json({ error: 'Task not found.' }, 404);
     await cleanupTaskArtifacts(task, events);
+    await dependencies.businessCapabilities?.unlinkProjectResource(principal.tenantId, 'task', taskId);
     return c.body(null, 204);
   });
 
@@ -3420,6 +3544,22 @@ export const createTaskApi = (dependencies: {
     hub.publish(event);
     coordinator.nudge();
     return c.json({ note: event, taskId }, 202);
+  });
+
+  api.post('/tasks/:taskId/memory-policy', async (c) => {
+    const value = identity(c.req.raw.headers);
+    const task = await store.getTask(c.req.param('taskId'), value.tenantId);
+    if (!task) return c.json({ error: '任务不存在。' }, 404);
+    if (value.role !== 'owner' && value.role !== 'admin' && task.userId !== value.userId) return c.json({ error: '只有任务创建者可以修改本轮记忆策略。' }, 403);
+    const parsed = taskMemoryPolicySchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '记忆策略无效。' }, 400);
+    const event = await store.appendEvent(task, {
+      type: 'memory.policy_updated',
+      agentId: 'operator-memory',
+      payload: { enabled: parsed.data.enabled, disabledAgentIds: [...new Set(parsed.data.disabledAgentIds)], updatedBy: value.userId },
+    });
+    hub.publish(event);
+    return c.json({ taskId: task.id, policy: event.payload, event }, 202);
   });
 
   api.post('/tasks/:taskId/guidance', async (c) => {
@@ -3735,16 +3875,116 @@ export const createTaskApi = (dependencies: {
     const taskId = c.req.param('taskId');
     const nodeId = c.req.param('nodeId');
     const action = c.req.param('action');
-    if (!['retry', 'rerun', 'skip', 'complete'].includes(action)) return c.json({ error: 'Unknown node action.' }, 404);
-    const { tenantId, userId } = identity(c.req.raw.headers);
+    if (!['retry', 'rerun', 'skip', 'complete', 'pause', 'resume', 'replace', 'lock', 'unlock'].includes(action)) return c.json({ error: 'Unknown node action.' }, 404);
+    const controlPrincipal = identity(c.req.raw.headers);
+    const { tenantId, userId } = controlPrincipal;
     const task = await store.getTask(taskId, tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     const step = task.plan?.steps.find((candidate) => candidate.id === nodeId);
     if (!step) return c.json({ error: 'Workflow node not found.' }, 404);
     const parsed = nodeControlSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'Invalid node control request.' }, 400);
-    const events = action === 'rerun' ? await store.getEvents(task.id) : [];
+    const events = await store.getEvents(task.id);
     const existingResult = task.stepResults.find((result) => result.stepId === nodeId);
+    const lastLockEvent = events.filter((event) => (event.type === 'node.result_locked' || event.type === 'node.result_unlocked') && event.payload.stepId === nodeId).at(-1);
+    const resultLocked = lastLockEvent?.type === 'node.result_locked';
+    const affected = descendantsOf(task, nodeId);
+    const affectedDescendants = [...affected].filter((id) => id !== nodeId);
+    const existingTokens = task.stepResults.filter((result) => affected.has(result.stepId)).reduce((sum, result) => sum + (result.tokens ?? 0), 0);
+    const projectedTokens = (task.plan?.steps ?? []).filter((candidate) => affected.has(candidate.id)).reduce((sum, candidate) => sum + (candidate.maxTokens ?? 6_144), 0);
+
+    if (action === 'lock' || action === 'unlock') {
+      if (!existingResult || existingResult.status !== 'completed') return c.json({ error: '只有已完成的 Agent 结果可以锁定。' }, 409);
+      if ((action === 'lock') === resultLocked) return c.json({ task, locked: resultLocked, idempotent: true });
+      const event = await store.appendEvent(task, {
+        type: action === 'lock' ? 'node.result_locked' : 'node.result_unlocked',
+        agentId: `operator-${nodeId}`,
+        payload: { stepId: nodeId, requestedBy: userId, reason: parsed.data.reason?.trim() || '', affectedDescendants },
+      });
+      hub.publish(event);
+      return c.json({ task, event, locked: action === 'lock', affectedDescendants }, 202);
+    }
+    if (resultLocked) return c.json({ error: '该 Agent 结果已锁定，请先解锁后再修改或重跑。' }, 409);
+
+    if (action === 'pause') {
+      if (terminalStatuses.has(task.status)) return c.json({ error: '任务已经结束，不能暂停 Agent。' }, 409);
+      if (existingResult?.status === 'completed') return c.json({ error: '该 Agent 已完成，无需暂停；可锁定结果或局部重跑。' }, 409);
+      const lastControl = events.filter((event) => (event.type === 'node.pause_requested' || event.type === 'node.resume_requested') && event.payload.stepId === nodeId).at(-1);
+      if (lastControl?.type === 'node.pause_requested') return c.json({ task, idempotent: true, affectedDescendants });
+      const event = await store.appendEvent(task, {
+        type: 'node.pause_requested', agentId: `operator-${nodeId}`,
+        payload: { stepId: nodeId, reason: parsed.data.reason?.trim() || '', requestedBy: userId, affectedDescendants, estimatedTokenChange: projectedTokens - existingTokens, riskIncreased: false },
+      });
+      hub.publish(event);
+      const interrupted = coordinator.pauseStep(task.id, nodeId);
+      const paused = task.status === 'running' || task.status === 'planning'
+        ? task
+        : await store.updateTask(task.id, { status: 'paused', error: '目标 Agent 已由操作员暂停。' });
+      return c.json({ task: paused, event, agentState: interrupted ? 'interrupting' : 'paused-before-start', affectedDescendants, estimatedTokenChange: projectedTokens - existingTokens, riskIncreased: false }, 202);
+    }
+
+    if (action === 'resume') {
+      const lastControl = events.filter((event) => (event.type === 'node.pause_requested' || event.type === 'node.resume_requested') && event.payload.stepId === nodeId).at(-1);
+      if (lastControl?.type !== 'node.pause_requested') return c.json({ error: '该 Agent 当前没有暂停。' }, 409);
+      const resumed = task.status === 'paused'
+        ? await store.updateTask(task.id, { status: 'queued', cancelRequested: false, error: null })
+        : task;
+      const event = await store.appendEvent(resumed, {
+        type: 'node.resume_requested', agentId: `operator-${nodeId}`,
+        payload: { stepId: nodeId, requestedBy: userId, affectedDescendants, checkpointSteps: resumed.stepResults.length },
+      });
+      hub.publish(event);
+      if (resumed.status === 'queued') coordinator.nudge();
+      return c.json({ task: resumed, event, affectedDescendants }, 202);
+    }
+
+    if (action === 'replace') {
+      if (!parsed.data.replacementAgentId && !parsed.data.replacementModel) return c.json({ error: '请选择替换 Agent 或模型。' }, 400);
+      const builtin = parsed.data.replacementAgentId ? agentCatalog.find((candidate) => candidate.id === parsed.data.replacementAgentId) : null;
+      const custom = parsed.data.replacementAgentId && agents
+        ? (await agents.listAgents(task.tenantId, 100, templateAccess(controlPrincipal))).find((candidate) => candidate.id === parsed.data.replacementAgentId && candidate.status === 'published')
+        : null;
+      if (parsed.data.replacementAgentId && !builtin && !custom) return c.json({ error: '替换 Agent 不存在、未发布或无权使用。' }, 404);
+      const replacementTools = custom?.definition.toolAllowlist ?? step.toolNames ?? [];
+      const currentTools = new Set(step.toolNames ?? []);
+      const addedTools = replacementTools.filter((name) => !currentTools.has(name));
+      const riskIncreased = addedTools.length > 0;
+      const nextStep = {
+        ...step,
+        ...(parsed.data.replacementModel ? { model: parsed.data.replacementModel } : {}),
+        ...(builtin ? { role: builtin.role, agentContract: { ...step.agentContract, source: 'builtin' as const, agentId: builtin.id, displayName: builtin.label, toolAllowlist: step.toolNames ?? [] } } : {}),
+        ...(custom ? { role: custom.roleId, toolNames: replacementTools, agentContract: { ...step.agentContract, source: 'platform' as const, agentId: custom.id, displayName: custom.name, systemPromptTemplate: custom.definition.systemPromptTemplate, toolAllowlist: replacementTools } } : {}),
+      };
+      const nextVersion = (task.planVersion ?? task.plan?.version ?? 1) + 1;
+      const nextGraph = task.plan?.graph ? {
+        ...task.plan.graph,
+        revision: (task.plan.graph.revision ?? 0) + 1,
+        nodes: task.plan.graph.nodes.map((node) => node.stepId === nodeId
+          ? { ...node, role: nextStep.role, agentId: `${nextStep.role}-${nodeId}`, status: 'queued' as const }
+          : affected.has(node.stepId ?? '') ? { ...node, status: 'queued' as const } : node),
+      } : undefined;
+      const plan = {
+        ...task.plan!,
+        steps: task.plan!.steps.map((candidate) => candidate.id === nodeId ? nextStep : candidate),
+        version: nextVersion,
+        approvalStatus: riskIncreased ? 'pending' as const : 'approved' as const,
+        graph: nextGraph,
+      };
+      const replaced = await store.updateTask(task.id, {
+        status: riskIncreased ? 'awaiting_approval' : 'queued', plan, planVersion: nextVersion,
+        stepResults: task.stepResults.filter((result) => !affected.has(result.stepId)), review: null, result: null, error: null,
+      });
+      const event = await store.appendEvent(replaced, {
+        type: 'node.replace_requested', agentId: `operator-${nodeId}`,
+        payload: { stepId: nodeId, requestedBy: userId, replacementAgentId: parsed.data.replacementAgentId, previousModel: step.model ?? task.model, replacementModel: parsed.data.replacementModel, affectedDescendants, invalidatedSteps: [...affected], estimatedTokenChange: projectedTokens - existingTokens, riskIncreased, addedTools, oldPlanVersion: task.planVersion ?? task.plan?.version ?? 1, newPlanVersion: nextVersion },
+      });
+      hub.publish(event);
+      if (riskIncreased) {
+        const approval = await store.appendEvent(replaced, { type: 'plan.approval_requested', agentId: 'operator-replanner', payload: { plan, version: nextVersion, reason: '替换 Agent 扩大了工具权限。', addedTools } });
+        hub.publish(approval);
+      } else coordinator.nudge();
+      return c.json({ task: replaced, event, affectedDescendants, estimatedTokenChange: projectedTokens - existingTokens, riskIncreased }, 202);
+    }
     if (action === 'rerun') {
       if (task.status === 'awaiting_approval' || task.status === 'waiting_for_human') {
         return c.json({ error: '该任务正在等待审批或人工处理，完成当前决策后才能局部重跑。' }, 409);

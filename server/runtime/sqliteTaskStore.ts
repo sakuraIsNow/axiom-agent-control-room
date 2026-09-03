@@ -352,6 +352,10 @@ export class SqliteTaskStore implements TaskStore {
         SUM(failures) AS failures,
         SUM(duration_ms) AS total_latency_ms,
         SUM(total_tokens) AS total_tokens,
+        SUM(reviewer_attempts) AS reviewer_attempts,
+        SUM(reviewer_first_passes) AS reviewer_first_passes,
+        SUM(retries) AS retries,
+        SUM(human_takeovers) AS human_takeovers,
         MAX(timestamp) AS last_used_at
       FROM (
         SELECT json_extract(payload_json, '$.model') AS model,
@@ -360,6 +364,7 @@ export class SqliteTaskStore implements TaskStore {
           0 AS failures,
           COALESCE(json_extract(payload_json, '$.durationMs'), 0) AS duration_ms,
           COALESCE(json_extract(payload_json, '$.totalTokens'), 0) AS total_tokens,
+          0 AS reviewer_attempts, 0 AS reviewer_first_passes, 0 AS retries, 0 AS human_takeovers,
           timestamp
         FROM task_events WHERE type = 'model.completed'
         UNION ALL
@@ -369,12 +374,28 @@ export class SqliteTaskStore implements TaskStore {
           1 AS failures,
           0 AS duration_ms,
           0 AS total_tokens,
+          0 AS reviewer_attempts, 0 AS reviewer_first_passes, 0 AS retries, 0 AS human_takeovers,
           timestamp
         FROM task_events WHERE type = 'agent.failed'
+        UNION ALL
+        SELECT json_extract(payload_json, '$.model') AS model,
+          0, 0, 0, 0, 0,
+          1 AS reviewer_attempts,
+          CASE WHEN json_extract(payload_json, '$.approved') = 1 AND COALESCE(json_extract(payload_json, '$.attempt'), 1) = 1 THEN 1 ELSE 0 END AS reviewer_first_passes,
+          0 AS retries, 0 AS human_takeovers, timestamp
+        FROM task_events WHERE type = 'review.completed'
+        UNION ALL
+        SELECT COALESCE(json_extract(payload_json, '$.model'), json_extract(payload_json, '$.failedModel')) AS model,
+          0, 0, 0, 0, 0, 0, 0, 1 AS retries, 0 AS human_takeovers, timestamp
+        FROM task_events WHERE type = 'agent.retrying'
+        UNION ALL
+        SELECT json_extract(payload_json, '$.previousModel') AS model,
+          0, 0, 0, 0, 0, 0, 0, 0 AS retries, 1 AS human_takeovers, timestamp
+        FROM task_events WHERE type = 'node.replace_requested'
       ) observations
       WHERE model IS NOT NULL AND TRIM(model) <> ''
       GROUP BY model
-    `).all() as Array<{ model: string; attempts: number; successes: number; failures: number; total_latency_ms: number; total_tokens: number; last_used_at?: string }>;
+    `).all() as Array<{ model: string; attempts: number; successes: number; failures: number; total_latency_ms: number; total_tokens: number; reviewer_attempts: number; reviewer_first_passes: number; retries: number; human_takeovers: number; last_used_at?: string }>;
     return rows.map((row) => ({
       model: row.model,
       attempts: Number(row.attempts ?? 0),
@@ -382,6 +403,10 @@ export class SqliteTaskStore implements TaskStore {
       failures: Number(row.failures ?? 0),
       totalLatencyMs: Number(row.total_latency_ms ?? 0),
       totalTokens: Number(row.total_tokens ?? 0),
+      reviewerAttempts: Number(row.reviewer_attempts ?? 0),
+      reviewerFirstPasses: Number(row.reviewer_first_passes ?? 0),
+      retries: Number(row.retries ?? 0),
+      humanTakeovers: Number(row.human_takeovers ?? 0),
       ...(row.last_used_at ? { lastUsedAt: row.last_used_at } : {}),
     }));
   }

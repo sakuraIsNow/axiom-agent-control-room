@@ -48,6 +48,10 @@ export const agentWorkflowCanvasSchema = z.object({
       expression: z.string().min(1).max(500),
       branch: z.enum(['true', 'false']),
     }).strict().optional(),
+    transfer: z.object({
+      mode: z.enum(['summary', 'full', 'fields', 'reference']),
+      fields: z.array(z.string().min(1).max(160)).max(32).optional(),
+    }).strict().optional(),
   }).strict()).min(2).max(64),
   scopedAgents: z.array(z.object({
     id: safeId,
@@ -302,7 +306,6 @@ export const compileAgentWorkflow = (
     if (agent) resolved.set(node.id, agent);
   }
   if (issues.length > 0) return { plan: { summary: '', routingReason: '', steps: [] }, issues };
-
   const agentNodes = canvas.nodes.filter((node) => node.type === 'agent');
   type LoopAssignment = Map<string, number>;
   type ExpandedStep = { node: AgentWorkflowNode; agent: NonNullable<ReturnType<typeof resolveAgent>>; assignment: LoopAssignment; id: string };
@@ -347,6 +350,9 @@ export const compileAgentWorkflow = (
     expandedByNode.set(node.id, expanded);
   }
   if (issues.length > 0) return { plan: { summary: '', routingReason: '', steps: [] }, issues };
+  const sourceNodeByExpandedStep = new Map(
+    [...expandedByNode.values()].flat().map((expanded) => [expanded.id, expanded.node.id]),
+  );
   const assignmentForDependency = (target: ExpandedStep, predecessor: AgentWorkflowNode, predecessorExpanded: ExpandedStep[], overrides = new Map<string, number>()) => {
     const candidates = predecessorExpanded.filter((candidate) => {
       for (const loop of loops) {
@@ -410,7 +416,36 @@ export const compileAgentWorkflow = (
         maxTokens: agent.maxTokens ?? 6_144,
         maxDurationMs: agent.maxDurationMs ?? 120_000,
         failureStrategy: agent.failureStrategy ?? 'retry',
-        agentContract: agent.contract,
+        agentContract: {
+          ...agent.contract,
+          inputSchema: {
+            type: 'object',
+            required: ['taskInput', 'dependencyHandoffs'],
+            properties: {
+              taskInput: { type: 'string' },
+              dependencyHandoffs: { type: 'array', items: { type: 'object' } },
+              artifactIds: { type: 'array', items: { type: 'string' } },
+            },
+          },
+          outputSchema: {
+            type: 'object',
+            required: ['output', 'evidence', 'handoff'],
+            properties: {
+              output: { type: 'string' },
+              evidence: { type: 'array', items: { type: 'object' } },
+              handoff: { type: 'object' },
+            },
+          },
+          evidenceRequirements: ['区分用户事实、工具回执、外部来源、Artifact 与模型推断。', '没有真实来源或工具回执的内容不得标记为已验证。'],
+          completionCriteria: node.acceptanceCriteria?.length
+            ? [...node.acceptanceCriteria]
+            : ['输出完整、可验证，并满足当前 Agent 目标。'],
+          dependencyTransfers: Object.fromEntries(dependencies.map((dependencyId) => {
+            const sourceNodeId = sourceNodeByExpandedStep.get(dependencyId);
+            const edge = canvas.edges.find((candidate) => candidate.source === sourceNodeId && candidate.target === node.id && candidate.kind !== 'loop');
+            return [dependencyId, edge?.transfer ?? { mode: 'summary' as const }];
+          })),
+        },
       });
     }
   }

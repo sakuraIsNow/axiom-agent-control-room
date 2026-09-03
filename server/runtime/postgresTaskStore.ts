@@ -284,6 +284,10 @@ export class PostgresTaskStore implements TaskStore {
         SUM(failures)::float8 AS failures,
         SUM(duration_ms)::float8 AS total_latency_ms,
         SUM(total_tokens)::float8 AS total_tokens,
+        SUM(reviewer_attempts)::float8 AS reviewer_attempts,
+        SUM(reviewer_first_passes)::float8 AS reviewer_first_passes,
+        SUM(retries)::float8 AS retries,
+        SUM(human_takeovers)::float8 AS human_takeovers,
         MAX(timestamp) AS last_used_at
       FROM (
         SELECT payload_json->>'model' AS model,
@@ -292,6 +296,7 @@ export class PostgresTaskStore implements TaskStore {
           0::float8 AS failures,
           COALESCE(NULLIF(payload_json->>'durationMs', '')::float8, 0) AS duration_ms,
           COALESCE(NULLIF(payload_json->>'totalTokens', '')::float8, 0) AS total_tokens,
+          0::float8 AS reviewer_attempts, 0::float8 AS reviewer_first_passes, 0::float8 AS retries, 0::float8 AS human_takeovers,
           timestamp
         FROM task_events WHERE type = 'model.completed'
         UNION ALL
@@ -301,8 +306,24 @@ export class PostgresTaskStore implements TaskStore {
           1::float8 AS failures,
           0::float8 AS duration_ms,
           0::float8 AS total_tokens,
+          0::float8 AS reviewer_attempts, 0::float8 AS reviewer_first_passes, 0::float8 AS retries, 0::float8 AS human_takeovers,
           timestamp
         FROM task_events WHERE type = 'agent.failed'
+        UNION ALL
+        SELECT payload_json->>'model' AS model,
+          0::float8, 0::float8, 0::float8, 0::float8, 0::float8,
+          1::float8 AS reviewer_attempts,
+          CASE WHEN payload_json->>'approved' = 'true' AND COALESCE(NULLIF(payload_json->>'attempt', '')::integer, 1) = 1 THEN 1::float8 ELSE 0::float8 END AS reviewer_first_passes,
+          0::float8 AS retries, 0::float8 AS human_takeovers, timestamp
+        FROM task_events WHERE type = 'review.completed'
+        UNION ALL
+        SELECT COALESCE(payload_json->>'model', payload_json->>'failedModel') AS model,
+          0::float8, 0::float8, 0::float8, 0::float8, 0::float8, 0::float8, 0::float8, 1::float8, 0::float8, timestamp
+        FROM task_events WHERE type = 'agent.retrying'
+        UNION ALL
+        SELECT payload_json->>'previousModel' AS model,
+          0::float8, 0::float8, 0::float8, 0::float8, 0::float8, 0::float8, 0::float8, 0::float8, 1::float8, timestamp
+        FROM task_events WHERE type = 'node.replace_requested'
       ) observations
       WHERE model IS NOT NULL AND BTRIM(model) <> ''
       GROUP BY model
@@ -314,6 +335,10 @@ export class PostgresTaskStore implements TaskStore {
       failures: Number(row.failures ?? 0),
       totalLatencyMs: Number(row.total_latency_ms ?? 0),
       totalTokens: Number(row.total_tokens ?? 0),
+      reviewerAttempts: Number(row.reviewer_attempts ?? 0),
+      reviewerFirstPasses: Number(row.reviewer_first_passes ?? 0),
+      retries: Number(row.retries ?? 0),
+      humanTakeovers: Number(row.human_takeovers ?? 0),
       ...(row.last_used_at ? { lastUsedAt: new Date(String(row.last_used_at)).toISOString() } : {}),
     }));
   }

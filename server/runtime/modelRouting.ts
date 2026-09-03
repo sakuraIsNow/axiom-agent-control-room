@@ -20,6 +20,12 @@ type ModelStats = {
   totalLatencyMs: number;
   totalTokens: number;
   latencySamples: number[];
+  reviewerAttempts: number;
+  reviewerFirstPasses: number;
+  retries: number;
+  humanTakeovers: number;
+  feedbackCount: number;
+  feedbackScoreTotal: number;
   lastUsedAt?: string;
 };
 
@@ -31,6 +37,14 @@ export type ModelRoutingSnapshot = {
     successRate: number;
     averageLatencyMs: number;
     totalTokens: number;
+    reviewerAttempts: number;
+    reviewerFirstPassRate: number;
+    retries: number;
+    humanTakeovers: number;
+    feedbackCount: number;
+    averageFeedbackScore: number | null;
+    score: number;
+    explanation: string;
     lastUsedAt?: string;
   }>;
 };
@@ -115,6 +129,12 @@ export class ModelRoutingPolicy {
         totalLatencyMs: Math.max(0, finite(record.totalLatencyMs)),
         totalTokens: Math.max(0, finite(record.totalTokens)),
         latencySamples: [],
+        reviewerAttempts: Math.max(0, Math.floor(finite(record.reviewerAttempts))),
+        reviewerFirstPasses: Math.max(0, Math.floor(finite(record.reviewerFirstPasses))),
+        retries: Math.max(0, Math.floor(finite(record.retries))),
+        humanTakeovers: Math.max(0, Math.floor(finite(record.humanTakeovers))),
+        feedbackCount: 0,
+        feedbackScoreTotal: 0,
         ...(record.lastUsedAt ? { lastUsedAt: record.lastUsedAt } : {}),
       });
     }
@@ -136,9 +156,14 @@ export class ModelRoutingPolicy {
       const roleAffinity = _context.role && candidate.roles?.length
         ? (candidate.roles.includes(_context.role) ? 12 : -12)
         : 0;
+      const reviewRate = ((stats?.reviewerFirstPasses ?? 0) + 1) / ((stats?.reviewerAttempts ?? 0) + 2);
+      const retryRate = (stats?.retries ?? 0) / Math.max(1, attempts);
+      const takeoverRate = (stats?.humanTakeovers ?? 0) / Math.max(1, attempts);
+      const feedbackQuality = stats?.feedbackCount ? stats.feedbackScoreTotal / stats.feedbackCount / 5 : 0.6;
       // Cold candidates remain viable, while repeated failures and slow or
       // expensive providers naturally lose to a healthier alternative.
-      const score = successRate * 100 + kindAffinity + roleAffinity - averageLatencyMs / 100 - Math.min(20, cost * 100);
+      const score = successRate * 70 + reviewRate * 18 + feedbackQuality * 18 + kindAffinity + roleAffinity
+        - retryRate * 16 - takeoverRate * 24 - averageLatencyMs / 120 - Math.min(20, cost * 100);
       return { candidate, score, index };
     });
     scored.sort((left, right) => right.score - left.score || left.index - right.index);
@@ -161,6 +186,12 @@ export class ModelRoutingPolicy {
       totalLatencyMs: 0,
       totalTokens: 0,
       latencySamples: [],
+      reviewerAttempts: 0,
+      reviewerFirstPasses: 0,
+      retries: 0,
+      humanTakeovers: 0,
+      feedbackCount: 0,
+      feedbackScoreTotal: 0,
     } satisfies ModelStats;
     current.attempts += 1;
     if (input.success) current.successes += 1;
@@ -173,6 +204,32 @@ export class ModelRoutingPolicy {
     }
     current.lastUsedAt = input.timestamp ?? new Date().toISOString();
     this.stats.set(model, current);
+  }
+
+  recordQualityOutcome(input: { model: string; approved: boolean; firstPass?: boolean }) {
+    const model = input.model.trim();
+    if (!model) return;
+    const current = this.ensure(model);
+    current.reviewerAttempts += 1;
+    if (input.approved && input.firstPass !== false) current.reviewerFirstPasses += 1;
+  }
+
+  recordFeedback(input: { model: string; score: number; routingIssue?: boolean; humanTakeover?: boolean }) {
+    const model = input.model.trim();
+    if (!model || !Number.isFinite(input.score)) return;
+    const current = this.ensure(model);
+    current.feedbackCount += 1;
+    current.feedbackScoreTotal += Math.min(5, Math.max(1, input.score));
+    if (input.routingIssue || input.humanTakeover) current.humanTakeovers += 1;
+  }
+
+  private ensure(model: string) {
+    const current = this.stats.get(model) ?? {
+      attempts: 0, successes: 0, failures: 0, totalLatencyMs: 0, totalTokens: 0, latencySamples: [],
+      reviewerAttempts: 0, reviewerFirstPasses: 0, retries: 0, humanTakeovers: 0, feedbackCount: 0, feedbackScoreTotal: 0,
+    } satisfies ModelStats;
+    this.stats.set(model, current);
+    return current;
   }
 
   recordEvent(event: RuntimeEvent) {
@@ -188,6 +245,14 @@ export class ModelRoutingPolicy {
     if (event.type === 'agent.failed' && typeof event.payload.model === 'string') {
       this.record({ model: event.payload.model, success: false, timestamp: event.timestamp });
     }
+    if (event.type === 'review.completed' && typeof event.payload.model === 'string') {
+      this.recordQualityOutcome({ model: event.payload.model, approved: event.payload.approved === true, firstPass: Number(event.payload.attempt ?? 1) === 1 });
+    }
+    if (event.type === 'agent.retrying') {
+      const model = typeof event.payload.model === 'string' ? event.payload.model : typeof event.payload.failedModel === 'string' ? event.payload.failedModel : '';
+      if (model) this.ensure(model).retries += 1;
+    }
+    if (event.type === 'node.replace_requested' && typeof event.payload.previousModel === 'string') this.ensure(event.payload.previousModel).humanTakeovers += 1;
   }
 
   snapshot(models: Iterable<string | ModelRoutingCandidate>) : ModelRoutingSnapshot {
@@ -195,14 +260,36 @@ export class ModelRoutingPolicy {
       candidates: normalizedCandidates(models, this.costs).map((candidate) => {
         const stats = this.stats.get(candidate.model);
         const attempts = stats?.attempts ?? 0;
+        const successes = stats?.successes ?? 0;
+        const successRate = stats ? successes / Math.max(1, attempts) : 0;
+        const averageLatencyMs = Math.round(attempts ? (stats?.totalLatencyMs ?? 0) / attempts : 0);
+        const reviewerAttempts = stats?.reviewerAttempts ?? 0;
+        const reviewerFirstPassRate = reviewerAttempts ? (stats?.reviewerFirstPasses ?? 0) / reviewerAttempts : 0;
+        const averageFeedbackScore = stats?.feedbackCount ? stats.feedbackScoreTotal / stats.feedbackCount : null;
+        const selectedScore = successRate * 70 + ((reviewerAttempts ? reviewerFirstPassRate : 0.5) * 18)
+          + ((averageFeedbackScore === null ? 0.6 : averageFeedbackScore / 5) * 18)
+          - ((stats?.retries ?? 0) / Math.max(1, attempts)) * 16
+          - ((stats?.humanTakeovers ?? 0) / Math.max(1, attempts)) * 24
+          - averageLatencyMs / 120
+          - Math.min(20, ((candidate.inputCostPer1kUsd ?? 0) + (candidate.outputCostPer1kUsd ?? 0)) * 100);
         return {
           ...candidate,
           attempts,
-          successes: stats?.successes ?? 0,
+          successes,
           failures: stats?.failures ?? 0,
-          successRate: Number(((stats ? stats.successes / Math.max(1, attempts) : 0)).toFixed(4)),
-          averageLatencyMs: Math.round(attempts ? (stats?.totalLatencyMs ?? 0) / attempts : 0),
+          successRate: Number(successRate.toFixed(4)),
+          averageLatencyMs,
           totalTokens: Math.round(stats?.totalTokens ?? 0),
+          reviewerAttempts,
+          reviewerFirstPassRate: Number(reviewerFirstPassRate.toFixed(4)),
+          retries: stats?.retries ?? 0,
+          humanTakeovers: stats?.humanTakeovers ?? 0,
+          feedbackCount: stats?.feedbackCount ?? 0,
+          averageFeedbackScore: averageFeedbackScore === null ? null : Number(averageFeedbackScore.toFixed(2)),
+          score: Number(selectedScore.toFixed(2)),
+          explanation: attempts
+            ? `成功率 ${Math.round(successRate * 100)}%，首次审查通过率 ${reviewerAttempts ? `${Math.round(reviewerFirstPassRate * 100)}%` : '暂无样本'}，平均 ${averageLatencyMs} ms，重试 ${stats?.retries ?? 0} 次，人工接管 ${stats?.humanTakeovers ?? 0} 次。`
+            : '暂无执行样本，按能力画像、成本和冷启动先验参与选择。',
           ...(stats?.lastUsedAt ? { lastUsedAt: stats.lastUsedAt } : {}),
         };
       }),

@@ -67,6 +67,14 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - 📣 **任务结果可靠外发**：任务完成、失败、等待确认或日程异常时，可以通过签名 Webhook 推送到自己的系统；投递具有持久队列、幂等、超时重试、死信恢复和脱敏审计，服务重启不会丢失待发送记录。
 - 🧪 **按业务过程评测**：生产门禁不只看最终答案，还验证跨轮路由是否漂移、执行中改需求是否只应用一次、长结果引用边界、恢复一致性与版本冲突。
 
+### 🧭 从任务到业务交付
+
+最新的业务能力 V2 把复杂任务的前后步骤连成了一个可执行闭环：失败或需求变化时只重排受影响部分；Agent 之间用结构化摘要、证据和 Artifact 交接；Reviewer 会阻止证据缺失或互相矛盾的结论进入已验证交付。
+
+项目空间可以集中管理任务、会话、Agent Nexus、日程、决策、成员和审核。任务结束后可以继续分析、局部重跑、换模型复核、导出报告，或保存为 Nexus、插件和日程。平台还提供十种常用业务方案、可控长期记忆、动态 MCP/OpenAPI 工具目录、真实反馈聚合，以及随运行事件更新的成本和时间预估。
+
+这些能力都有 SQLite/PostgreSQL 持久化、服务端权限和 API 回归，不是只在页面上展示。完整说明、使用边界和验收方法见 [业务能力 V2](docs/business-capabilities-v2.md)。
+
 ### 🔁 一次任务的真实执行链路
 
 ```text
@@ -95,14 +103,14 @@ Synthesizer：只汇总已验证的结果
 
 ```text
 npm run check       通过
-npm test            358 passed / 0 failed
+npm test            373 passed / 0 failed / 0 skipped（使用独立 PostgreSQL 测试库）
 npm run build       通过
 npm run qa:search-agent
                     通过
-npm run qa:all      24 passed / 0 failed / 4 skipped
+npm run qa:all      25 passed / 0 failed / 4 skipped
 ```
 
-本轮门禁开始前已经确认 Docker Engine `28.0.1` 正常运行，并且 `ubuntu:22.04` 沙箱镜像可用；24 个可运行项目全部在第一次尝试通过。真实复杂任务产生 798 个连续事件和 704 个 SSE 流式增量，共使用 27,706 Token，Reviewer 评分 92，最终 Artifact 完整交付。
+本轮门禁开始前已经确认 Docker 与 PostgreSQL 测试容器正常运行；25 个可运行项目全部在第一次尝试通过。真实复杂任务产生 874 个连续事件和 761 个 SSE 流式增量，共使用 58,899 Token；Reviewer 评分 45 后触发一次真实人工确认，最终正常完成并保存 1,006 字符 Artifact。4 个跳过项仅对应未配置的 MemoryCore、外部对象存储和 Harness/Codex sidecar 现场验收，跳过不等于通过。
 
 跳过的 4 项只涉及尚未配置的外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar 现场握手。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；跳过不等于通过，也不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
 
@@ -377,6 +385,7 @@ npm run qa:all      # 生产门禁回归
 - [执行闭环](docs/execution-loop.md)：任务如何从输入走到交付。
 - [工具目录](docs/tool-registry.md)：工具权限、审批和执行边界。
 - [MemoryCore 接入](docs/memorycore-integration.md)：长期记忆配置与验收。
+- [业务能力 V2](docs/business-capabilities-v2.md)：15 项业务闭环、数据边界与验收方法。
 - [Harness 适配器](docs/harness-adapters.md)：DeepSeek Harness/Codex 的可选接入方式。
 - [上下文窗口与持久摘要](docs/context-window.md)：长对话如何压缩、校验并恢复。
 - [业务闭环评测](docs/runtime-business-evaluation.md)：分段评测维度和失败定位方式。

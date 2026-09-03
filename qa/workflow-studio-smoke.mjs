@@ -1,3 +1,5 @@
+import { testAndPublishNexus } from './nexus-release-helper.mjs';
+
 const baseUrl = process.env.QA_URL ?? 'http://127.0.0.1:4300';
 const stamp = Date.now();
 const headers = {
@@ -70,6 +72,14 @@ try {
     body: JSON.stringify({ name: `Loop 在线烟测 ${stamp}`, description: '验证真实工作流调度、SSE 与检查点', visibility: 'private', canvas }),
   }), '创建工作流失败');
   workflowId = created.workflow.id;
+
+  await testAndPublishNexus({
+    baseUrl,
+    workflowId,
+    headers,
+    testName: 'Loop 工作流发布验收',
+    input: '请计算 12 + 30，并复核结果。',
+  });
 
   const run = await json(await fetch(`${baseUrl}/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     method: 'POST', headers,

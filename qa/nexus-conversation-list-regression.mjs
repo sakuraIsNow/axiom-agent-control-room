@@ -1,4 +1,5 @@
 import { chromium } from '@playwright/test';
+import { testAndPublishNexus } from './nexus-release-helper.mjs';
 
 const baseUrl = process.env.QA_URL ?? 'http://127.0.0.1:4300';
 const stamp = Date.now();
@@ -43,6 +44,14 @@ try {
   }), 'create workflow');
   workflowId = created.workflow.id;
 
+  await testAndPublishNexus({
+    baseUrl,
+    workflowId,
+    headers,
+    testName: '会话隔离发布验收',
+    input: 'Please reply: nexus release gate works.',
+  });
+
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: headers });
   const page = await context.newPage();
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
@@ -54,18 +63,29 @@ try {
   const runResponse = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().includes(`/workflows/${workflowId}/run`));
   await page.locator('.workflow-runner footer textarea').fill('Please reply: nexus list sync works.');
   await page.locator('.workflow-runner footer button').click();
-  taskId = (await runResponse).json().then((body) => body?.task?.id ?? null);
-  taskId = await taskId;
+  const runHttpResponse = await runResponse;
+  const runBody = await readJson(runHttpResponse, 'run published workflow');
+  taskId = runBody.task.id;
 
   const deadline = Date.now() + 120_000;
   let status = 'queued';
+  let lastTask = null;
+  let reviewApproved = false;
   while (Date.now() < deadline && !['completed', 'failed', 'cancelled'].includes(status)) {
     const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(taskId)}`, { headers });
     const body = await response.json().catch(() => null);
-    status = body?.task?.status ?? status;
+    if (!response.ok) throw new Error(`read workflow task (${response.status}): ${body?.error ?? 'unknown error'}`);
+    lastTask = body?.task ?? lastTask;
+    status = lastTask?.status ?? status;
+    if (status === 'waiting_for_human' && lastTask?.review && !reviewApproved) {
+      await readJson(await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(taskId)}/approve-review`, {
+        method: 'POST', headers, body: JSON.stringify({ note: '自动化会话隔离回归已核对结果。' }),
+      }), 'approve workflow review');
+      reviewApproved = true;
+    }
     if (!['completed', 'failed', 'cancelled'].includes(status)) await new Promise((resolve) => setTimeout(resolve, 350));
   }
-  if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error('workflow did not reach a terminal state');
+  if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error(`workflow did not reach a terminal state; last status: ${status}`);
   await page.waitForTimeout(500);
 
   const taskResponse = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(taskId)}`, { headers });
@@ -79,7 +99,7 @@ try {
   const assertions = {
     absentFromRecentConversations: listCount === 0,
     taskRemainsAvailable: taskResponse.ok && ['completed', 'failed', 'cancelled'].includes(taskBody?.task?.status),
-    nexusHistoryRemainsAvailable: nexusHistoryCount >= 2,
+    nexusHistoryContainsOnlyConversation: nexusHistoryCount === 2,
   };
   console.log(JSON.stringify({ assertions, taskId, status, nexusHistoryCount }, null, 2));
   if (Object.values(assertions).some((passed) => !passed)) process.exitCode = 1;

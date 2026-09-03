@@ -27,3 +27,31 @@ test('completion evidence distinguishes a verified delivery from a partial one',
   assert.equal(partial.status, 'partial');
   assert.deepEqual(partial.gaps, ['1 个步骤未完成', '已完成步骤没有附带证据条目', '质量审核尚未通过']);
 });
+
+test('structured evidence never treats inference as verified and contradictions lower the delivery gate', () => {
+  const summary = summarizeCompletionEvidence(plan, [
+    {
+      stepId: 'research', agentId: 'researcher-research', role: 'researcher', status: 'completed', output: 'facts',
+      evidence: ['tool fact', 'model guess'], confidence: .8, attempts: 1, durationMs: 10,
+      evidenceDetails: [
+        { id: 'e1', claim: 'tool fact', kind: 'tool-result', source: 'workspace.read', verification: 'verified', confidence: 1 },
+        { id: 'e2', claim: 'model guess', kind: 'model-inference', source: 'model', verification: 'contradicted', confidence: .4 },
+      ],
+    },
+    { stepId: 'build', agentId: 'builder-build', role: 'builder', status: 'completed', output: 'result', evidence: ['supported'], confidence: .8, attempts: 1, durationMs: 10 },
+  ], undefined, false);
+  assert.equal(summary.status, 'partial');
+  assert.equal(summary.verifiedEvidenceItems, 1);
+  assert.equal(summary.contradictedEvidenceItems, 1);
+  assert.ok(summary.gaps.some((gap) => gap.includes('证据存在冲突')));
+});
+
+test('a durable failed step recovered by a completed Replanner step is not counted as unresolved', () => {
+  const summary = summarizeCompletionEvidence(plan, [
+    { stepId: 'research', agentId: 'researcher-research', role: 'researcher', status: 'failed', output: 'failed', evidence: [], confidence: 0, attempts: 2, durationMs: 10, recoveredByStepId: 'research-recovery-1' },
+    { stepId: 'research-recovery-1', agentId: 'researcher-recovery', role: 'researcher', status: 'completed', output: 'recovered', evidence: ['bounded evidence'], confidence: .8, attempts: 1, durationMs: 10 },
+    { stepId: 'build', agentId: 'builder-build', role: 'builder', status: 'completed', output: 'result', evidence: ['output'], confidence: .8, attempts: 1, durationMs: 10 },
+  ], undefined, false);
+  assert.equal(summary.failedSteps, 0);
+  assert.equal(summary.recoveredFailures, 1);
+});

@@ -57,6 +57,7 @@ export interface ArtifactCatalog {
   removeTaskReferences(tenantId: string, taskId: string, artifactIds?: string[]): Promise<number>;
   markDeleted(tenantId: string, artifactId: string): Promise<boolean>;
   recordCleanupFailure(tenantId: string, artifactId: string, error: string): Promise<boolean>;
+  listActive(tenantId: string, limit?: number): Promise<ArtifactRecord[]>;
   listCleanupCandidates(tenantId: string, limit?: number): Promise<ArtifactRecord[]>;
   listOrphans(tenantId: string, limit?: number): Promise<ArtifactRecord[]>;
   stats(tenantId: string): Promise<ArtifactCatalogStats>;
@@ -266,6 +267,11 @@ export class SqliteArtifactCatalog implements ArtifactCatalog {
     return result.changes > 0;
   }
 
+  async listActive(tenantId: string, limit = 100) {
+    const rows = this.db.prepare(`SELECT * FROM artifact_records WHERE tenant_id = ? AND status = 'active' AND reference_count > 0 ORDER BY created_at DESC LIMIT ?`).all(tenantId, boundedLimit(limit)) as Array<Record<string, unknown>>;
+    return rows.map(fromRow);
+  }
+
   async listCleanupCandidates(tenantId: string, limit = 100) {
     const rows = this.db.prepare(`SELECT * FROM artifact_records WHERE tenant_id = ? AND (status IN ('orphaned', 'delete_pending') OR (status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?)) ORDER BY cleanup_attempts ASC, created_at ASC LIMIT ?`).all(tenantId, new Date().toISOString(), boundedLimit(limit)) as Array<Record<string, unknown>>;
     return rows.map(fromRow);
@@ -397,6 +403,11 @@ export class PostgresArtifactCatalog implements ArtifactCatalog {
   async recordCleanupFailure(tenantId: string, artifactId: string, error: string) {
     const result = await this.pool.query(`UPDATE artifact_records SET status = 'delete_pending', cleanup_attempts = cleanup_attempts + 1, last_error = $1, last_attempt_at = NOW() WHERE tenant_id = $2 AND id = $3 AND status <> 'deleted'`, [cleanError(error), tenantId, artifactId]);
     return (result.rowCount ?? 0) > 0;
+  }
+
+  async listActive(tenantId: string, limit = 100) {
+    const result = await this.pool.query(`SELECT * FROM artifact_records WHERE tenant_id = $1 AND status = 'active' AND reference_count > 0 ORDER BY created_at DESC LIMIT $2`, [tenantId, boundedLimit(limit)]);
+    return result.rows.map((row) => fromRow(row as Record<string, unknown>));
   }
 
   async listCleanupCandidates(tenantId: string, limit = 100) {

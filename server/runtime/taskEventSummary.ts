@@ -46,6 +46,22 @@ export const summarizeTaskEvents = (rows: TaskEventSummaryRow[]) => {
       summary.estimatedCostUsd += numeric(row.payload.estimatedCostUsd);
     }
     if (row.type === 'agent.retrying') summary.retries += 1;
+    if (row.type === 'estimate.updated') {
+      const duration = row.payload.durationMs && typeof row.payload.durationMs === 'object'
+        ? row.payload.durationMs as Record<string, unknown>
+        : {};
+      summary.estimate = {
+        progress: Math.min(1, Math.max(0, Number(row.payload.progress ?? 0))),
+        remainingSteps: Math.max(0, Math.floor(Number(row.payload.remainingSteps ?? 0))),
+        durationMs: {
+          low: Math.max(0, Number(duration.low ?? 0)),
+          likely: Math.max(0, Number(duration.likely ?? 0)),
+          high: Math.max(0, Number(duration.high ?? 0)),
+        },
+        confidence: row.payload.confidence === 'high' || row.payload.confidence === 'medium' ? row.payload.confidence : 'low',
+        updatedAt: row.timestamp,
+      };
+    }
     if (row.type === 'tool.started') summary.toolCalls += 1;
     if (row.type === 'task.queued' && !summary.queuedAt) summary.queuedAt = row.timestamp;
     if (row.type === 'task.started' && !summary.startedAt) summary.startedAt = row.timestamp;

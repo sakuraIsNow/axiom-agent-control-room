@@ -50,6 +50,7 @@ const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: qaHeaders });
 const page = await context.newPage();
 const consoleErrors = [];
+const httpErrors = [];
 const visualNotificationChannel = {
   id: '7109e778-69c0-4f7c-9307-d7a3b6461e25',
   name: '团队消息',
@@ -78,6 +79,35 @@ let visualNotificationDeliveries = [{
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 }];
+let visualInAppNotification = {
+  id: `visual-task-completed-${qaTenant}`,
+  kind: 'task_completed',
+  severity: 'success',
+  title: '交付已完成',
+  message: 'Agent 已完成验收，可查看任务结果。',
+  createdAt: new Date().toISOString(),
+  read: false,
+  target: { view: 'tasks', taskId: 'visual-task' },
+  action: { kind: 'open', label: '查看任务', resourceId: 'visual-task' },
+};
+await page.route('**/api/notifications**', async (route) => {
+  const request = route.request();
+  const path = new URL(request.url()).pathname;
+  if (request.method() === 'GET' && path === '/api/notifications') {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      unreadCount: visualInAppNotification.read ? 0 : 1,
+      notifications: [visualInAppNotification],
+    }) });
+    return;
+  }
+  if (request.method() === 'POST' && path === '/api/notifications/read') {
+    visualInAppNotification = { ...visualInAppNotification, read: true };
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ marked: 1, unreadCount: 0 }) });
+    return;
+  }
+  await route.continue();
+});
 await page.route('**/api/notification-channels**', async (route) => {
   const request = route.request();
   const path = new URL(request.url()).pathname;
@@ -97,6 +127,68 @@ await page.route('**/api/notification-channels**', async (route) => {
   }
   await route.continue();
 });
+const businessNow = new Date().toISOString();
+let visualProject = {
+  id: '6109e778-69c0-4f7c-9307-d7a3b6461e25', tenantId: qaTenant, userId: qaTenant, ownerId: qaTenant,
+  kind: 'project', status: 'active', revision: 3, createdAt: businessNow, updatedAt: businessNow,
+  data: {
+    name: '产品发布协作', goal: '把跨 Agent 调研、实现和验收收敛为可交付版本。',
+    acceptanceCriteria: ['关键结论带来源', '发布前完成审核'], strategy: '先验证证据，再进入发布。',
+    members: [{ userId: 'qa-reviewer', role: 'reviewer' }],
+    resources: { task: ['visual-task'], nexus: ['visual-nexus'], artifact: ['visual-artifact'] }, decisions: [],
+  },
+};
+let visualDecision = {
+  id: '6209e778-69c0-4f7c-9307-d7a3b6461e25', tenantId: qaTenant, userId: qaTenant, ownerId: qaTenant,
+  projectId: visualProject.id, kind: 'decision', status: 'proposed', revision: 1, createdAt: businessNow, updatedAt: businessNow,
+  data: { title: '发布窗口', decision: '通过灰度环境验证后发布。', rationale: '控制变更风险。', status: 'proposed' },
+};
+let visualReview = {
+  id: '6309e778-69c0-4f7c-9307-d7a3b6461e25', tenantId: qaTenant, userId: qaTenant, ownerId: 'qa-reviewer',
+  projectId: visualProject.id, kind: 'review-assignment', status: 'assigned', revision: 1, createdAt: businessNow, updatedAt: businessNow,
+  data: { reviewerId: 'qa-reviewer', targetType: 'artifact', targetId: 'visual-artifact', note: '核对证据和验收边界', assignedBy: qaTenant },
+};
+let visualProjectNotification = {
+  id: '6409e778-69c0-4f7c-9307-d7a3b6461e25', tenantId: qaTenant, userId: qaTenant, ownerId: qaTenant,
+  projectId: visualProject.id, kind: 'project-notification', status: 'unread', revision: 1, createdAt: businessNow, updatedAt: businessNow,
+  data: { type: 'review-assignment', projectId: visualProject.id, targetType: 'artifact', targetId: 'visual-artifact' },
+};
+await page.route('**/api/capabilities/**', async (route) => {
+  const request = route.request();
+  const path = new URL(request.url()).pathname.replace('/api/capabilities', '');
+  const respond = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+  if (request.method() === 'GET' && path === '/projects') return respond({ projects: [visualProject] });
+  if (request.method() === 'GET' && path === '/memories') return respond({
+    memoryCore: 'degraded-local-policy',
+    memories: [{ id: '6509e778-69c0-4f7c-9307-d7a3b6461e25', tenantId: qaTenant, userId: qaTenant, ownerId: qaTenant, kind: 'memory', status: 'active', revision: 1, createdAt: businessNow, updatedAt: businessNow, data: { content: '发布前必须完成证据审核。', source: '项目复盘', layer: 'L2', confidence: .92, scope: 'project', scopeId: visualProject.id, enabled: true, syncState: 'local-policy', syncMessage: 'MemoryCore 未配置，当前使用本地策略。' } }],
+  });
+  if (request.method() === 'GET' && path === '/tool-sources') return respond({ sources: [] });
+  if (request.method() === 'GET' && path === '/solutions') return respond({ solutions: [{ id: 'requirements', name: '需求分析', description: '把目标转成可验收需求。', mode: 'build', inputDefinition: ['目标'], workflowDefinition: ['分析'], acceptanceDefinition: ['可验收'], deliveryDefinition: ['需求文档'] }] });
+  if (request.method() === 'GET' && path === '/selection') return respond({ candidates: [], selectionPolicy: '等待真实运行样本后按质量、时延和成本选择。' });
+  if (request.method() === 'GET' && path === '/project-notifications') return respond({ notifications: [visualProjectNotification] });
+  if (request.method() === 'GET' && path === `/projects/${visualProject.id}/comments`) return respond({ comments: [] });
+  if (request.method() === 'GET' && path === `/projects/${visualProject.id}/decisions`) return respond({ decisions: [visualDecision] });
+  if (request.method() === 'GET' && path === `/projects/${visualProject.id}/reviewers`) return respond({ assignments: [visualReview] });
+  if (request.method() === 'POST' && path === `/project-notifications/${visualProjectNotification.id}/read`) {
+    visualProjectNotification = { ...visualProjectNotification, status: 'read', revision: visualProjectNotification.revision + 1, updatedAt: new Date().toISOString() };
+    return respond({ notification: visualProjectNotification });
+  }
+  if (request.method() === 'PATCH' && path === `/projects/${visualProject.id}/decisions/${visualDecision.id}`) {
+    const input = request.postDataJSON();
+    visualDecision = { ...visualDecision, status: input.status, revision: visualDecision.revision + 1, updatedAt: new Date().toISOString(), data: { ...visualDecision.data, status: input.status } };
+    return respond({ decision: visualDecision });
+  }
+  if (request.method() === 'POST' && path === `/projects/${visualProject.id}/reviewers/${visualReview.id}/decision`) {
+    const input = request.postDataJSON();
+    visualReview = { ...visualReview, status: input.decision, revision: visualReview.revision + 1, updatedAt: new Date().toISOString(), data: { ...visualReview.data, decision: input.decision, reviewNote: input.note } };
+    return respond({ assignment: visualReview });
+  }
+  if (request.method() === 'POST' && path === `/projects/${visualProject.id}/archive`) {
+    visualProject = { ...visualProject, status: 'archived', revision: visualProject.revision + 1, updatedAt: new Date().toISOString() };
+    return respond({ project: visualProject });
+  }
+  await route.continue();
+});
 let nativeDialogOpened = false;
 let qaTaskId = null;
 let qaSessionId = null;
@@ -109,9 +201,14 @@ page.on('console', (message) => { if (message.type() === 'error') consoleErrors.
 page.on('pageerror', (error) => consoleErrors.push(error.message));
 page.on('dialog', (dialog) => { nativeDialogOpened = true; void dialog.dismiss(); });
 page.on('response', (response) => {
+  if (response.status() >= 400) {
+    httpErrors.push({ method: response.request().method(), status: response.status(), url: response.url() });
+  }
+});
+page.on('response', (response) => {
   if (response.request().method() !== 'POST' || !response.url().endsWith('/api/tasks')) return;
   void response.json().then((body) => {
-    if (typeof body?.task?.id === 'string') qaTaskId = body.task.id;
+    if (!qaTaskId && typeof body?.task?.id === 'string') qaTaskId = body.task.id;
   }).catch(() => undefined);
 });
 
@@ -173,8 +270,8 @@ const taskFixtureResponse = await fetch(`${baseUrl}/api/tasks`, {
   body: JSON.stringify({
     sessionId: `qa-task-${fixtureStamp}`,
     title: '视觉验收任务',
-    input: 'Implement a deterministic API retry helper.',
-    mode: 'analyze',
+    input: '请由研究 Agent、构建 Agent 和审核 Agent 协作，设计并实现一个生产级 API 重试组件，明确依赖、测试、失败恢复和验收标准。',
+    mode: 'build',
   }),
 });
 if (!taskFixtureResponse.ok) throw new Error(`视觉 QA 任务 fixture 创建失败 (${taskFixtureResponse.status})`);
@@ -197,7 +294,9 @@ for (const [index, title] of ['每日 Agent 行业简报', '每日代码质量�
   const scheduleId = (await scheduleFixtureResponse.json()).schedule?.id ?? null;
   if (scheduleId) qaScheduleIds.push(scheduleId);
 }
-await page.goto(baseUrl, { waitUntil: 'networkidle' });
+// Active tasks keep SSE connections open, so networkidle is not a valid
+// readiness signal. The dashboard root below is the actual UI contract.
+await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
 await page.locator('.axiom-dashboard').waitFor({ state: 'visible', timeout: 30_000 });
 const dashboardShot = await page.screenshot({ path: resolve(outputDir, 'dashboard-default.png'), fullPage: false });
 const dashboardPixels = pixelStats(dashboardShot);
@@ -530,6 +629,22 @@ await page.route('**/api/schedules/draft', async (route) => {
         agentPolicy: 'auto',
         reason: '每次触发时重新由 Router Agent 和调度 Agent 选择所需能力。',
       },
+    }),
+  });
+});
+await page.route('**/api/schedules/artifact-inputs?*', async (route) => {
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      artifacts: [{
+        artifactId: `qa-schedule-artifact-${fixtureStamp}`,
+        taskId: `qa-schedule-source-${fixtureStamp}`,
+        title: '已验收的行业研究结果',
+        createdAt: new Date().toISOString(),
+        bytes: 2048,
+        revision: 1,
+      }],
     }),
   });
 });
@@ -886,6 +1001,20 @@ if (qaTaskId) {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  if (!qaTaskTerminal) {
+    const cancelResponse = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(qaTaskId)}/cancel`, { method: 'POST', headers: qaHeaders }).catch(() => null);
+    if (cancelResponse?.ok) {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(qaTaskId)}`, { headers: qaHeaders }).catch(() => null);
+        const body = await response?.json().catch(() => null);
+        if (['completed', 'failed', 'cancelled'].includes(body?.task?.status)) {
+          qaTaskTerminal = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+  }
 }
 await notificationTrigger.click();
 await notificationPopover.waitFor({ state: 'visible' });
@@ -897,7 +1026,7 @@ await notificationPopover.getByRole('button', { name: '关闭', exact: true }).c
 await page.getByRole('button', { name: '任务管理', exact: true }).click();
 await page.locator('.dash-task-board').waitFor({ state: 'visible' });
 if (qaTaskId && qaTaskTerminal) {
-  await page.locator(`.dash-task-row[data-task-id="${qaTaskId}"], .dash-task-row[data-session-id]`).first().waitFor({ state: 'visible', timeout: 20_000 });
+  await page.locator(`.dash-task-row[data-task-id="${qaTaskId}"]`).waitFor({ state: 'visible', timeout: 20_000 });
   await page.locator('.dash-task-delete').first().waitFor({ state: 'visible', timeout: 20_000 });
 }
 const taskDeleteAvailable = await page.locator('.dash-task-delete').count() > 0;
@@ -916,13 +1045,27 @@ let selectedCardFocused = true;
 let selectedFocusOffset = 0;
 let orbitCardScaled = true;
 let taskLifecycleVisible = false;
+let taskCapabilityPanelVisible = false;
+let taskDeliveryControlsVisible = false;
+let taskAgentInterventionVisible = false;
+let taskMemoryPolicyVisible = false;
+let taskFeedbackVisible = false;
 if (await page.locator('.dash-task-row').count() > 0) {
-  await page.locator('.dash-task-row').first().click();
+  const lifecycleTaskRow = qaTaskId
+    ? page.locator(`.dash-task-row[data-task-id="${qaTaskId}"]`)
+    : page.locator('.dash-task-row').first();
+  await lifecycleTaskRow.click();
   await page.locator('.dash-task-row.selected').waitFor({ state: 'visible', timeout: 5_000 });
   // Selection updates the detail rail through React state; wait for the
   // selected task's detail payload before checking the lifecycle view.
   await page.locator('.dash-detail-task-id, .dash-lifecycle').first().waitFor({ state: 'visible', timeout: 10_000 });
   taskLifecycleVisible = await page.locator('.dash-lifecycle').isVisible();
+  await page.locator('.task-capability-panel').waitFor({ state: 'visible', timeout: 10_000 });
+  taskCapabilityPanelVisible = await page.locator('.task-capability-panel').isVisible();
+  taskDeliveryControlsVisible = await page.locator('.task-action-grid button').count() >= 4;
+  taskAgentInterventionVisible = await page.locator('.task-agent-control').isVisible().catch(() => false);
+  taskMemoryPolicyVisible = await page.locator('.task-memory-policy').isVisible();
+  taskFeedbackVisible = qaTaskTerminal ? await page.locator('.task-feedback').isVisible().catch(() => false) : true;
   selectedTaskGreen = await page.locator('.dash-task-row.selected').evaluate((element) => {
     const style = getComputedStyle(element);
     return `${style.borderColor} ${style.backgroundImage} ${style.boxShadow}`.includes('43, 234, 120');
@@ -969,6 +1112,48 @@ if (await page.locator('.dash-task-row').count() > 0) {
     : Number.POSITIVE_INFINITY;
   selectedCardFocused = selectedFocusOffset < 55;
 }
+
+await page.getByRole('button', { name: '项目空间', exact: true }).click();
+const projectWorkspace = page.locator('.business-workspace');
+await projectWorkspace.waitFor({ state: 'visible', timeout: 10_000 });
+await page.getByText('产品发布协作', { exact: true }).first().waitFor({ state: 'visible' });
+const projectWorkspaceUsesGlass = await page.locator('.business-project-main').evaluate((element) => {
+  const style = getComputedStyle(element);
+  return style.backdropFilter.includes('blur') && style.borderColor !== 'rgba(0, 0, 0, 0)';
+});
+const projectTabs = projectWorkspace.locator('.business-tabs');
+await projectTabs.getByRole('button', { name: '记忆', exact: true }).click();
+const projectMemoryVisible = await projectWorkspace.getByText('本地策略模式', { exact: true }).isVisible()
+  && await projectWorkspace.getByText('发布前必须完成证据审核。', { exact: true }).isVisible();
+await projectTabs.getByRole('button', { name: '工具', exact: true }).click();
+const projectToolsVisible = await projectWorkspace.getByText('尚未导入外部工具', { exact: true }).isVisible();
+await projectTabs.getByRole('button', { name: '方案', exact: true }).click();
+const projectSolutionsVisible = await projectWorkspace.getByText('需求分析', { exact: true }).isVisible();
+await projectTabs.getByRole('button', { name: '项目', exact: true }).click();
+
+await projectWorkspace.locator('.business-header-actions button[title="项目通知"]').click();
+const projectNotification = projectWorkspace.locator('.business-notifications > button').first();
+await projectNotification.waitFor({ state: 'visible' });
+await projectNotification.click();
+await projectWorkspace.locator('.business-notifications').waitFor({ state: 'detached', timeout: 5_000 });
+const projectNotificationNavigates = await projectWorkspace.locator('.business-notifications').count() === 0
+  && await page.getByText('产品发布协作', { exact: true }).first().isVisible();
+
+await projectWorkspace.getByRole('button', { name: '采纳', exact: true }).click();
+await projectWorkspace.getByText(/已采纳/u).waitFor({ state: 'visible' });
+const projectDecisionInteractionWorks = await projectWorkspace.getByText(/已采纳/u).isVisible();
+await projectWorkspace.getByPlaceholder('填写审核依据或修改意见').fill('证据与验收标准一致。');
+await projectWorkspace.getByRole('button', { name: '通过', exact: true }).click();
+await projectWorkspace.getByText('证据与验收标准一致。', { exact: true }).waitFor({ state: 'visible' });
+const projectReviewInteractionWorks = await projectWorkspace.getByText('已通过', { exact: true }).isVisible()
+  && await projectWorkspace.getByText('证据与验收标准一致。', { exact: true }).isVisible();
+await projectWorkspace.locator('.business-project-title button[title="归档"]').click();
+await projectWorkspace.getByText('已归档，只读查看', { exact: true }).waitFor({ state: 'visible' });
+const projectFieldsDisabled = await projectWorkspace.locator('.business-project-fields').getAttribute('disabled') !== null;
+const projectArchiveReadOnlyWorks = projectFieldsDisabled
+  && await projectWorkspace.locator('.business-project-title button[title="归档"]').count() === 0;
+await page.screenshot({ path: resolve(outputDir, 'dashboard-project-workspace.png'), fullPage: false });
+
 await page.setViewportSize({ width: 390, height: 844 });
 await page.reload({ waitUntil: 'domcontentloaded' });
 await page.locator('.axiom-dashboard').waitFor({ state: 'visible', timeout: 20_000 });
@@ -1130,6 +1315,17 @@ const assertions = {
   sessionTaskGroupsUnique,
   groupedRunCountVisible,
   taskLifecycleVisible,
+  taskCapabilityPanelVisible,
+  taskDeliveryControlsVisible,
+  taskAgentInterventionVisible,
+  taskMemoryPolicyVisible,
+  taskFeedbackVisible,
+  projectWorkspaceUsesGlass,
+  projectWorkspaceTabsWork: projectMemoryVisible && projectToolsVisible && projectSolutionsVisible,
+  projectNotificationNavigates,
+  projectDecisionInteractionWorks,
+  projectReviewInteractionWorks,
+  projectArchiveReadOnlyWorks,
   rightTaskRailUsesMajority: rightRailShare >= 0.62,
   selectedTaskUsesGreen: selectedTaskGreen,
   selectedOrbitCardUsesGreen: selectedOrbitGreen,
@@ -1254,6 +1450,7 @@ const result = {
   pixels: dashboardPixels,
   layouts: { dashboard: dashboardLayout, tasks: taskLayout, mobile: mobileLayout, mobileWorkflow: mobileWorkflowLayout },
   consoleErrors,
+  httpErrors,
   resizedMiniAppRect,
 };
 process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

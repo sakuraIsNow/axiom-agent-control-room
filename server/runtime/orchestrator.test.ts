@@ -278,6 +278,80 @@ class UnavailableConversationModel implements ModelClient {
   }
 }
 
+class PausableParallelModel implements ModelClient {
+  readonly model = 'pausable-parallel-model';
+  readonly targetStarted: Promise<void>;
+  readonly siblingStarted: Promise<void>;
+  targetCalls = 0;
+  siblingCalls = 0;
+  private resolveTargetStarted!: () => void;
+  private resolveSiblingStarted!: () => void;
+  private resolveSibling!: () => void;
+  private readonly siblingRelease: Promise<void>;
+
+  constructor(private readonly blockFirstTarget: boolean) {
+    this.targetStarted = new Promise((resolve) => { this.resolveTargetStarted = resolve; });
+    this.siblingStarted = new Promise((resolve) => { this.resolveSiblingStarted = resolve; });
+    this.siblingRelease = new Promise((resolve) => { this.resolveSibling = resolve; });
+  }
+
+  releaseSibling() {
+    this.resolveSibling();
+  }
+
+  private async waitForAbort(signal: AbortSignal) {
+    if (signal.aborted) throw signal.reason;
+    await new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }
+
+  async complete(request: ModelCompletionRequest) {
+    let content: string;
+    if (request.system.includes('You are a researcher sub-agent')) {
+      this.targetCalls += 1;
+      this.resolveTargetStarted();
+      if (this.blockFirstTarget && this.targetCalls === 1) await this.waitForAbort(request.signal);
+      content = JSON.stringify({ output: '目标 Agent 已从检查点完成。', evidence: [], confidence: 0.9, toolCalls: [] });
+    } else if (request.system.includes('You are a analyst sub-agent')) {
+      this.siblingCalls += 1;
+      this.resolveSiblingStarted();
+      await this.siblingRelease;
+      content = JSON.stringify({ output: '并行兄弟 Agent 已完成。', evidence: [], confidence: 0.9, toolCalls: [] });
+    } else if (request.system.includes('synthesizer')) {
+      content = '并行任务已完成。';
+    } else {
+      content = JSON.stringify({ output: '完成。', evidence: [], confidence: 0.9, toolCalls: [] });
+    }
+    await request.onDelta?.({ content });
+    return { content, attempts: 1, durationMs: 1 };
+  }
+}
+
+class DependencyTransferModel implements ModelClient {
+  readonly model = 'dependency-transfer-model';
+  readonly downstreamInputs = new Map<string, string>();
+
+  async complete(request: ModelCompletionRequest) {
+    let content: string;
+    if (request.system.includes('You are a researcher sub-agent')) {
+      content = JSON.stringify({
+        output: JSON.stringify({ summary: '完整摘要', details: '完整细节', hidden: '不应进入字段模式' }),
+        evidence: [], confidence: 0.9, toolCalls: [],
+        handoff: { summary: '结构化交接摘要', status: 'complete', artifactIds: ['artifact-source-1'], evidenceIds: [], openQuestions: [], completionCriteria: ['上游完成'] },
+      });
+    } else if (request.system.includes('synthesizer')) {
+      content = '传递模式验证完成。';
+    } else {
+      const marker = ['summary-consumer', 'full-consumer', 'fields-consumer', 'reference-consumer'].find((value) => request.user.includes(value)) ?? 'unknown';
+      this.downstreamInputs.set(marker, request.user);
+      content = JSON.stringify({ output: `${marker} 完成`, evidence: [], confidence: 0.9, toolCalls: [] });
+    }
+    await request.onDelta?.({ content });
+    return { content, attempts: 1, durationMs: 1 };
+  }
+}
+
 class ToolApprovalModel implements ModelClient {
   readonly model = 'tool-approval-model';
   builderCalls = 0;
@@ -401,6 +475,29 @@ class CustomRoleModel implements ModelClient {
   }
 }
 
+class BoundedReplannerModel implements ModelClient {
+  readonly model = 'bounded-replanner-model';
+  originalCalls = 0;
+
+  async complete(request: ModelCompletionRequest) {
+    let content: string;
+    if (request.system.includes('You are a researcher sub-agent') && !request.user.includes('诊断步骤')) {
+      this.originalCalls += 1;
+      throw new Error('upstream source stayed unavailable');
+    }
+    if (request.system.includes('synthesizer')) content = '恢复后的完整交付。';
+    else content = JSON.stringify({
+      output: request.user.includes('诊断步骤') ? '已使用受限替代路径恢复上游结果。' : '下游已消费恢复交接。',
+      evidence: [{ claim: '恢复结果由当前执行产生。', kind: 'model-inference', source: 'bounded-replanner-model', verification: 'unverified', confidence: .8 }],
+      confidence: .8,
+      toolCalls: [],
+      handoff: { summary: '恢复完成，可供下游继续。', status: 'complete', artifactIds: [], evidenceIds: [], openQuestions: [], completionCriteria: ['恢复结果可消费'] },
+    });
+    await request.onDelta?.({ content });
+    return { content, attempts: 1, durationMs: 1 };
+  }
+}
+
 const memory: AgentMemory = {
   async recall() {
     return {
@@ -436,6 +533,196 @@ describe('WorkflowOrchestrator', () => {
     for (const alias of aliases.actualToAlias.values()) {
       assert.match(alias, /^[a-zA-Z0-9_-]+$/);
       assert.ok(alias.length <= 64);
+    }
+  });
+
+  test('pauses only the selected parallel Agent, checkpoints its completed sibling, and resumes after restart', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await store.createTask({
+        tenantId: 'tenant-agent-pause', userId: 'user-agent-pause', sessionId: 'session-agent-pause',
+        title: 'parallel Agent pause', input: '并行执行两个 Agent，并只暂停目标 Agent。', mode: 'build',
+        plan: {
+          summary: '并行执行两个独立 Agent。', routingReason: '验证 Agent 级暂停的隔离性。',
+          profile: { kind: 'implementation', difficulty: 'moderate', route: 'team', score: 3, reasons: ['parallel control'], maxSteps: 2, requiresReview: false },
+          steps: [
+            { id: 'target', title: '目标 Agent', role: 'researcher', objective: '等待暂停并在恢复后完成。', dependsOn: [], acceptanceCriteria: ['恢复后完成'], failureStrategy: 'retry' },
+            { id: 'sibling', title: '兄弟 Agent', role: 'analyst', objective: '在目标暂停期间正常完成。', dependsOn: [], acceptanceCriteria: ['不被误中断'], failureStrategy: 'retry' },
+          ],
+          version: 1, approvalStatus: 'approved',
+        },
+      });
+      const firstModel = new PausableParallelModel(true);
+      const firstOrchestrator = new WorkflowOrchestrator(store, new EventHub(), firstModel, memory, pino({ level: 'silent' }));
+      const firstRun = firstOrchestrator.run(task, new AbortController().signal);
+      await Promise.all([firstModel.targetStarted, firstModel.siblingStarted]);
+      const pauseEvent = await store.appendEvent(task, {
+        type: 'node.pause_requested', agentId: 'operator-target',
+        payload: { stepId: 'target', requestedBy: task.userId, reason: '并行暂停回归测试' },
+      });
+      assert.ok(pauseEvent.sequence > 0);
+      assert.equal(firstOrchestrator.pauseStep(task.id, 'target'), true);
+      firstModel.releaseSibling();
+
+      const paused = await firstRun;
+      assert.equal(paused.status, 'paused');
+      assert.deepEqual(paused.stepResults.map((result) => result.stepId), ['sibling']);
+      assert.equal(firstModel.targetCalls, 1);
+      assert.equal(firstModel.siblingCalls, 1);
+      const pausedEvents = await store.getEvents(task.id);
+      assert.ok(pausedEvents.some((event) => event.type === 'agent.interrupted'
+        && event.payload.stepId === 'target'
+        && Array.isArray(event.payload.preservedSiblingResults)
+        && event.payload.preservedSiblingResults.includes('sibling')));
+      assert.ok(pausedEvents.some((event) => event.type === 'checkpoint.saved'
+        && event.payload.completedSteps === 1
+        && typeof event.payload.snapshot === 'object'
+        && event.payload.snapshot !== null
+        && Array.isArray((event.payload.snapshot as { stepResults?: unknown[] }).stepResults)
+        && (event.payload.snapshot as { stepResults: Array<{ stepId?: string }> }).stepResults.some((result) => result.stepId === 'sibling')));
+
+      const queued = await store.updateTask(task.id, { status: 'queued', error: null });
+      await store.appendEvent(queued, {
+        type: 'node.resume_requested', agentId: 'operator-target',
+        payload: { stepId: 'target', requestedBy: task.userId, checkpointSteps: queued.stepResults.length },
+      });
+      const resumedTask = (await store.getTask(task.id))!;
+      const resumedModel = new PausableParallelModel(false);
+      resumedModel.releaseSibling();
+      const completed = await new WorkflowOrchestrator(store, new EventHub(), resumedModel, memory, pino({ level: 'silent' }))
+        .run(resumedTask, new AbortController().signal);
+      assert.equal(completed.status, 'completed', completed.error);
+      assert.equal(resumedModel.targetCalls, 1);
+      assert.equal(resumedModel.siblingCalls, 0, 'the durable sibling checkpoint must not execute again');
+      assert.deepEqual(new Set(completed.stepResults.map((result) => result.stepId)), new Set(['target', 'sibling']));
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('handles a rapid pause and resume without losing or duplicating a parallel sibling result', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await store.createTask({
+        tenantId: 'tenant-agent-race', userId: 'user-agent-race', sessionId: 'session-agent-race',
+        title: 'parallel Agent pause resume race', input: '验证暂停后立即恢复不会丢失并行结果。', mode: 'build',
+        plan: {
+          summary: '并行执行两个独立 Agent。', routingReason: '验证控制事件竞态。',
+          profile: { kind: 'implementation', difficulty: 'moderate', route: 'team', score: 3, reasons: ['control race'], maxSteps: 2, requiresReview: false },
+          steps: [
+            { id: 'target', title: '目标 Agent', role: 'researcher', objective: '被快速暂停和恢复。', dependsOn: [], acceptanceCriteria: ['最终完成'], failureStrategy: 'retry' },
+            { id: 'sibling', title: '兄弟 Agent', role: 'analyst', objective: '只执行一次。', dependsOn: [], acceptanceCriteria: ['不重复执行'], failureStrategy: 'retry' },
+          ],
+          version: 1, approvalStatus: 'approved',
+        },
+      });
+      const model = new PausableParallelModel(true);
+      const orchestrator = new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }));
+      const running = orchestrator.run(task, new AbortController().signal);
+      await Promise.all([model.targetStarted, model.siblingStarted]);
+      await store.appendEvent(task, { type: 'node.pause_requested', agentId: 'operator-target', payload: { stepId: 'target', requestedBy: task.userId } });
+      assert.equal(orchestrator.pauseStep(task.id, 'target'), true);
+      await store.appendEvent(task, { type: 'node.resume_requested', agentId: 'operator-target', payload: { stepId: 'target', requestedBy: task.userId } });
+      model.releaseSibling();
+
+      const completed = await running;
+      assert.equal(completed.status, 'completed', completed.error);
+      assert.equal(model.targetCalls, 2, 'the interrupted target should restart once');
+      assert.equal(model.siblingCalls, 1, 'the settled sibling should remain checkpointed');
+      assert.equal(completed.stepResults.filter((result) => result.stepId === 'sibling').length, 1);
+      assert.equal((await store.getEvents(task.id)).filter((event) => event.type === 'task.paused').length, 0);
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('delivers summary, full, selected fields, and Artifact references according to each Nexus edge contract', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const contract = (mode: 'summary' | 'full' | 'fields' | 'reference', fields?: string[]) => ({
+        source: 'builtin' as const, agentId: 'analyst', displayName: '下游 Agent', toolAllowlist: [],
+        dependencyTransfers: { source: { mode, ...(fields ? { fields } : {}) } },
+      });
+      const task = await store.createTask({
+        tenantId: 'tenant-transfer', userId: 'user-transfer', sessionId: 'session-transfer',
+        title: 'Nexus transfer modes', input: '验证 Agent Nexus 连线传递内容。', mode: 'analyze',
+        plan: {
+          summary: '验证四种传递模式。', routingReason: '每个下游 Agent 使用独立传递契约。',
+          profile: { kind: 'implementation', difficulty: 'moderate', route: 'team', score: 3, reasons: ['transfer contract'], maxSteps: 5, requiresReview: false },
+          steps: [
+            { id: 'source', title: '上游', role: 'researcher', objective: 'produce-source', dependsOn: [], acceptanceCriteria: ['上游完成'], failureStrategy: 'retry' },
+            { id: 'summary', title: '摘要消费者', role: 'analyst', objective: 'summary-consumer', dependsOn: ['source'], acceptanceCriteria: ['收到摘要'], failureStrategy: 'retry', agentContract: contract('summary') },
+            { id: 'full', title: '全文消费者', role: 'builder', objective: 'full-consumer', dependsOn: ['source'], acceptanceCriteria: ['收到全文'], failureStrategy: 'retry', agentContract: contract('full') },
+            { id: 'fields', title: '字段消费者', role: 'reviewer', objective: 'fields-consumer', dependsOn: ['source'], acceptanceCriteria: ['只收到字段'], failureStrategy: 'retry', agentContract: contract('fields', ['details']) },
+            { id: 'reference', title: '引用消费者', role: 'auditor', objective: 'reference-consumer', dependsOn: ['source'], acceptanceCriteria: ['收到引用'], failureStrategy: 'retry', agentContract: contract('reference') },
+          ],
+          version: 1, approvalStatus: 'approved',
+        },
+      });
+      const model = new DependencyTransferModel();
+      const completed = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }))
+        .run(task, new AbortController().signal);
+      assert.equal(completed.status, 'completed', completed.error);
+      assert.match(model.downstreamInputs.get('summary-consumer') ?? '', /按连线传递的内容：结构化交接摘要/);
+      assert.doesNotMatch(model.downstreamInputs.get('summary-consumer') ?? '', /完整细节/);
+      assert.match(model.downstreamInputs.get('full-consumer') ?? '', /完整细节/);
+      assert.match(model.downstreamInputs.get('fields-consumer') ?? '', /按连线传递的内容：\{"details":"完整细节"\}/);
+      assert.doesNotMatch(model.downstreamInputs.get('fields-consumer') ?? '', /不应进入字段模式/);
+      assert.match(model.downstreamInputs.get('reference-consumer') ?? '', /上游结果仅通过引用传递：artifact-source-1/);
+      const messages = (await store.getEvents(task.id)).filter((event) => event.type === 'agent.message');
+      assert.equal(messages.length, 4);
+      assert.ok(messages.some((event) => String(event.payload.content).includes('完整细节')));
+      assert.ok(messages.some((event) => String(event.payload.content).includes('artifact-source-1')));
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('inserts one bounded recovery Agent, preserves failures, and rewires pending descendants', async () => {
+    const previous = process.env.AXIOM_MAX_AUTO_REPLANS;
+    process.env.AXIOM_MAX_AUTO_REPLANS = '1';
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      const task = await store.createTask({
+        tenantId: 'tenant-replan', userId: 'user-replan', sessionId: 'session-replan',
+        title: 'bounded recovery', input: 'Recover a failed dependency without expanding permissions.', mode: 'build',
+        plan: {
+          summary: 'Run and recover a dependency.', routingReason: 'Recovery behavior test.',
+          profile: { kind: 'implementation', difficulty: 'hard', route: 'full-workflow', score: 5, reasons: ['dependency recovery'], maxSteps: 3, requiresReview: false },
+          steps: [
+            { id: 'source', title: '读取上游', role: 'researcher', objective: 'original-step must fail', dependsOn: [], acceptanceCriteria: ['上游可用'], skillIds: [], failureStrategy: 'retry' },
+            { id: 'delivery', title: '形成交付', role: 'builder', objective: 'consume recovered upstream', dependsOn: ['source'], acceptanceCriteria: ['交付完成'], skillIds: [], failureStrategy: 'retry' },
+          ],
+          version: 1, approvalStatus: 'approved',
+        },
+      });
+      const model = new BoundedReplannerModel();
+      const completed = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' })).run(task, new AbortController().signal);
+      const recovery = completed.plan?.steps.find((step) => step.recoveryForStepId === 'source');
+      const failed = completed.stepResults.find((result) => result.stepId === 'source' && result.status === 'failed');
+      const delivery = completed.plan?.steps.find((step) => step.id === 'delivery');
+      const events = await store.getEvents(task.id);
+      assert.equal(completed.status, 'completed');
+      assert.ok(recovery);
+      assert.deepEqual(recovery?.toolNames, []);
+      assert.deepEqual(recovery?.writeScopes, []);
+      assert.equal(failed?.recoveredByStepId, recovery?.id);
+      assert.deepEqual(delivery?.dependsOn, [recovery?.id]);
+      assert.equal(completed.planVersion, 2);
+      assert.equal(completed.error, undefined);
+      assert.equal(model.originalCalls, 2);
+      const replans = events.filter((event) => event.type === 'plan.replanned' && event.payload.trigger === 'automatic-failure');
+      assert.equal(replans.length, 1);
+      assert.equal(replans[0]?.payload.riskIncreased, false);
+      assert.equal(events.find((event) => event.type === 'task.completed')?.payload.partial, false);
+    } finally {
+      await store.close();
+      if (previous === undefined) delete process.env.AXIOM_MAX_AUTO_REPLANS;
+      else process.env.AXIOM_MAX_AUTO_REPLANS = previous;
     }
   });
 

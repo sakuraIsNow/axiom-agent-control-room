@@ -54,6 +54,7 @@ import type {
   AgentMode,
   AgentPhase,
   AgentGraph,
+  AgentHandoff,
   BudgetConstraint,
   ChatMessage,
   FileAttachment,
@@ -93,6 +94,21 @@ import { buildConversationContext } from './lib/conversationContext';
 import { readDashboardUrlState, subscribeDashboardUrlState, writeDashboardUrlState } from './lib/dashboardUrlState';
 import { saveProviderCredential, type ProviderCredentialKind } from './lib/providerCredentials';
 import { downloadReportAttachment, exportConversationReport } from './lib/reportExport';
+
+const parseAgentHandoff = (value: unknown): AgentHandoff | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as Partial<AgentHandoff>;
+  if (typeof candidate.summary !== 'string' || !['complete', 'partial', 'blocked'].includes(candidate.status ?? '')) return undefined;
+  const strings = (items: unknown) => Array.isArray(items) ? items.filter((item): item is string => typeof item === 'string') : [];
+  return {
+    summary: candidate.summary,
+    status: candidate.status as AgentHandoff['status'],
+    artifactIds: strings(candidate.artifactIds),
+    evidenceIds: strings(candidate.evidenceIds),
+    openQuestions: strings(candidate.openQuestions),
+    completionCriteria: strings(candidate.completionCriteria),
+  };
+};
 
 const STORAGE_KEY = 'axiom-agent-sessions-v1';
 const SETTINGS_KEY = 'axiom-provider-settings-v1';
@@ -279,6 +295,11 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'node.skip_requested': '节点已由操作员跳过',
     'node.completed_manually': '节点已由操作员标记完成',
     'node.rerun_requested': '已从选定节点重新运行',
+    'node.pause_requested': 'Agent 已暂停',
+    'node.resume_requested': 'Agent 已恢复',
+    'node.replace_requested': 'Agent 或模型已替换',
+    'node.result_locked': 'Agent 结果已锁定',
+    'node.result_unlocked': 'Agent 结果已解锁',
     'review.started': '审查员开始验证证据树',
     'review.completed': '审查员已完成质量门禁',
     'review.approval_requested': '审查员未通过，等待人工质量决策',
@@ -293,10 +314,12 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'memory.capture.completed': '本轮长期记忆已可靠保存',
     'memory.capture.skipped': '本轮记忆无需重复保存',
     'memory.capture.failed': '长期记忆暂未保存，任务结果不受影响',
+    'memory.policy_updated': '本轮记忆策略已更新',
     'model.delta': `${eventAgentName}正在组织阶段结果`,
     'model.completed': `${eventAgentName}已完成阶段输出`,
     'budget.exceeded': '任务执行预算已达到上限',
     'budget.constrained': '预算接近上限，已压缩并行步骤',
+    'estimate.updated': '已根据实际执行进度更新剩余时间',
     'human.note': '操作员指令已加入下一轮上下文',
     'human.guidance_accepted': '补充要求已接收，等待下一个安全执行点',
     'human.guidance_applied': '补充要求已应用到当前任务',
@@ -1953,6 +1976,7 @@ function App() {
             artifactIds: Array.isArray(event.payload.artifactIds)
               ? event.payload.artifactIds.filter((value): value is string => typeof value === 'string')
               : [],
+            handoff: parseAgentHandoff(event.payload.handoff),
             at: event.timestamp,
           }].slice(-100));
         }

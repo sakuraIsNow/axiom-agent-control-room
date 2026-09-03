@@ -1,4 +1,5 @@
 import { chromium } from '@playwright/test';
+import { testAndPublishNexus } from './nexus-release-helper.mjs';
 
 const baseUrl = process.env.QA_URL ?? 'http://127.0.0.1:4300';
 const stamp = Date.now();
@@ -63,6 +64,13 @@ try {
     method: 'POST', headers,
     body: JSON.stringify({ name: `历史恢复回归 ${stamp}`, description: '验证 Agent Nexus 对话恢复', visibility: 'private', canvas }),
   }), '创建 Nexus 失败')).workflow.id;
+  await testAndPublishNexus({
+    baseUrl,
+    workflowId,
+    headers,
+    testName: '历史恢复发布验收',
+    input: '请回复：历史恢复发布验收通过。',
+  });
   const run = await json(await fetch(`${baseUrl}/api/workflows/${workflowId}/run`, {
     method: 'POST', headers,
     body: JSON.stringify({ sessionId: `agent-nexus-${workflowId}`, input: '请回复：历史恢复成功。' }),
@@ -85,8 +93,8 @@ try {
   const restoredText = await page.locator('.workflow-runner-messages').innerText();
   const secondVisit = await page.locator('.workflow-runner-messages article').count();
   const assertions = {
-    firstVisitShowsHistory: firstVisit >= 2,
-    historySurvivesWorkspaceSwitch: secondVisit >= 2,
+    firstVisitShowsOnlyConversationHistory: firstVisit === 2,
+    historySurvivesWorkspaceSwitch: secondVisit === 2,
     restoredInputVisible: restoredText.includes('历史恢复成功'),
   };
   console.log(JSON.stringify({ assertions, firstVisit, secondVisit }, null, 2));

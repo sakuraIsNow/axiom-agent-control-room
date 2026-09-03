@@ -16,6 +16,7 @@ import { ScheduleBoard } from './ScheduleBoard';
 import { DashboardChat } from './DashboardChat';
 import { WorkflowStudio } from './WorkflowStudio';
 import { OperationsConsole } from './OperationsConsole';
+import { ProjectWorkspace } from './ProjectWorkspace';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { ReviewConfirmDialog } from './ReviewConfirmDialog';
 import { NotificationCenter } from './NotificationCenter';
@@ -211,10 +212,11 @@ export function AxiomDashboard(props: DashboardProps) {
         <ThemePicker value={theme} onChange={onThemeChange} />
       </div>
     </header>
-    <div ref={layoutRef} className={`dash-layout ${nav === 'chat' ? 'chat-active' : nav === 'plugins' ? 'plugins-active' : nav === 'templates' ? 'templates-active' : nav === 'workflows' ? 'workflows-active' : nav === 'operations' ? 'operations-active' : ''}`}>
+    <div ref={layoutRef} className={`dash-layout ${nav === 'chat' ? 'chat-active' : nav === 'projects' ? 'projects-active' : nav === 'plugins' ? 'plugins-active' : nav === 'templates' ? 'templates-active' : nav === 'workflows' ? 'workflows-active' : nav === 'operations' ? 'operations-active' : ''}`}>
       <DashboardNavRail nav={nav} onNav={navigateFromDashboard} onNewTask={openNewConversation} />
       {nav === 'templates' ? <section className="dash-main dash-main-templates">{templateWorkspace}</section>
         : nav === 'plugins' ? <section className="dash-main dash-main-plugins">{pluginWorkspace}</section>
+        : nav === 'projects' ? <section className="dash-main dash-main-projects"><ProjectWorkspace onUseSolution={(input, solutionMode) => { onDraftChange(input); onModeChange(solutionMode); setNav('chat'); }} /></section>
         : nav === 'workflows' ? <section ref={workflowMainRef} className="dash-main dash-main-workflows"><WorkflowStudio /></section>
         : nav === 'agent-studio' ? <section className="dash-main"><AgentStudio /></section>
         : nav === 'schedules' ? <section className="dash-main"><ScheduleBoard sessionId={sessionId} modelCredentialId={textModelCredentialId} /></section>

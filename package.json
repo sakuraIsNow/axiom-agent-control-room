@@ -35,6 +35,7 @@
     "qa:data-isolation": "node qa/data-isolation-regression.mjs",
     "qa:routing": "node scripts/routing-eval.mjs",
     "qa:business": "node scripts/business-eval.mjs",
+    "qa:business-postgres": "node --import tsx --test server/runtime/businessCapabilityStore.postgres.test.ts",
     "qa:harness-live": "node scripts/harness-sidecar-probe.mjs",
     "qa:memorycore": "node qa/memorycore-integration.mjs",
     "qa:memorycore-adapter": "node --import tsx qa/memorycore-adapter-smoke.mjs",

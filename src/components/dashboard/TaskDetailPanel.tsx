@@ -5,6 +5,7 @@ import { taskStatusLabels } from '../../lib/graphPresentation';
 import { canHumanReviewTask } from '../../lib/humanReviewState';
 import { localizeRuntimeText, taskDifficultyLabel, taskKindLabel, taskReasonLabel, taskRouteLabel, taskStageLabel } from '../../lib/taskPresentation';
 import { CheckpointPanel } from './CheckpointPanel';
+import { TaskCapabilityPanel } from './TaskCapabilityPanel';
 
 type ReviewResult = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
 
@@ -95,6 +96,7 @@ export function TaskDetailPanel({
       </div>
     </div>}
     {task && <CheckpointPanel task={task} onTaskCreated={onCheckpointTaskCreated} />}
+    {task && <TaskCapabilityPanel task={task} onTaskCreated={onCheckpointTaskCreated} />}
     <div className="dash-detail-section">
       <div className="dash-detail-head"><Compass size={14} /><span>路由依据</span></div>
       {effectiveProfile && effectiveProfile.reasons.length > 0
@@ -117,7 +119,11 @@ export function TaskDetailPanel({
       <div className="dash-detail-head"><ListChecks size={14} /><span>交付凭据</span><em className={task.evidenceSummary.status}>{evidenceStatusLabel[task.evidenceSummary.status]}</em></div>
       <div className="dash-evidence-grid">
         <span><strong>{task.evidenceSummary.completedSteps}/{task.evidenceSummary.totalSteps}</strong> 步骤完成</span>
-        <span><strong>{task.evidenceSummary.evidenceItems}</strong> 条证据</span>
+        <span><strong>{task.evidenceSummary.verifiedEvidenceItems ?? 0}</strong> 已验证</span>
+        <span><strong>{task.evidenceSummary.supportedEvidenceItems ?? 0}</strong> 来源支持</span>
+        <span><strong>{task.evidenceSummary.unverifiedEvidenceItems ?? task.evidenceSummary.evidenceItems}</strong> 未验证</span>
+        <span className={(task.evidenceSummary.contradictedEvidenceItems ?? 0) > 0 ? 'is-conflicted' : ''}><strong>{task.evidenceSummary.contradictedEvidenceItems ?? 0}</strong> 存在冲突</span>
+        <span><strong>{task.evidenceSummary.recoveredFailures ?? 0}</strong> 已恢复失败</span>
         <span><strong>{task.evidenceSummary.artifactRefs}</strong> 个 Artifact</span>
         <span><strong>{task.evidenceSummary.toolReceipts}</strong> 次工具回执</span>
       </div>

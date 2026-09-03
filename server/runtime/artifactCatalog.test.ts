@@ -23,6 +23,8 @@ test('SQLite Artifact catalog is idempotent, tenant-scoped, and tracks reference
       storageKey: 's3://bucket/a', bytes: 40, referenceKey: 'result',
     });
     assert.equal(duplicate.referenceCount, 1);
+    assert.deepEqual((await workerB.listActive('tenant-a')).map((record) => record.id), ['result:task-a']);
+    assert.deepEqual(await workerB.listActive('tenant-b'), []);
     assert.equal((await workerB.stats('tenant-a')).active, 1);
     assert.equal((await workerB.stats('tenant-b')).total, 0);
 

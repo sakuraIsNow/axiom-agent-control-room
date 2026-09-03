@@ -37,6 +37,10 @@ test('compiles a sequential visual workflow into a deterministic full-workflow p
   assert.equal(compiled.plan.steps.length, 1);
   assert.equal(compiled.plan.steps[0]?.role, 'analyst');
   assert.equal(compiled.plan.steps[0]?.agentContract?.source, 'builtin');
+  assert.equal(compiled.plan.steps[0]?.agentContract?.inputSchema?.type, 'object');
+  assert.equal(compiled.plan.steps[0]?.agentContract?.outputSchema?.type, 'object');
+  assert.deepEqual(compiled.plan.steps[0]?.agentContract?.completionCriteria, ['done']);
+  assert.ok(compiled.plan.steps[0]?.agentContract?.evidenceRequirements?.some((item) => item.includes('不得标记为已验证')));
   assert.equal(compiled.plan.approvalStatus, 'approved');
 });
 

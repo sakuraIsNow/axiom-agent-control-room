@@ -45,6 +45,10 @@ export class TaskCoordinator {
     this.active.get(taskId)?.abort(new DOMException('Task cancelled', 'AbortError'));
   }
 
+  pauseStep(taskId: string, stepId: string) {
+    return this.active.has(taskId) && this.orchestrator.pauseStep(taskId, stepId);
+  }
+
   private async poll() {
     if (!this.started || this.polling || this.active.size >= this.maxConcurrentTasks) return;
     this.polling = true;

@@ -61,9 +61,35 @@ test('restores durable observations without trusting invalid counters', () => {
     model: 'invalid', attempts: -2, successes: 99, failures: 99, totalLatencyMs: -10, totalTokens: -2,
   }]);
   const restored = policy.snapshot(['restored', 'invalid']).candidates;
-  assert.deepEqual(restored.find((candidate) => candidate.model === 'restored'), {
-    model: 'restored', attempts: 12, successes: 9, failures: 3,
-    successRate: 0.75, averageLatencyMs: 100, totalTokens: 4_800, lastUsedAt: '2026-08-29T02:00:00.000Z',
-  });
+  const durable = restored.find((candidate) => candidate.model === 'restored');
+  assert.equal(durable?.attempts, 12);
+  assert.equal(durable?.successes, 9);
+  assert.equal(durable?.failures, 3);
+  assert.equal(durable?.successRate, 0.75);
+  assert.equal(durable?.averageLatencyMs, 100);
+  assert.equal(durable?.totalTokens, 4_800);
+  assert.equal(durable?.lastUsedAt, '2026-08-29T02:00:00.000Z');
+  assert.equal(durable?.reviewerAttempts, 0);
+  assert.equal(durable?.retries, 0);
+  assert.equal(durable?.humanTakeovers, 0);
   assert.equal(restored.find((candidate) => candidate.model === 'invalid')?.attempts, 0);
+});
+
+test('review quality, retries, takeovers, and user feedback change automatic selection', () => {
+  const policy = new ModelRoutingPolicy();
+  for (let index = 0; index < 8; index += 1) {
+    policy.record({ model: 'stable', success: true, durationMs: 500 });
+    policy.record({ model: 'fragile', success: true, durationMs: 500 });
+  }
+  policy.recordEvent(event('review.completed', { model: 'stable', approved: true, attempt: 1 }, 10));
+  policy.recordEvent(event('review.completed', { model: 'fragile', approved: false, attempt: 1 }, 11));
+  policy.recordEvent(event('agent.retrying', { model: 'fragile' }, 12));
+  policy.recordEvent(event('node.replace_requested', { previousModel: 'fragile' }, 13));
+  policy.recordFeedback({ model: 'stable', score: 5 });
+  policy.recordFeedback({ model: 'fragile', score: 2, routingIssue: true });
+  assert.equal(policy.select(['fragile', 'stable']), 'stable');
+  const fragile = policy.snapshot(['fragile']).candidates[0]!;
+  assert.equal(fragile.retries, 1);
+  assert.equal(fragile.humanTakeovers, 2);
+  assert.equal(fragile.averageFeedbackScore, 2);
 });

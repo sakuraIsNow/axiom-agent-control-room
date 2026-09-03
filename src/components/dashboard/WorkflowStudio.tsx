@@ -4,13 +4,18 @@ import {
   Check,
   ChevronRight,
   Circle,
+  FileUp,
+  FlaskConical,
+  GitCompareArrows,
   GitBranch,
   Link2,
   LoaderCircle,
   Maximize2,
   MessageSquareText,
   Plus,
+  PackageCheck,
   RotateCcw,
+  Rocket,
   Save,
   Send,
   Settings2,
@@ -28,13 +33,30 @@ import { cancelWorkflowTask, getWorkflowTask, listWorkflowTasks, streamWorkflowE
 import { userFacingError } from '../../lib/errorPresentation';
 import {
   deleteAgentWorkflow,
+  createNexusTest,
+  createNexusWorkflowPlugin,
+  compareNexusReleases,
+  linkNexusArtifact,
   listAgentWorkflows,
+  listNexusArtifacts,
+  listNexusReleases,
+  listNexusTestRuns,
+  listNexusTests,
+  listReusableArtifacts,
   listWorkflowAgentSources,
+  publishNexus,
+  restoreNexusRelease,
+  runNexusTests,
   runAgentWorkflow,
   saveAgentWorkflow,
   validateAgentWorkflow,
+  uploadNexusArtifact,
+  waitForNexusTestRuns,
   type BuiltinWorkflowAgent,
   type SavedAgentWorkflow,
+  type NexusBusinessRecord,
+  type NexusReleaseDiff,
+  type ReusableArtifact,
   type WorkflowCanvas,
   type WorkflowCanvasEdge,
   type WorkflowCanvasNode,
@@ -43,6 +65,7 @@ import {
 } from '../../lib/workflowRuntime';
 import type { UserDefinedAgent } from '../../types';
 import { buildConversationContext } from '../../lib/conversationContext';
+import '../../styles/workflow-release.css';
 
 type CanvasSelection = { type: 'node'; id: string } | { type: 'edge'; id: string } | null;
 type NodeRunStatus = 'queued' | 'running' | 'completed' | 'failed';
@@ -150,6 +173,17 @@ export function WorkflowStudio() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [nexusSettingsOpen, setNexusSettingsOpen] = useState(false);
   const [nexusDeleteConfirm, setNexusDeleteConfirm] = useState(false);
+  const [releaseCenterOpen, setReleaseCenterOpen] = useState(false);
+  const [releaseCenterTab, setReleaseCenterTab] = useState<'tests' | 'artifacts' | 'releases'>('tests');
+  const [nexusArtifacts, setNexusArtifacts] = useState<NexusBusinessRecord[]>([]);
+  const [nexusTests, setNexusTests] = useState<NexusBusinessRecord[]>([]);
+  const [nexusTestRuns, setNexusTestRuns] = useState<NexusBusinessRecord[]>([]);
+  const [nexusReleases, setNexusReleases] = useState<NexusBusinessRecord[]>([]);
+  const [reusableArtifacts, setReusableArtifacts] = useState<ReusableArtifact[]>([]);
+  const [selectedReusableArtifactId, setSelectedReusableArtifactId] = useState('');
+  const [releaseDiff, setReleaseDiff] = useState<NexusReleaseDiff | null>(null);
+  const [testDraft, setTestDraft] = useState({ name: '', input: '', expected: '' });
+  const [releaseNote, setReleaseNote] = useState('');
   const [edgeMode, setEdgeMode] = useState<'flow' | 'loop'>('flow');
   const [connectingFrom, setConnectingFrom] = useState<string | null>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -175,7 +209,7 @@ export function WorkflowStudio() {
     try {
       const summaries = await listWorkflowTasks(100, signal);
       const candidates = summaries
-        .filter((task) => task.templateId === targetWorkflowId)
+        .filter((task) => task.templateId === targetWorkflowId && !task.sessionId.startsWith('agent-nexus-test-'))
         .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
       if (!candidates.length) {
         if (replace && !signal.aborted) setMessages([]);
@@ -223,6 +257,18 @@ export function WorkflowStudio() {
     const items = await listAgentWorkflows();
     setWorkflows(items);
     return items;
+  }, []);
+
+  const refreshReleaseCenter = useCallback(async (targetWorkflowId: string) => {
+    const [artifacts, tests, testRuns, releases, reusable] = await Promise.all([
+      listNexusArtifacts(targetWorkflowId), listNexusTests(targetWorkflowId),
+      listNexusTestRuns(targetWorkflowId), listNexusReleases(targetWorkflowId), listReusableArtifacts(),
+    ]);
+    setNexusArtifacts(artifacts);
+    setNexusTests(tests);
+    setNexusTestRuns(testRuns);
+    setNexusReleases(releases);
+    setReusableArtifacts(reusable.filter((candidate) => !artifacts.some((artifact) => artifact.data.artifactId === candidate.id)));
   }, []);
 
   useEffect(() => {
@@ -291,6 +337,7 @@ export function WorkflowStudio() {
     setInspectorOpen(false);
     setNexusSettingsOpen(false);
     setNexusDeleteConfirm(false);
+    setReleaseCenterOpen(false);
     setDirty(false);
     setError(null);
   }
@@ -309,6 +356,7 @@ export function WorkflowStudio() {
     setInspectorOpen(false);
     setNexusSettingsOpen(false);
     setNexusDeleteConfirm(false);
+    setReleaseCenterOpen(false);
     setMessages([]);
     setIssues([]);
     setNodeStatuses({});
@@ -545,6 +593,111 @@ export function WorkflowStudio() {
     if (saved) setNexusSettingsOpen(false);
   };
 
+  const openReleaseCenter = async () => {
+    let targetId = workflowId;
+    if (dirty || !targetId) targetId = (await save())?.id ?? null;
+    if (!targetId) return;
+    setReleaseCenterOpen(true);
+    setBusy(true);
+    try { await refreshReleaseCenter(targetId); }
+    catch (caught) { setError(userFacingError(caught, 'Nexus 发布中心读取失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const addNexusTest = async () => {
+    if (!workflowId || !testDraft.name.trim() || !testDraft.input.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      await createNexusTest(workflowId, { name: testDraft.name.trim(), input: testDraft.input.trim(), expectedIncludes: testDraft.expected.split('\n').map((item) => item.trim()).filter(Boolean) });
+      setTestDraft({ name: '', input: '', expected: '' });
+      await refreshReleaseCenter(workflowId);
+    } catch (caught) { setError(userFacingError(caught, '测试用例保存失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const executeNexusTests = async () => {
+    if (!workflowId) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await runNexusTests(workflowId);
+      setRunActivity(`正在运行 ${result.runs.length} 个真实测试任务`);
+      const finalRuns = await waitForNexusTestRuns(workflowId, result.runs.map((run) => run.id), {
+        onUpdate: (runs) => {
+          setNexusTestRuns((current) => [...runs, ...current.filter((candidate) => !runs.some((run) => run.id === candidate.id))]);
+          setRunActivity(`Nexus 测试 ${runs.filter((run) => run.status !== 'running').length}/${result.runs.length}`);
+        },
+      });
+      const failed = finalRuns.filter((run) => run.status !== 'passed').length;
+      setRunActivity(failed ? `${failed} 个测试未通过` : `${finalRuns.length} 个测试全部通过`);
+      await refreshReleaseCenter(workflowId);
+    } catch (caught) { setError(userFacingError(caught, 'Nexus 测试启动失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const publishCurrentNexus = async () => {
+    if (!workflowId || dirty) { setError('请先保存当前草稿，再发布固定版本。'); return; }
+    setBusy(true); setError(null);
+    try {
+      const result = await publishNexus(workflowId, releaseNote.trim());
+      setReleaseNote('');
+      setRunActivity(result.idempotent ? '当前版本已经发布' : `Nexus v${result.workflow.version} 已发布`);
+      await Promise.all([refresh(), refreshReleaseCenter(workflowId)]);
+    } catch (caught) { setError(userFacingError(caught, 'Nexus 发布失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const restoreRelease = async (releaseId: string) => {
+    if (!workflowId) return;
+    setBusy(true); setError(null);
+    try {
+      const workflow = await restoreNexusRelease(workflowId, releaseId);
+      openSavedWorkflow(workflow);
+      setReleaseCenterOpen(true);
+      setRunActivity('已恢复为新草稿，生产版本保持不变');
+      await refreshReleaseCenter(workflow.id);
+    } catch (caught) { setError(userFacingError(caught, 'Nexus 版本恢复失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const makeWorkflowPlugin = async () => {
+    if (!workflowId) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await createNexusWorkflowPlugin(workflowId);
+      setRunActivity(`Workflow Plugin“${result.plugin.name}”已发布`);
+    } catch (caught) { setError(userFacingError(caught, 'Workflow Plugin 生成失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const uploadArtifact = async (files: FileList | null) => {
+    if (!workflowId || !files?.[0]) return;
+    setBusy(true); setError(null);
+    try { await uploadNexusArtifact(workflowId, files[0]); await refreshReleaseCenter(workflowId); }
+    catch (caught) { setError(userFacingError(caught, 'Nexus 附件上传失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const linkArtifact = async () => {
+    if (!workflowId || !selectedReusableArtifactId) return;
+    setBusy(true); setError(null);
+    try {
+      const artifact = reusableArtifacts.find((candidate) => candidate.id === selectedReusableArtifactId);
+      const result = await linkNexusArtifact(workflowId, selectedReusableArtifactId, artifact?.id);
+      setRunActivity(result.idempotent ? '该 Artifact 已在当前 Nexus 中' : '已绑定已有 Artifact');
+      setSelectedReusableArtifactId('');
+      await refreshReleaseCenter(workflowId);
+    } catch (caught) { setError(userFacingError(caught, 'Nexus Artifact 绑定失败。')); }
+    finally { setBusy(false); }
+  };
+
+  const compareRelease = async (leftId: string, rightId: string) => {
+    if (!workflowId) return;
+    setBusy(true); setError(null);
+    try { setReleaseDiff(await compareNexusReleases(workflowId, leftId, rightId)); }
+    catch (caught) { setError(userFacingError(caught, 'Nexus 版本差异读取失败。')); }
+    finally { setBusy(false); }
+  };
+
   const setAssistantMessage = (id: string, updater: (message: RunnerMessage) => RunnerMessage) => {
     setMessages((current) => current.map((message) => message.id === id ? updater(message) : message));
   };
@@ -640,6 +793,7 @@ export function WorkflowStudio() {
       <div className="workflow-header-actions">
         <button type="button" onClick={createNewWorkflow}><Plus size={15} />新建</button>
         <button type="button" onClick={() => void validate()} disabled={busy}><Check size={15} />校验</button>
+        <button type="button" onClick={() => void openReleaseCenter()} disabled={busy}><Rocket size={15} />测试与发布</button>
         <button type="button" aria-label="Nexus 设置" title="Nexus 设置" onClick={() => { setNexusDeleteConfirm(false); setNexusSettingsOpen(true); }}><Settings2 size={15} />设置</button>
         <button type="button" className="primary" onClick={() => void save()} disabled={busy || !dirty}><Save size={15} />{busy ? '保存中' : '保存'}</button>
       </div>
@@ -762,6 +916,8 @@ export function WorkflowStudio() {
           </div> : selectedEdge ? <div className="workflow-inspector-form edge">
             <div className={`workflow-edge-kind ${selectedEdge.kind}`}><GitBranch size={16} /><span>{selectedEdge.kind === 'loop' ? '有界 Loop 回边' : '依赖连线'}</span></div>
             {selectedEdge.kind === 'loop' && <label><span>最大执行轮次</span><input type="number" min={2} max={12} value={selectedEdge.maxIterations ?? 2} onChange={(event) => commitCanvas((current) => ({ ...current, edges: current.edges.map((edge) => edge.id === selectedEdge.id ? { ...edge, maxIterations: Math.min(12, Math.max(2, Number(event.target.value))) } : edge) }))} /></label>}
+            <label><span>传递内容</span><select value={selectedEdge.transfer?.mode ?? 'summary'} onChange={(event) => commitCanvas((current) => ({ ...current, edges: current.edges.map((edge) => edge.id === selectedEdge.id ? { ...edge, transfer: { ...edge.transfer, mode: event.target.value as 'summary' | 'full' | 'fields' | 'reference' } } : edge) }))}><option value="summary">结构化摘要</option><option value="full">完整内容</option><option value="fields">指定字段</option><option value="reference">仅 Artifact 引用</option></select></label>
+            {(selectedEdge.transfer?.mode ?? 'summary') === 'fields' && <label><span>字段名</span><input value={(selectedEdge.transfer?.fields ?? []).join(', ')} placeholder="summary, risks, actions" onChange={(event) => commitCanvas((current) => ({ ...current, edges: current.edges.map((edge) => edge.id === selectedEdge.id ? { ...edge, transfer: { mode: 'fields', fields: event.target.value.split(',').map((field) => field.trim()).filter(Boolean).slice(0, 32) } } : edge) }))} /></label>}
             <p>{canvas.nodes.find((node) => node.id === selectedEdge.source)?.name} <ChevronRight size={13} /> {canvas.nodes.find((node) => node.id === selectedEdge.target)?.name}</p>
           </div> : null}
           {issues.length > 0 && <div className="workflow-issues"><strong>需要处理</strong>{issues.slice(0, 6).map((issue, index) => <button type="button" key={`${issue.code}-${index}`} onClick={() => { if (issue.nodeIds?.[0]) setSelection({ type: 'node', id: issue.nodeIds[0] }); else if (issue.edgeIds?.[0]) setSelection({ type: 'edge', id: issue.edgeIds[0] }); setInspectorOpen(true); }}><AlertCircle size={13} /><span>{issue.message}</span></button>)}</div>}
@@ -786,6 +942,24 @@ export function WorkflowStudio() {
             <p>删除后无法恢复，画布和运行记录也不会再出现在列表中。</p>
             <footer className="workflow-inspector-actions"><button type="button" onClick={() => setNexusDeleteConfirm(false)}>返回设置</button><button type="button" className="danger" disabled={busy} onClick={() => void removeWorkflow()}><Trash2 size={14} />确认删除</button></footer>
           </div>}
+        </aside>
+      </div>}
+
+      {releaseCenterOpen && workflowId && <div className="workflow-inspector-modal workflow-release-modal" role="dialog" aria-modal="true" aria-label="Nexus 测试与发布" onPointerDown={(event) => { if (event.target === event.currentTarget) setReleaseCenterOpen(false); }}>
+        <aside className="workflow-release-panel glass-panel" onPointerDown={(event) => event.stopPropagation()}>
+          <header><div><small>固定版本交付</small><h2>测试与发布</h2></div><button type="button" aria-label="关闭" onClick={() => setReleaseCenterOpen(false)}><X size={16} /></button></header>
+          <nav>{([['tests', '测试', FlaskConical], ['artifacts', '附件', FileUp], ['releases', '版本', Rocket]] as const).map(([id, label, Icon]) => <button type="button" key={id} className={releaseCenterTab === id ? 'active' : ''} onClick={() => setReleaseCenterTab(id)}><Icon size={14} />{label}</button>)}</nav>
+          {releaseCenterTab === 'tests' && <div className="workflow-release-content tests">
+            <div className="workflow-test-form"><input value={testDraft.name} onChange={(event) => setTestDraft((current) => ({ ...current, name: event.target.value }))} placeholder="测试名称" /><textarea rows={3} value={testDraft.input} onChange={(event) => setTestDraft((current) => ({ ...current, input: event.target.value }))} placeholder="真实测试输入" /><textarea rows={2} value={testDraft.expected} onChange={(event) => setTestDraft((current) => ({ ...current, expected: event.target.value }))} placeholder="结果必须包含，每行一条" /><button type="button" disabled={busy || !testDraft.name.trim() || !testDraft.input.trim()} onClick={() => void addNexusTest()}><Plus size={13} />添加用例</button></div>
+            <div className="workflow-release-list">{nexusTests.map((testCase) => { const latestRun = nexusTestRuns.find((run) => run.data.testCaseId === testCase.id); return <article key={testCase.id}><span><strong>{String(testCase.data.name ?? '测试用例')}</strong><small>{String(testCase.data.input ?? '')}</small></span><em className={latestRun?.status ?? 'draft'}>{latestRun?.status === 'passed' ? '通过' : latestRun?.status === 'failed' ? '未通过' : latestRun?.status === 'running' ? '运行中' : '未运行'}</em></article>; })}{nexusTests.length === 0 && <p>添加至少一个测试用例后才能发布。</p>}</div>
+            <button type="button" className="workflow-release-primary" disabled={busy || nexusTests.length === 0} onClick={() => void executeNexusTests()}>{busy ? <LoaderCircle className="spin" size={14} /> : <FlaskConical size={14} />}运行全部测试</button>
+          </div>}
+          {releaseCenterTab === 'artifacts' && <div className="workflow-release-content artifacts">
+            <label className="workflow-artifact-upload"><FileUp size={18} /><span>上传 Nexus 可复用附件<small>单文件不超过 10 MB</small></span><input type="file" onChange={(event) => void uploadArtifact(event.target.files)} /></label>
+            <div className="workflow-artifact-link"><select aria-label="选择已有 Artifact" value={selectedReusableArtifactId} onChange={(event) => setSelectedReusableArtifactId(event.target.value)}><option value="">选择任务或工具已生成的 Artifact</option>{reusableArtifacts.map((artifact) => <option key={artifact.id} value={artifact.id}>{artifact.id} · {artifact.mimeType ?? '未知类型'} · {artifact.bytes.toLocaleString()} 字节</option>)}</select><button type="button" disabled={busy || !selectedReusableArtifactId} onClick={() => void linkArtifact()}><Link2 size={13} />绑定</button></div>
+            <div className="workflow-release-list">{nexusArtifacts.map((artifact) => <article key={artifact.id}><span><strong>{String(artifact.data.name ?? '附件')}</strong><small>{String(artifact.data.mimeType ?? '')} · {Number(artifact.data.bytes ?? 0).toLocaleString()} 字节</small></span><em>{artifact.data.linked ? '已绑定' : `v${String(artifact.data.workflowVersion ?? 1)}`}</em></article>)}{nexusArtifacts.length === 0 && <p>尚未添加附件。</p>}</div>
+          </div>}
+          {releaseCenterTab === 'releases' && <div className="workflow-release-content releases"><div className="workflow-publish-row"><input value={releaseNote} onChange={(event) => setReleaseNote(event.target.value)} placeholder="本次发布说明（可选）" /><button type="button" disabled={busy || dirty} onClick={() => void publishCurrentNexus()}><Rocket size={13} />发布当前草稿</button></div><div className="workflow-release-list">{nexusReleases.map((release, index) => <article key={release.id}><span><strong>v{String(release.data.workflowVersion ?? '?')}</strong><small>{String(release.data.note || '正式版本')} · {new Date(release.createdAt).toLocaleString('zh-CN')}</small></span><div className="workflow-release-actions">{nexusReleases[index + 1] && <button type="button" disabled={busy} onClick={() => void compareRelease(nexusReleases[index + 1]!.id, release.id)}><GitCompareArrows size={12} />与上一版比较</button>}<button type="button" disabled={busy} onClick={() => void restoreRelease(release.id)}><RotateCcw size={12} />恢复为草稿</button></div></article>)}{nexusReleases.length === 0 && <p>当前还没有正式发布版本。</p>}</div>{releaseDiff && <div className="workflow-release-diff"><header><strong>v{releaseDiff.left.version} → v{releaseDiff.right.version}</strong><span>{releaseDiff.changed ? '存在变更' : '内容一致'}</span><button type="button" aria-label="关闭版本差异" onClick={() => setReleaseDiff(null)}><X size={12} /></button></header><div><span>Agent {releaseDiff.nodeCount.left} → {releaseDiff.nodeCount.right}</span><span>连接 {releaseDiff.edgeCount.left} → {releaseDiff.edgeCount.right}</span><span>步骤 {releaseDiff.stepCount.left} → {releaseDiff.stepCount.right}</span></div><p>新增 {releaseDiff.changes.nodes.added.length + releaseDiff.changes.steps.added.length} · 删除 {releaseDiff.changes.nodes.removed.length + releaseDiff.changes.steps.removed.length} · 修改 {releaseDiff.changes.nodes.changed.length + releaseDiff.changes.steps.changed.length + releaseDiff.changes.edges.changed.length}</p></div>}<button type="button" className="workflow-release-primary secondary" disabled={busy || nexusReleases.length === 0} onClick={() => void makeWorkflowPlugin()}><PackageCheck size={14} />生成 Workflow Plugin</button></div>}
         </aside>
       </div>}
 

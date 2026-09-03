@@ -461,6 +461,24 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  upsert(tool: RegisteredTool) {
+    this.tools.set(tool.name, tool);
+  }
+
+  unregister(name: string) {
+    return this.tools.delete(name);
+  }
+
+  unregisterPrefix(prefix: string) {
+    let removed = 0;
+    for (const name of this.tools.keys()) {
+      if (!name.startsWith(prefix)) continue;
+      this.tools.delete(name);
+      removed += 1;
+    }
+    return removed;
+  }
+
   catalog() {
     return [...this.tools.values()].map(({ name, description, risk, parameters, timeoutMs, executionBoundary = 'sandbox' }) => ({ name, description, risk, parameters, timeoutMs, executionBoundary, approvalRequired: risk === 'high' || risk === 'critical' }));
   }

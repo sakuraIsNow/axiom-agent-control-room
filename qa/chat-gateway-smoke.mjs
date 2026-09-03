@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 
 const port = 8899;
+const baseUrl = (process.env.QA_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 let observedImage = false;
 const mock = createServer((request, response) => {
   let body = '';
@@ -17,7 +18,7 @@ const mock = createServer((request, response) => {
 
 await new Promise((resolve) => mock.listen(port, '127.0.0.1', resolve));
 try {
-  const response = await fetch('http://127.0.0.1:8787/api/chat', {
+  const response = await fetch(`${baseUrl}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -35,7 +36,7 @@ try {
   if (!response.ok || !observedImage || !output.includes('event: token') || !output.includes('|列|值|')) {
     throw new Error(`chat gateway smoke failed: status=${response.status}, image=${observedImage}`);
   }
-  const capabilityResponse = await fetch('http://127.0.0.1:8787/api/chat', {
+  const capabilityResponse = await fetch(`${baseUrl}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages: [{ role: 'user', content: '你有联网搜索的能力吗' }] }),

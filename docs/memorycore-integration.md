@@ -41,6 +41,12 @@ AXIOM_MEMORY_L3_BUDGET=3500
 
 未设置 `TDAI_MEMORY_ENDPOINT` 时，捕获会真实记录为 `memory.capture.skipped`，原因是 `disabled`；`/api/runtime/readiness` 会保持降级状态。
 
+## 用户可控策略
+
+项目空间的“记忆”页面会显示来源、L0-L3 层级、作用域、置信度、过期时间和同步状态。用户可以新建本地策略记忆，更新、停用或删除服务端允许修改的记录；任务详情还可以关闭本轮记忆使用。所有操作都按租户和用户隔离，viewer 只能查看。
+
+未配置 MemoryCore 时，这些记录明确标记为本地策略，不会伪装成已经写入远端 L0-L3。启用 MemoryCore 后，平台按层级调用真实维护 API并记录同步成功或失败；远端失败时保留本地记录供用户处理。由于参考 MemoryCore 没有 L3 独立删除协议，已同步 L3 只允许停用或覆盖，不能伪造删除成功。
+
 ## 上游版本要求
 
 生产环境不能直接使用未修复的 MemoryCore SQLite 版本。已验证的上游问题是：`/v3/atomic/update` 在传入 `record_id` 时，旧版 `queryL1Records` 会忽略 `recordIds` 过滤并取全表首条记录，合法更新可能被误报为“属于其他用户”。部署前必须使用包含精确主键查询修复的版本，或应用上游补丁；Axiom 不会在适配器中绕过该归属校验。

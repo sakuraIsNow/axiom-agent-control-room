@@ -85,6 +85,8 @@ export type WorkflowStep = {
   maxDurationMs?: number;
   failureStrategy?: 'retry' | 'skip' | 'pause';
   agentContract?: WorkflowStepAgentContract;
+  /** Step inserted by the bounded Replanner to recover a failed predecessor. */
+  recoveryForStepId?: string;
   conditions?: WorkflowStepCondition[];
   loopPath?: Array<{ id: string; iteration: number; maxIterations: number; entry: boolean }>;
   loop?: {
@@ -110,6 +112,11 @@ export type WorkflowStepAgentContract = {
   displayName: string;
   systemPromptTemplate?: string;
   toolAllowlist: string[];
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  evidenceRequirements?: string[];
+  completionCriteria?: string[];
+  dependencyTransfers?: Record<string, { mode: 'summary' | 'full' | 'fields' | 'reference'; fields?: string[] }>;
 };
 
 export type AgentWorkflowScopedAgent = {
@@ -154,6 +161,10 @@ export type AgentWorkflowEdge = {
   condition?: {
     expression: string;
     branch: 'true' | 'false';
+  };
+  transfer?: {
+    mode: 'summary' | 'full' | 'fields' | 'reference';
+    fields?: string[];
   };
 };
 
@@ -266,6 +277,9 @@ export type PromptPluginDefinition = {
   model?: string;
   toolNames?: string[];
   inputSchema?: { fields: PluginInputField[] };
+  /** Fixed Agent Nexus release used by a Workflow Plugin. */
+  workflowId?: string;
+  workflowVersion?: number;
 };
 
 export type PluginVisualEffect = 'aurora' | 'plasma' | 'liquid' | 'prism' | 'solar' | 'nebula' | 'chrome' | 'pulse';
@@ -535,7 +549,32 @@ export type AgentMessage = {
   kind: 'dependency-context' | 'artifact-share' | 'handoff';
   content: string;
   artifactIds: string[];
+  handoff?: AgentHandoff;
   createdAt: string;
+};
+
+export type EvidenceItem = {
+  id: string;
+  claim: string;
+  kind: 'user-fact' | 'tool-result' | 'external-source' | 'artifact' | 'dependency' | 'model-inference';
+  source: string;
+  verification: 'verified' | 'supported' | 'unverified' | 'contradicted';
+  confidence: number;
+  uri?: string;
+  title?: string;
+  locator?: string;
+  artifactId?: string;
+  publishedAt?: string;
+  retrievedAt?: string;
+};
+
+export type AgentHandoff = {
+  summary: string;
+  status: 'complete' | 'partial' | 'blocked';
+  artifactIds: string[];
+  evidenceIds: string[];
+  openQuestions: string[];
+  completionCriteria: string[];
 };
 
 export type ExecutionPolicy = {
@@ -591,6 +630,8 @@ export type StepResult = {
   outputChars?: number;
   outputTruncated?: boolean;
   evidence: string[];
+  evidenceDetails?: EvidenceItem[];
+  handoff?: AgentHandoff;
   confidence: number;
   attempts: number;
   durationMs: number;
@@ -600,6 +641,7 @@ export type StepResult = {
   messages?: AgentMessage[];
   skipped?: boolean;
   manual?: boolean;
+  recoveredByStepId?: string;
 };
 
 export type ReviewResult = {
@@ -741,6 +783,11 @@ export type RuntimeEventType =
   | 'node.skip_requested'
   | 'node.completed_manually'
   | 'node.rerun_requested'
+  | 'node.pause_requested'
+  | 'node.resume_requested'
+  | 'node.replace_requested'
+  | 'node.result_locked'
+  | 'node.result_unlocked'
   | 'review.started'
   | 'review.completed'
   | 'review.approval_requested'
@@ -755,10 +802,12 @@ export type RuntimeEventType =
   | 'memory.capture.completed'
   | 'memory.capture.skipped'
   | 'memory.capture.failed'
+  | 'memory.policy_updated'
   | 'model.delta'
   | 'model.completed'
   | 'budget.exceeded'
   | 'budget.constrained'
+  | 'estimate.updated'
   | 'human.note'
   | 'human.guidance_accepted'
   | 'human.guidance_applied'
@@ -806,6 +855,11 @@ export type CompletionEvidenceSummary = {
   skippedSteps: number;
   acceptanceCriteria: number;
   evidenceItems: number;
+  verifiedEvidenceItems?: number;
+  supportedEvidenceItems?: number;
+  unverifiedEvidenceItems?: number;
+  contradictedEvidenceItems?: number;
+  recoveredFailures?: number;
   artifactRefs: number;
   toolReceipts: number;
   review: 'approved' | 'not-required' | 'pending' | 'rejected';
@@ -826,6 +880,13 @@ export type TaskEventSummary = {
   totalTokens: number;
   estimatedCostUsd: number;
   retries: number;
+  estimate?: {
+    progress: number;
+    remainingSteps: number;
+    durationMs: { low: number; likely: number; high: number };
+    confidence: 'low' | 'medium' | 'high';
+    updatedAt: string;
+  };
   toolCalls: number;
   queuedAt?: string;
   startedAt?: string;
@@ -844,6 +905,10 @@ export type ModelRoutingStats = {
   failures: number;
   totalLatencyMs: number;
   totalTokens: number;
+  reviewerAttempts?: number;
+  reviewerFirstPasses?: number;
+  retries?: number;
+  humanTakeovers?: number;
   lastUsedAt?: string;
 };
 

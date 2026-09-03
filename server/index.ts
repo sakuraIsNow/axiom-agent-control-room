@@ -40,6 +40,8 @@ import { consumeSseBlocks } from './runtime/sse.js';
 import { resolveTraceContext } from './runtime/trace.js';
 import { CodexHarnessAdapter, DeepSeekHarnessAdapter } from './runtime/harnessClient.js';
 import { createOutboundNotificationStore, OutboundNotificationManager } from './runtime/outboundNotifications.js';
+import { createBusinessCapabilityStore } from './runtime/businessCapabilityStore.js';
+import { registerPersistedExternalTools } from './runtime/businessCapabilities.js';
 
 dotenv.config({ path: resolve(process.cwd(), '.env.local'), quiet: true });
 dotenv.config({ quiet: true });
@@ -175,6 +177,8 @@ const pluginStore = createPluginStore();
 await pluginStore.initialize();
 const agentStore = createAgentStore();
 await agentStore.initialize();
+const businessCapabilityStore = createBusinessCapabilityStore();
+await businessCapabilityStore.initialize();
 const outboundNotificationStore = createOutboundNotificationStore();
 await outboundNotificationStore.initialize();
 const outboundNotifications = new OutboundNotificationManager(outboundNotificationStore, fetch, logger);
@@ -201,6 +205,16 @@ if (taskStore.getModelRoutingStats) {
   }
 }
 eventHub.subscribeAll((event) => modelRoutingPolicy.recordEvent(event));
+try {
+  for (const feedback of await businessCapabilityStore.listAll('feedback', 10_000)) {
+    const score = Number(feedback.data.score);
+    const issueTypes = Array.isArray(feedback.data.issueTypes) ? feedback.data.issueTypes.filter((item): item is string => typeof item === 'string') : [];
+    const models = Array.isArray(feedback.data.models) ? feedback.data.models.filter((item): item is string => typeof item === 'string') : typeof feedback.data.model === 'string' ? [feedback.data.model] : [];
+    for (const model of models) modelRoutingPolicy.recordFeedback({ model, score, routingIssue: issueTypes.includes('routing'), humanTakeover: issueTypes.includes('routing') });
+  }
+} catch (error) {
+  logger.warn({ error }, 'business feedback could not be restored into model routing');
+}
 const runtimeMemory = new TencentMemoryClient();
 await runtimeMemory.initialize();
 const memoryCompensationWorker = new MemoryCaptureCompensationWorker(runtimeMemory);
@@ -215,6 +229,12 @@ try {
   logger.warn({ error }, 'Artifact catalog reconciliation skipped; runtime results remain durable');
 }
 const runtimeTools = new ToolRegistry(undefined, runtimeArtifactStore, agentStore, runtimeArtifactCatalog);
+try {
+  const registeredExternalTools = await registerPersistedExternalTools(businessCapabilityStore, runtimeTools);
+  if (registeredExternalTools > 0) logger.info({ count: registeredExternalTools }, 'restored external MCP/OpenAPI tools');
+} catch (error) {
+  logger.warn({ error }, 'external tools could not be restored; built-in tools remain available');
+}
 // The sidecar adapter is lazy: without an explicit command and activation it
 // never spawns a child process and the built-in runtime remains authoritative.
 const hasCodexSidecar = Boolean(process.env.CODEX_APP_SERVER_COMMAND?.trim() || process.env.CODEX_APP_SERVER_COMMAND_JSON?.trim());
@@ -240,7 +260,7 @@ const resolveTaskModel = async (task: { modelCredentialId?: string; tenantId: st
     onUsage: (usage) => metrics.recordUsage(usage),
   });
 };
-const orchestrator = new WorkflowOrchestrator(taskStore, eventHub, runtimeModel, runtimeMemory, logger, runtimeTools, agentStore, resolveTaskModel, modelRoutingPolicy, runtimeArtifactStore, runtimeArtifactCatalog);
+const orchestrator = new WorkflowOrchestrator(taskStore, eventHub, runtimeModel, runtimeMemory, logger, runtimeTools, agentStore, resolveTaskModel, modelRoutingPolicy, runtimeArtifactStore, runtimeArtifactCatalog, businessCapabilityStore);
 const coordinator = new TaskCoordinator(taskStore, orchestrator, logger);
 coordinator.start();
 
@@ -603,6 +623,8 @@ app.route('/api', createTaskApi({
   },
   harnessAdapter,
   outboundNotifications,
+  businessCapabilities: businessCapabilityStore,
+  modelRouting: modelRoutingPolicy,
 }));
 
 const parseImageData = (imageData: string) => {
@@ -1876,6 +1898,7 @@ const shutdown = async (signal: string) => {
   (harnessAdapter as (DeepSeekHarnessAdapter & { close?: () => void }) | undefined)?.close?.();
   await pluginStore.close();
   await agentStore.close();
+  await businessCapabilityStore.close();
   await templateStore.close();
   await taskStore.close();
   await providerCredentialStore.close?.();

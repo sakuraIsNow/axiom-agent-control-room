@@ -1,9 +1,10 @@
-import { Activity, CalendarClock, LayoutGrid, MessageSquareText, Telescope, Bot, Plus, Puzzle, Workflow } from 'lucide-react';
+import { Activity, CalendarClock, FolderKanban, LayoutGrid, MessageSquareText, Telescope, Bot, Plus, Puzzle, Workflow } from 'lucide-react';
 import type { DashboardNavItem } from '../../lib/useDashboardStore';
 
 const items: Array<{ id: DashboardNavItem; label: string; icon: typeof LayoutGrid }> = [
   { id: 'tasks', label: '任务管理', icon: LayoutGrid },
   { id: 'chat', label: '对话', icon: MessageSquareText },
+  { id: 'projects', label: '项目空间', icon: FolderKanban },
   { id: 'templates', label: '模板库', icon: Telescope },
   { id: 'workflows', label: 'Agent Nexus', icon: Workflow },
   { id: 'schedules', label: '日程', icon: CalendarClock },
