@@ -896,6 +896,36 @@ export type UserPlugin = {
   updatedAt: string;
 };
 
+export type PluginMarketRelease = {
+  tenantId: string;
+  pluginId: string;
+  pluginVersion: number;
+  plugin: UserPlugin;
+  status: 'pending' | 'approved' | 'rejected' | 'revoked';
+  submittedBy: string;
+  submittedAt: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+  revokedBy?: string;
+  revokedAt?: string;
+};
+
+export type PluginInstallation = {
+  tenantId: string;
+  userId: string;
+  pluginId: string;
+  pluginVersion: number;
+  installedAt: string;
+  updatedAt: string;
+};
+
+export type PluginMarketEntry = {
+  release: PluginMarketRelease;
+  installation?: PluginInstallation;
+  updateAvailable: boolean;
+};
+
 export type WorkflowTemplate = {
   id: string;
   tenantId: string;

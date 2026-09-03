@@ -120,3 +120,57 @@ test('plugin publish evidence is cleared by edits and historical versions roll f
     await store.close();
   }
 });
+
+test('plugin market keeps immutable reviewed releases and pins each user installation', async () => {
+  const store = new SqlitePluginStore(':memory:');
+  await store.initialize();
+  try {
+    const created = await store.createPlugin({
+      tenantId: 'tenant-market', createdBy: 'publisher', name: 'Daily brief', description: 'v1', kind: 'mini-app', visibility: 'team',
+      definition: {
+        mode: 'analyze', htmlContent: '<!doctype html><html><body>v1</body></html>',
+        designConversation: [{ role: 'user', content: 'private design history', createdAt: '2026-09-03T00:00:00.000Z' }],
+      },
+    });
+    const publishedV1 = await store.publishPlugin(created.id, created.tenantId, {
+      schemaVersion: 1, platformVersion: '1.1.0', pluginVersion: 1, integrity: 'sha256:v1', signedAt: '2026-09-03T00:00:00.000Z', signedBy: 'publisher', permissions: [], warnings: [],
+    });
+    const submittedV1 = await store.submitPluginToMarket(publishedV1, 'publisher');
+    assert.equal(submittedV1.status, 'pending');
+    assert.equal('htmlContent' in submittedV1.plugin.definition ? submittedV1.plugin.definition.designConversation : undefined, undefined);
+    const approvedV1 = await store.reviewMarketRelease(created.id, created.tenantId, 1, 'approved', 'reviewer');
+    assert.equal(approvedV1.status, 'approved');
+    const installedV1 = await store.installMarketRelease(created.id, created.tenantId, 'member');
+    assert.equal(installedV1.pluginVersion, 1);
+
+    const draftV2 = await store.updatePlugin(created.id, created.tenantId, {
+      description: 'v2', definition: { mode: 'analyze', htmlContent: '<!doctype html><html><body>v2</body></html>' }, updatedBy: 'publisher',
+    });
+    const publishedV2 = await store.publishPlugin(created.id, created.tenantId, {
+      schemaVersion: 1, platformVersion: '1.1.0', pluginVersion: draftV2.version, integrity: 'sha256:v2', signedAt: '2026-09-03T01:00:00.000Z', signedBy: 'publisher', permissions: [], warnings: [],
+    });
+    await store.submitPluginToMarket(publishedV2, 'publisher');
+    await store.reviewMarketRelease(created.id, created.tenantId, 2, 'approved', 'reviewer');
+    const beforeUpgrade = await store.listMarketplace(created.tenantId, 'member');
+    assert.equal(beforeUpgrade[0]?.release.plugin.description, 'v2');
+    assert.equal(beforeUpgrade[0]?.installation?.pluginVersion, 1);
+    assert.equal(beforeUpgrade[0]?.updateAvailable, true);
+    assert.equal((await store.getMarketRelease(created.id, created.tenantId, 1))?.plugin.description, 'v1');
+
+    const upgraded = await store.upgradeMarketRelease(created.id, created.tenantId, 'member');
+    assert.equal(upgraded.pluginVersion, 2);
+    await store.revokeMarketRelease(created.id, created.tenantId, 2, 'publisher', 'quality issue');
+    assert.equal((await store.getMarketRelease(created.id, created.tenantId, 2))?.status, 'revoked');
+    const repair = await store.listMarketplace(created.tenantId, 'member');
+    assert.equal(repair[0]?.release.pluginVersion, 1);
+    assert.equal(repair[0]?.updateAvailable, true);
+    assert.equal((await store.upgradeMarketRelease(created.id, created.tenantId, 'member')).pluginVersion, 1);
+
+    assert.equal(await store.uninstallPlugin(created.id, created.tenantId, 'member'), true);
+    assert.equal(await store.getPluginInstallation(created.id, created.tenantId, 'member'), null);
+    assert.equal(await store.deletePlugin(created.id, created.tenantId), true);
+    assert.equal(await store.getMarketRelease(created.id, created.tenantId, 1), null);
+  } finally {
+    await store.close();
+  }
+});

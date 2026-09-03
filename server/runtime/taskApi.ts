@@ -246,6 +246,15 @@ const createPluginSchema = z.object({
 
 const updatePluginSchema = createPluginSchema.partial().extend({ status: z.enum(['draft', 'published', 'archived']).optional() });
 const rollbackPluginSchema = z.object({ version: z.number().int().positive() }).strict();
+const reviewPluginMarketSchema = z.object({
+  version: z.number().int().positive(),
+  decision: z.enum(['approved', 'rejected']),
+  note: z.string().max(1_000).optional(),
+}).strict();
+const revokePluginMarketSchema = z.object({
+  version: z.number().int().positive(),
+  note: z.string().max(1_000).optional(),
+}).strict();
 const pluginAgentProviderSchema = z.object({
   credentialId: z.string().uuid().optional(),
   apiUrl: z.string().url().max(2_000).optional(),
@@ -693,6 +702,22 @@ export const createTaskApi = (dependencies: {
     signingKey: pluginSigningKey,
     signatureRequired: false,
   });
+  const resolvePluginForUse = async (pluginId: string, principal: ReturnType<typeof identity>) => {
+    if (!plugins) return { plugin: null, error: '插件服务尚未初始化。', status: 503 as const };
+    const current = await plugins.getPlugin(pluginId, principal.tenantId);
+    if (current && canManagePlugin(current, principal)) return { plugin: current, installed: false as const };
+    const installation = await plugins.getPluginInstallation(pluginId, principal.tenantId, principal.userId);
+    if (installation) {
+      const marketRelease = await plugins.getMarketRelease(pluginId, principal.tenantId, installation.pluginVersion);
+      if (!marketRelease) return { plugin: null, error: '已安装的插件版本不存在，请卸载后重新安装。', status: 409 as const };
+      if (marketRelease.status !== 'approved') return { plugin: null, error: '该插件版本已被撤回，当前不能继续运行。', status: 409 as const };
+      return { plugin: marketRelease.plugin, installed: true as const, installation, marketRelease };
+    }
+    const visible = await plugins.getPlugin(pluginId, principal.tenantId, templateAccess(principal));
+    return visible
+      ? { plugin: visible, installed: false as const }
+      : { plugin: null, error: '插件不存在。', status: 404 as const };
+  };
   const readinessDependencies = {
     memory,
     model,
@@ -1206,6 +1231,34 @@ export const createTaskApi = (dependencies: {
     return c.json({ plugins: await plugins.listPlugins(principal.tenantId, limit, templateAccess(principal)) });
   });
 
+  api.get('/plugins/market/catalog', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const requestedLimit = Number(c.req.query('limit') ?? 50);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 50;
+    const query = c.req.query('q')?.trim().slice(0, 120) ?? '';
+    return c.json({ entries: await plugins.listMarketplace(principal.tenantId, principal.userId, limit, query) });
+  });
+
+  api.get('/plugins/market/submissions', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const visible = await plugins.listPlugins(principal.tenantId, 100, templateAccess(principal));
+    const manageable = visible.filter((plugin) => canManagePlugin(plugin, principal));
+    const releases = (await Promise.all(manageable.map((plugin) => plugins.getMarketRelease(plugin.id, principal.tenantId, plugin.version))))
+      .filter((release) => release !== null);
+    return c.json({ releases });
+  });
+
+  api.get('/plugins/market/reviews', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    if (principal.role !== 'owner' && principal.role !== 'admin') return c.json({ error: '只有租户管理员可以审核插件。' }, 403);
+    const requestedLimit = Number(c.req.query('limit') ?? 50);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 50;
+    return c.json({ releases: await plugins.listMarketReviews(principal.tenantId, limit) });
+  });
+
   api.get('/plugins/:pluginId/compatibility', async (c) => {
     if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
     const principal = identity(c.req.raw.headers);
@@ -1508,6 +1561,106 @@ export const createTaskApi = (dependencies: {
     }
   });
 
+  api.get('/plugins/:pluginId/market-status', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const current = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId);
+    if (!current) return c.json({ error: '插件不存在。' }, 404);
+    if (!canManagePlugin(current, principal)) return c.json({ error: '只有插件创建者或租户管理员可以查看市场审核状态。' }, 403);
+    return c.json({ release: await plugins.getMarketRelease(current.id, principal.tenantId, current.version) });
+  });
+
+  api.post('/plugins/:pluginId/market-submit', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const current = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId);
+    if (!current) return c.json({ error: '插件不存在。' }, 404);
+    if (!canManagePlugin(current, principal)) return c.json({ error: '只有插件创建者或租户管理员可以提交审核。' }, 403);
+    if (current.status !== 'published' || current.visibility !== 'team') return c.json({ error: '插件需要先发布并设为团队可见，才能提交市场审核。' }, 409);
+    const report = inspectPlugin(current);
+    if (!report.compatible) return c.json({ error: '插件当前版本未通过运行检查，请修复后重新发布。', report }, 409);
+    try {
+      const release = await plugins.submitPluginToMarket(current, principal.userId);
+      return c.json({ release, report }, 202);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '插件提交审核失败。' }, 409);
+    }
+  });
+
+  api.post('/plugins/:pluginId/market-review', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const parsed = reviewPluginMarketSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '请提供审核版本和审核结论。' }, 400);
+    const principal = identity(c.req.raw.headers);
+    if (principal.role !== 'owner' && principal.role !== 'admin') return c.json({ error: '只有租户管理员可以审核插件。' }, 403);
+    const candidate = await plugins.getMarketRelease(c.req.param('pluginId'), principal.tenantId, parsed.data.version);
+    if (!candidate) return c.json({ error: '待审核版本不存在。' }, 404);
+    if (candidate.status !== 'pending') return c.json({ error: '该版本已不在待审核状态。' }, 409);
+    if (parsed.data.decision === 'approved') {
+      const report = inspectPlugin(candidate.plugin);
+      if (!report.compatible) return c.json({ error: '插件在审核期间未通过完整性或权限检查。', report }, 409);
+    }
+    try {
+      const release = await plugins.reviewMarketRelease(candidate.pluginId, principal.tenantId, candidate.pluginVersion, parsed.data.decision, principal.userId, parsed.data.note);
+      return c.json({ release });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '插件审核失败。' }, 409);
+    }
+  });
+
+  api.post('/plugins/:pluginId/market-revoke', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const parsed = revokePluginMarketSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '请选择需要撤回的市场版本。' }, 400);
+    const principal = identity(c.req.raw.headers);
+    const current = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId);
+    if (!current) return c.json({ error: '插件不存在。' }, 404);
+    if (!canManagePlugin(current, principal)) return c.json({ error: '只有插件创建者或租户管理员可以撤回市场版本。' }, 403);
+    try {
+      const release = await plugins.revokeMarketRelease(current.id, principal.tenantId, parsed.data.version, principal.userId, parsed.data.note);
+      return c.json({ release });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '插件撤回失败。' }, 409);
+    }
+  });
+
+  api.post('/plugins/:pluginId/install', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const release = await plugins.getMarketRelease(c.req.param('pluginId'), principal.tenantId);
+    if (!release) return c.json({ error: '市场中没有可安装的插件版本。' }, 404);
+    const report = inspectPlugin(release.plugin);
+    if (!report.compatible) return c.json({ error: '插件版本未通过运行检查，暂时不能安装。', report }, 409);
+    try {
+      const installation = await plugins.installMarketRelease(release.pluginId, principal.tenantId, principal.userId);
+      return c.json({ installation, plugin: release.plugin }, 201);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '插件安装失败。' }, 409);
+    }
+  });
+
+  api.post('/plugins/:pluginId/upgrade', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const release = await plugins.getMarketRelease(c.req.param('pluginId'), principal.tenantId);
+    if (!release) return c.json({ error: '市场中没有可升级的插件版本。' }, 404);
+    const report = inspectPlugin(release.plugin);
+    if (!report.compatible) return c.json({ error: '插件新版本未通过运行检查，暂时不能升级。', report }, 409);
+    try {
+      const installation = await plugins.upgradeMarketRelease(release.pluginId, principal.tenantId, principal.userId);
+      return c.json({ installation, plugin: release.plugin });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '插件升级失败。' }, 409);
+    }
+  });
+
+  api.delete('/plugins/:pluginId/install', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    if (!await plugins.uninstallPlugin(c.req.param('pluginId'), principal.tenantId, principal.userId)) return c.json({ error: '插件尚未安装。' }, 404);
+    return c.body(null, 204);
+  });
+
   api.post('/plugins/:pluginId/rollback', async (c) => {
     if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
     const parsed = rollbackPluginSchema.safeParse(await c.req.json().catch(() => null));
@@ -1528,8 +1681,9 @@ export const createTaskApi = (dependencies: {
   api.post('/plugins/:pluginId/launch', async (c) => {
     if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
     const principal = identity(c.req.raw.headers);
-    const plugin = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId, templateAccess(principal));
-    if (!plugin) return c.json({ error: '插件不存在。' }, 404);
+    const resolved = await resolvePluginForUse(c.req.param('pluginId'), principal);
+    if (!resolved.plugin) return c.json({ error: resolved.error }, resolved.status);
+    const plugin = resolved.plugin;
     if (plugin.kind !== 'mini-app') return c.json({ error: '只有 Mini App 插件可以在独立窗口中打开。' }, 409);
     if (plugin.status !== 'published') {
       if (!canManagePlugin(plugin, principal)) return c.json({ error: '只有插件创建者或租户管理员可以预览草稿。' }, 403);
@@ -1537,7 +1691,7 @@ export const createTaskApi = (dependencies: {
     }
     const report = inspectPlugin(plugin);
     if (!report.compatible) return c.json({ error: '插件当前版本未通过运行检查，请修复后重新发布。', report }, 409);
-    return c.json({ plugin, mode: 'run' as const, report });
+    return c.json({ plugin, mode: 'run' as const, report, installed: resolved.installed });
   });
 
   api.delete('/plugins/:pluginId', async (c) => {
@@ -1555,8 +1709,9 @@ export const createTaskApi = (dependencies: {
     const parsed = runPluginSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'A plugin session and input are required.', details: parsed.error.flatten() }, 400);
     const principal = identity(c.req.raw.headers);
-    const plugin = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId, templateAccess(principal));
-    if (!plugin) return c.json({ error: '插件不存在。' }, 404);
+    const resolved = await resolvePluginForUse(c.req.param('pluginId'), principal);
+    if (!resolved.plugin) return c.json({ error: resolved.error }, resolved.status);
+    const plugin = resolved.plugin;
     if (plugin.kind === 'mini-app') return c.json({ error: 'Mini-app plugins open in the client window and do not create a workflow task.' }, 409);
     if (plugin.status !== 'published') return c.json({ error: '只有已发布插件可以运行。' }, 409);
     const compatibility = inspectPlugin(plugin);

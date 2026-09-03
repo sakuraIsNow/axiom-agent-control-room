@@ -348,6 +348,38 @@ export type UserPlugin = {
   updatedAt: string;
 };
 
+export type PluginMarketReviewStatus = 'pending' | 'approved' | 'rejected' | 'revoked';
+
+export type PluginMarketRelease = {
+  tenantId: string;
+  pluginId: string;
+  pluginVersion: number;
+  plugin: UserPlugin;
+  status: PluginMarketReviewStatus;
+  submittedBy: string;
+  submittedAt: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+  revokedBy?: string;
+  revokedAt?: string;
+};
+
+export type PluginInstallation = {
+  tenantId: string;
+  userId: string;
+  pluginId: string;
+  pluginVersion: number;
+  installedAt: string;
+  updatedAt: string;
+};
+
+export type PluginMarketEntry = {
+  release: PluginMarketRelease;
+  installation?: PluginInstallation;
+  updateAvailable: boolean;
+};
+
 export type CreateUserPluginInput = Pick<UserPlugin, 'tenantId' | 'name' | 'description' | 'createdBy'> & {
   icon?: string;
   kind?: UserPluginKind;
@@ -369,6 +401,16 @@ export interface PluginStore {
   publishPlugin(pluginId: string, tenantId: string, release: PluginRelease): Promise<UserPlugin>;
   rollbackPlugin(pluginId: string, tenantId: string, version: number, updatedBy: string): Promise<UserPlugin>;
   deletePlugin(pluginId: string, tenantId: string): Promise<boolean>;
+  submitPluginToMarket(plugin: UserPlugin, submittedBy: string): Promise<PluginMarketRelease>;
+  listMarketplace(tenantId: string, userId: string, limit?: number, query?: string): Promise<PluginMarketEntry[]>;
+  listMarketReviews(tenantId: string, limit?: number): Promise<PluginMarketRelease[]>;
+  getMarketRelease(pluginId: string, tenantId: string, version?: number): Promise<PluginMarketRelease | null>;
+  reviewMarketRelease(pluginId: string, tenantId: string, version: number, decision: 'approved' | 'rejected', reviewedBy: string, note?: string): Promise<PluginMarketRelease>;
+  revokeMarketRelease(pluginId: string, tenantId: string, version: number, revokedBy: string, note?: string): Promise<PluginMarketRelease>;
+  getPluginInstallation(pluginId: string, tenantId: string, userId: string): Promise<PluginInstallation | null>;
+  installMarketRelease(pluginId: string, tenantId: string, userId: string): Promise<PluginInstallation>;
+  upgradeMarketRelease(pluginId: string, tenantId: string, userId: string): Promise<PluginInstallation>;
+  uninstallPlugin(pluginId: string, tenantId: string, userId: string): Promise<boolean>;
 }
 
 export type UserDefinedAgentKind = 'worker' | 'quality' | 'output';

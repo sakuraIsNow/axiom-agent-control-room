@@ -54,6 +54,7 @@ let nativeDialogOpened = false;
 let qaTaskId = null;
 let qaSessionId = null;
 let qaPluginId = null;
+let qaMarketPluginId = null;
 let qaWorkflowId = null;
 const qaScheduleIds = [];
 let qaArtifactSessionId = null;
@@ -93,6 +94,29 @@ const pluginFixtureResponse = await fetch(`${baseUrl}/api/plugins`, {
 });
 if (!pluginFixtureResponse.ok) throw new Error(`视觉 QA 插件 fixture 创建失败 (${pluginFixtureResponse.status})`);
 qaPluginId = (await pluginFixtureResponse.json()).plugin?.id ?? null;
+const marketFixtureName = `市场审核插件-${fixtureStamp}`;
+const marketFixtureResponse = await fetch(`${baseUrl}/api/plugins`, {
+  method: 'POST',
+  headers: { ...qaHeaders, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: marketFixtureName,
+    description: '验证市场提交和审核中状态',
+    kind: 'mini-app',
+    visibility: 'team',
+    definition: {
+      mode: 'analyze',
+      htmlContent: '<!doctype html><html lang="zh-CN"><body><main>market review</main></body></html>',
+      toolNames: [],
+      appearance: { effect: 'chrome', hue: 156, seed: 91 },
+    },
+  }),
+});
+if (!marketFixtureResponse.ok) throw new Error(`视觉 QA 市场插件 fixture 创建失败 (${marketFixtureResponse.status})`);
+qaMarketPluginId = (await marketFixtureResponse.json()).plugin?.id ?? null;
+const marketPublishResponse = await fetch(`${baseUrl}/api/plugins/${encodeURIComponent(qaMarketPluginId)}/publish`, { method: 'POST', headers: qaHeaders });
+if (!marketPublishResponse.ok) throw new Error(`视觉 QA 市场插件发布失败 (${marketPublishResponse.status})`);
+const marketSubmitResponse = await fetch(`${baseUrl}/api/plugins/${encodeURIComponent(qaMarketPluginId)}/market-submit`, { method: 'POST', headers: qaHeaders });
+if (marketSubmitResponse.status !== 202) throw new Error(`视觉 QA 市场插件提交失败 (${marketSubmitResponse.status})`);
 
 // Keep the chat assertion focused on a direct response while using a
 // separate, real task fixture for the task board and lifecycle checks.
@@ -296,6 +320,15 @@ const pluginRefreshSettles = !(await pluginRefreshButton.isDisabled())
   && await pluginRefreshButton.locator('.spin').count() === 0
   && await page.locator('.dash-plugin-error').count() === 0;
 const pluginRefreshIsSingleRequest = pluginListRequests === 1;
+const pluginMarketTabsVisible = await page.getByRole('tab', { name: '我的插件', exact: true }).isVisible()
+  && await page.getByRole('tab', { name: '插件市场', exact: true }).isVisible();
+const pluginPendingReviewVisible = await page.getByText('v1 · 审核中', { exact: true }).isVisible();
+await page.getByRole('tab', { name: '插件市场', exact: true }).click();
+const pluginMarketEmptyState = await page.locator('.dash-plugin-market-search').isVisible()
+  && await page.locator('.dash-plugin-market-grid').isVisible()
+  && (await page.locator('.dash-plugin-market-grid').innerText()).includes('市场正在等待第一个插件');
+await page.screenshot({ path: resolve(outputDir, 'dashboard-plugin-market.png'), fullPage: false });
+await page.getByRole('tab', { name: '我的插件', exact: true }).click();
 const leftNavSettingsRemoved = await page.locator('.dash-nav-rail').getByRole('button', { name: '设置', exact: true }).count() === 0;
 await page.getByRole('button', { name: 'Agent 创建', exact: true }).click();
 const pluginShellCreateVisible = await page.locator('.dash-plugin-shell-create').isVisible()
@@ -882,6 +915,13 @@ const mobileNotificationFitsViewport = await page.locator('.dash-notification-po
 });
 await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications-mobile.png'), fullPage: false });
 await page.locator('.dash-notification-popover').getByRole('button', { name: '关闭', exact: true }).click();
+await page.getByRole('button', { name: '插件', exact: true }).click();
+await page.locator('.dash-plugin-workspace').waitFor({ state: 'visible', timeout: 8_000 });
+await page.getByRole('tab', { name: '插件市场', exact: true }).click();
+const mobilePluginMarketNoOverflow = await page.evaluate(() => document.body.scrollWidth <= innerWidth + 1);
+const mobilePluginMarketUsable = await page.locator('.dash-plugin-market-search').isVisible()
+  && await page.locator('.dash-plugin-market-grid').isVisible();
+await page.screenshot({ path: resolve(outputDir, 'dashboard-plugin-market-mobile.png'), fullPage: false });
 await page.getByRole('button', { name: 'Agent Nexus', exact: true }).click();
 await page.locator('.dash-workflow-studio').waitFor({ state: 'visible', timeout: 8_000 });
 const mobileWorkflowLayout = await layout(page);
@@ -987,6 +1027,11 @@ const assertions = {
   pluginDeleteWarnsIrreversible,
   pluginRefreshSettles,
   pluginRefreshUsesSingleRequest: pluginRefreshIsSingleRequest,
+  pluginMarketTabsVisible,
+  pluginPendingReviewVisible,
+  pluginMarketEmptyState,
+  mobilePluginMarketNoOverflow,
+  mobilePluginMarketUsable,
   chatArtifactKindsRender: artifactKindsRender,
   chatArtifactActionsAvailable: artifactActionsAvailable,
   chatArtifactFramesAreOpaque: artifactFramesAreOpaque,
@@ -1097,6 +1142,9 @@ if (Object.values(assertions).some((passed) => !passed)) process.exitCode = 1;
   }
   if (qaPluginId) {
     await fetch(`${baseUrl}/api/plugins/${encodeURIComponent(qaPluginId)}`, { method: 'DELETE', headers: qaHeaders }).catch(() => undefined);
+  }
+  if (qaMarketPluginId) {
+    await fetch(`${baseUrl}/api/plugins/${encodeURIComponent(qaMarketPluginId)}`, { method: 'DELETE', headers: qaHeaders }).catch(() => undefined);
   }
   if (qaWorkflowId) {
     await fetch(`${baseUrl}/api/workflows/${encodeURIComponent(qaWorkflowId)}`, { method: 'DELETE', headers: qaHeaders }).catch(() => undefined);

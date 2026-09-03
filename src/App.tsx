@@ -39,9 +39,9 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { streamAgentResponse } from './lib/agentStream';
 import { generateImage, readImageAsDataUrl } from './lib/imageGeneration';
-import { approveWorkflowPlan, approveWorkflowReview, approveWorkflowTool, cancelWorkflowTask, controlWorkflowNode, createWorkflowTask, deleteWorkflowTask, getWorkflowArtifact, getWorkflowTask, listWorkflowTasks, pauseWorkflowTask, rejectWorkflowPlan, rejectWorkflowReview, rejectWorkflowTool, replanWorkflowTask, resumeWorkflowTask, retryWorkflowTask, sendTaskGuidance, sendTaskNote, streamWorkflowEvents } from './lib/taskRuntime';
+import { approveWorkflowPlan, approveWorkflowReview, approveWorkflowTool, cancelWorkflowTask, controlWorkflowNode, createWorkflowTask, deleteWorkflowTask, getCurrentPrincipal, getWorkflowArtifact, getWorkflowTask, listWorkflowTasks, pauseWorkflowTask, rejectWorkflowPlan, rejectWorkflowReview, rejectWorkflowTool, replanWorkflowTask, resumeWorkflowTask, retryWorkflowTask, sendTaskGuidance, sendTaskNote, streamWorkflowEvents } from './lib/taskRuntime';
 import { createTemplateFromCatalog, exportWorkflowTemplate, importWorkflowTemplate, listBuiltInTemplates, listWorkflowTemplates, publishWorkflowTemplate, shareWorkflowTemplate } from './lib/templateRuntime';
-import { createPlugin, deletePlugin as deleteUserPluginRequest, inspectPluginCompatibility, launchMiniApp, listPlugins, publishPlugin, rollbackPlugin, runPlugin, streamPluginWithAgent, updatePlugin } from './lib/pluginRuntime';
+import { createPlugin, deletePlugin as deleteUserPluginRequest, inspectPluginCompatibility, installPlugin, launchMiniApp, listPluginMarketplace, listPluginMarketSubmissions, listPluginReviewQueue, listPlugins, publishPlugin, reviewPluginMarketRelease, revokePluginMarketRelease, rollbackPlugin, runPlugin, streamPluginWithAgent, submitPluginToMarket, uninstallPlugin, updatePlugin, upgradePlugin } from './lib/pluginRuntime';
 import { loadUiTheme, type UiTheme } from './lib/uiTheme';
 import { agentDisplayName } from './lib/agentPresentation';
 import { MiniAppWindow, type MiniAppAgentProgress } from './components/plugins/MiniAppWindow';
@@ -72,6 +72,8 @@ import type {
   WorkflowTaskStatus,
   WorkflowTaskSummary,
   UserPlugin,
+  PluginMarketEntry,
+  PluginMarketRelease,
   PluginVisualEffect,
   TopologyAgent,
   Usage,
@@ -737,6 +739,10 @@ function App() {
   const [pluginBusy, setPluginBusy] = useState(false);
   const [pluginError, setPluginError] = useState<string | null>(null);
   const [userPlugins, setUserPlugins] = useState<UserPlugin[]>([]);
+  const [pluginMarket, setPluginMarket] = useState<PluginMarketEntry[]>([]);
+  const [pluginMarketSubmissions, setPluginMarketSubmissions] = useState<PluginMarketRelease[]>([]);
+  const [pluginReviewQueue, setPluginReviewQueue] = useState<PluginMarketRelease[]>([]);
+  const [currentPrincipal, setCurrentPrincipal] = useState<{ userId: string; role: string }>({ userId: 'local-user', role: 'member' });
   const [selectedPlugin, setSelectedPlugin] = useState<UserPlugin | null>(null);
   const [miniAppPlugin, setMiniAppPlugin] = useState<UserPlugin | null>(null);
 
@@ -838,6 +844,14 @@ function App() {
       gsap.from('.workspace-animate', { opacity: 0, duration: 0.6, delay: 0.14 });
     });
     return () => context.revert();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getCurrentPrincipal(controller.signal)
+      .then((principal) => setCurrentPrincipal({ userId: principal.userId, role: principal.role }))
+      .catch(() => undefined);
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -1203,9 +1217,18 @@ function App() {
     if (pluginRefreshInFlightRef.current) return pluginRefreshInFlightRef.current;
     setPluginBusy(true);
     setPluginError(null);
-    const request: Promise<void> = listPlugins()
-      .then((plugins) => {
+    const canReview = currentPrincipal.role === 'owner' || currentPrincipal.role === 'admin';
+    const request: Promise<void> = Promise.all([
+      listPlugins(),
+      listPluginMarketplace(),
+      listPluginMarketSubmissions(),
+      canReview ? listPluginReviewQueue() : Promise.resolve([] as PluginMarketRelease[]),
+    ])
+      .then(([plugins, market, submissions, reviews]) => {
         setUserPlugins(plugins);
+        setPluginMarket(market);
+        setPluginMarketSubmissions(submissions);
+        setPluginReviewQueue(reviews);
         setPluginError(null);
       })
       .catch((caught) => {
@@ -1218,6 +1241,19 @@ function App() {
       });
     pluginRefreshInFlightRef.current = request;
     return request;
+  }, [currentPrincipal.role]);
+
+  const searchPluginMarket = useCallback(async (query: string) => {
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      setPluginMarket(await listPluginMarketplace(query));
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件市场暂时不可用'));
+      throw caught;
+    } finally {
+      setPluginBusy(false);
+    }
   }, []);
 
   const createUserPluginShell = useCallback(async () => {
@@ -1370,6 +1406,96 @@ function App() {
       setPluginBusy(false);
     }
   }, [pluginBusy]);
+
+  const submitUserPluginToMarket = useCallback(async (plugin: UserPlugin) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await submitPluginToMarket(plugin.id);
+      await refreshPlugins();
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件提交审核失败'));
+      throw caught;
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy, refreshPlugins]);
+
+  const reviewUserPluginMarket = useCallback(async (release: PluginMarketRelease, decision: 'approved' | 'rejected', note: string) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await reviewPluginMarketRelease(release.pluginId, release.pluginVersion, decision, note);
+      await refreshPlugins();
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件审核失败'));
+      throw caught;
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy, refreshPlugins]);
+
+  const installUserPlugin = useCallback(async (entry: PluginMarketEntry) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await installPlugin(entry.release.pluginId);
+      await refreshPlugins();
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件安装失败'));
+      throw caught;
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy, refreshPlugins]);
+
+  const upgradeUserPlugin = useCallback(async (entry: PluginMarketEntry) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await upgradePlugin(entry.release.pluginId);
+      await refreshPlugins();
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件升级失败'));
+      throw caught;
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy, refreshPlugins]);
+
+  const uninstallUserPlugin = useCallback(async (entry: PluginMarketEntry) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await uninstallPlugin(entry.release.pluginId);
+      await refreshPlugins();
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件卸载失败'));
+      throw caught;
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy, refreshPlugins]);
+
+  const revokeUserPluginMarket = useCallback(async (plugin: UserPlugin, version: number) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      await revokePluginMarketRelease(plugin.id, version, '发布方主动撤回');
+      await refreshPlugins();
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件撤回失败'));
+      throw caught;
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy, refreshPlugins]);
 
   const openUserMiniApp = useCallback(async (plugin: UserPlugin) => {
     if (pluginBusy) return;
@@ -3398,6 +3524,11 @@ function App() {
             onOpenPlugins={refreshPlugins}
             pluginWorkspace={<PluginWorkspace
               plugins={userPlugins}
+              marketEntries={pluginMarket}
+              marketSubmissions={pluginMarketSubmissions}
+              reviewQueue={pluginReviewQueue}
+              currentUserId={currentPrincipal.userId}
+              canReview={currentPrincipal.role === 'owner' || currentPrincipal.role === 'admin'}
               selectedPlugin={selectedPlugin}
               busy={pluginBusy}
               running={isRunning}
@@ -3412,6 +3543,13 @@ function App() {
               onSelect={(plugin) => { setSelectedPlugin(plugin); setPluginValues({}); }}
               onOpenMiniApp={(plugin) => { void openUserMiniApp(plugin); }}
               onPublish={(plugin) => { void publishUserPlugin(plugin); }}
+              onSubmitMarket={submitUserPluginToMarket}
+              onReviewMarket={reviewUserPluginMarket}
+              onInstall={installUserPlugin}
+              onUpgrade={upgradeUserPlugin}
+              onUninstall={uninstallUserPlugin}
+              onRevokeMarket={revokeUserPluginMarket}
+              onSearchMarket={searchPluginMarket}
               onCheckCompatibility={(plugin) => inspectPluginCompatibility(plugin.id)}
               onRollback={rollbackUserPlugin}
               onResize={resizeUserPluginWindow}

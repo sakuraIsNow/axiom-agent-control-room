@@ -1139,6 +1139,89 @@ test('mini-app launch reloads the current version and fails closed when release 
   }
 });
 
+test('plugin market requires admin review, pins installations, and blocks revoked releases', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  const plugins = new SqlitePluginStore(':memory:');
+  await store.initialize();
+  await plugins.initialize();
+  const api = createTaskApi({
+    store,
+    plugins,
+    hub: new EventHub(),
+    coordinator: { nudge() {}, abort() {} } as never,
+  });
+  const previousSecret = process.env.AXIOM_PRINCIPAL_SECRET;
+  process.env.AXIOM_PRINCIPAL_SECRET = 'plugin-market-test-secret';
+  const authorHeaders = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-market-api', 'x-axiom-user-id': 'publisher' };
+  const memberHeaders = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-market-api', 'x-axiom-user-id': 'member' };
+  const signedAdmin = signPrincipal({ tenantId: 'tenant-market-api', userId: 'admin', role: 'admin' });
+  const separator = signedAdmin.lastIndexOf('.');
+  const adminHeaders = {
+    'content-type': 'application/json',
+    'x-axiom-principal': signedAdmin.slice(0, separator),
+    'x-axiom-principal-signature': signedAdmin.slice(separator + 1),
+  };
+  try {
+    const createdResponse = await request(api, '/plugins', {
+      method: 'POST', headers: authorHeaders,
+      body: JSON.stringify({
+        name: '市场天气', description: '已审核天气小程序', kind: 'mini-app', visibility: 'team',
+        definition: { mode: 'analyze', htmlContent: '<!doctype html><html><body>weather v1</body></html>', toolNames: [] },
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { plugin: { id: string } };
+    assert.equal((await request(api, `/plugins/${created.plugin.id}/publish`, { method: 'POST', headers: authorHeaders })).status, 200);
+    const submitted = await request(api, `/plugins/${created.plugin.id}/market-submit`, { method: 'POST', headers: authorHeaders });
+    assert.equal(submitted.status, 202);
+    assert.equal(((await submitted.json()) as { release: { status: string } }).release.status, 'pending');
+
+    const deniedReview = await request(api, `/plugins/${created.plugin.id}/market-review`, {
+      method: 'POST', headers: memberHeaders, body: JSON.stringify({ version: 1, decision: 'approved' }),
+    });
+    assert.equal(deniedReview.status, 403);
+    const reviewQueue = await request(api, '/plugins/market/reviews', { headers: adminHeaders });
+    assert.equal(reviewQueue.status, 200);
+    assert.equal(((await reviewQueue.json()) as { releases: unknown[] }).releases.length, 1);
+    const approved = await request(api, `/plugins/${created.plugin.id}/market-review`, {
+      method: 'POST', headers: adminHeaders, body: JSON.stringify({ version: 1, decision: 'approved', note: '结构与权限已复核' }),
+    });
+    assert.equal(approved.status, 200);
+
+    const catalog = await request(api, '/plugins/market/catalog?q=天气', { headers: memberHeaders });
+    assert.equal(catalog.status, 200);
+    assert.equal(((await catalog.json()) as { entries: unknown[] }).entries.length, 1);
+    const install = await request(api, `/plugins/${created.plugin.id}/install`, { method: 'POST', headers: memberHeaders });
+    assert.equal(install.status, 201);
+    assert.equal(((await install.json()) as { installation: { pluginVersion: number } }).installation.pluginVersion, 1);
+
+    const authorEdit = await request(api, `/plugins/${created.plugin.id}`, {
+      method: 'PATCH', headers: authorHeaders,
+      body: JSON.stringify({ description: '尚未审核的 v2', definition: { mode: 'analyze', htmlContent: '<!doctype html><html><body>weather v2</body></html>', toolNames: [] } }),
+    });
+    assert.equal(authorEdit.status, 200);
+    const installedLaunch = await request(api, `/plugins/${created.plugin.id}/launch`, { method: 'POST', headers: memberHeaders });
+    assert.equal(installedLaunch.status, 200);
+    const launchBody = await installedLaunch.json() as { plugin: { version: number; description: string }; installed: boolean };
+    assert.equal(launchBody.plugin.version, 1);
+    assert.equal(launchBody.installed, true);
+
+    const revoked = await request(api, `/plugins/${created.plugin.id}/market-revoke`, {
+      method: 'POST', headers: authorHeaders, body: JSON.stringify({ version: 1, note: '发现质量问题' }),
+    });
+    assert.equal(revoked.status, 200);
+    const blockedLaunch = await request(api, `/plugins/${created.plugin.id}/launch`, { method: 'POST', headers: memberHeaders });
+    assert.equal(blockedLaunch.status, 409);
+    assert.match(((await blockedLaunch.json()) as { error: string }).error, /已被撤回/);
+    assert.equal((await request(api, `/plugins/${created.plugin.id}/install`, { method: 'DELETE', headers: memberHeaders })).status, 204);
+  } finally {
+    if (previousSecret === undefined) delete process.env.AXIOM_PRINCIPAL_SECRET;
+    else process.env.AXIOM_PRINCIPAL_SECRET = previousSecret;
+    await plugins.close();
+    await store.close();
+  }
+});
+
 test('mini-app builder SSE streams immediate status and progress before persisting a complete revision', async () => {
   const store = new SqliteTaskStore(':memory:');
   const plugins = new SqlitePluginStore(':memory:');

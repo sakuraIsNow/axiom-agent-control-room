@@ -1,4 +1,4 @@
-import type { AgentMode, ExecutionPolicy, PluginAppearance, PluginCompatibilityReport, PluginInputField, TextProviderSettings, UserPlugin, WorkflowTask } from '../types';
+import type { AgentMode, ExecutionPolicy, PluginAppearance, PluginCompatibilityReport, PluginInputField, PluginInstallation, PluginMarketEntry, PluginMarketRelease, TextProviderSettings, UserPlugin, WorkflowTask } from '../types';
 import { consumeSseBlocks } from './sse';
 
 const readJson = async <T>(response: Response, fallback: string) => {
@@ -11,6 +11,23 @@ export async function listPlugins(signal?: AbortSignal) {
   const response = await fetch('/api/plugins?limit=50', { signal });
   const body = await readJson<{ plugins?: UserPlugin[] }>(response, '插件列表读取失败');
   return body.plugins ?? [];
+}
+
+export async function listPluginMarketplace(query = '', signal?: AbortSignal) {
+  const params = new URLSearchParams({ limit: '50' });
+  if (query.trim()) params.set('q', query.trim());
+  const response = await fetch(`/api/plugins/market/catalog?${params}`, { signal });
+  return (await readJson<{ entries?: PluginMarketEntry[] }>(response, '插件市场读取失败')).entries ?? [];
+}
+
+export async function listPluginReviewQueue(signal?: AbortSignal) {
+  const response = await fetch('/api/plugins/market/reviews?limit=50', { signal });
+  return (await readJson<{ releases?: PluginMarketRelease[] }>(response, '插件审核队列读取失败')).releases ?? [];
+}
+
+export async function listPluginMarketSubmissions(signal?: AbortSignal) {
+  const response = await fetch('/api/plugins/market/submissions', { signal });
+  return (await readJson<{ releases?: PluginMarketRelease[] }>(response, '插件市场状态读取失败')).releases ?? [];
 }
 
 export async function createPlugin(input: {
@@ -96,6 +113,43 @@ export async function inspectPluginCompatibility(pluginId: string) {
 export async function publishPlugin(pluginId: string) {
   const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/publish`, { method: 'POST' });
   return readJson<{ plugin: UserPlugin; report: PluginCompatibilityReport }>(response, '插件发布失败');
+}
+
+export async function submitPluginToMarket(pluginId: string) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/market-submit`, { method: 'POST' });
+  return readJson<{ release: PluginMarketRelease; report: PluginCompatibilityReport }>(response, '插件提交审核失败');
+}
+
+export async function reviewPluginMarketRelease(pluginId: string, version: number, decision: 'approved' | 'rejected', note = '') {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/market-review`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, decision, note }),
+  });
+  return (await readJson<{ release: PluginMarketRelease }>(response, '插件审核失败')).release;
+}
+
+export async function revokePluginMarketRelease(pluginId: string, version: number, note = '') {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/market-revoke`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version, note }),
+  });
+  return (await readJson<{ release: PluginMarketRelease }>(response, '插件撤回失败')).release;
+}
+
+export async function installPlugin(pluginId: string) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/install`, { method: 'POST' });
+  return readJson<{ installation: PluginInstallation; plugin: UserPlugin }>(response, '插件安装失败');
+}
+
+export async function upgradePlugin(pluginId: string) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/upgrade`, { method: 'POST' });
+  return readJson<{ installation: PluginInstallation; plugin: UserPlugin }>(response, '插件升级失败');
+}
+
+export async function uninstallPlugin(pluginId: string) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/install`, { method: 'DELETE' });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(body?.error ?? `插件卸载失败 (${response.status})`);
+  }
 }
 
 export async function rollbackPlugin(pluginId: string, version: number) {
