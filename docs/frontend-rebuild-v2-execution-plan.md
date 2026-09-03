@@ -287,7 +287,7 @@
 
 ## 11. 登录开屏页（P1.11，独立不阻塞其他批次）
 
-维持 `docs/dashboard-agentstudio-roadmap.md` Part C 的设计结论不变：纯视觉开屏页，不新增后端认证，鼠标响应网格背景 + 粒子化 logo（`particle-heart-main` 架构参考）。本文档不重复展开。
+**2026-09-03 生产易用性决策已替代本节。** 不再实现无认证的粒子登录开屏；现有 `FirstRunGuide` 只在服务端确认没有任务和会话后出现，并将用户直接带到对话、插件或 Agent Nexus。首次引导、刷新持久化、已有用户不误弹和移动端布局均已进入 `npm run qa:visual`。
 
 ---
 
@@ -299,10 +299,10 @@
 4. **Agent 拓扑彩带效果迁移**（第 5.3 节）——从废弃的 `AgentAvatar.tsx` 迁移进 `CinematicCore.tsx`。
 5. **右侧详情面板字段修正**（第 6 节）——按表格逐项替换，去掉编造字段，含"所属会话主题"派生逻辑。
 6. **首页统计丰富化，全部 4 项**（第 4.2 节）——按文档内建议顺序：平均任务时长 → 我的任务筛选 → Reviewer 通过率 → Token 趋势图（工作量递增）。
-7. **登录开屏页**（第 11 节）——独立进行，可与批次 2-6 穿插并行。
+7. **首次使用路径**（第 11 节）——已按工作区真实入口方案完成，旧登录开屏不再执行。
 8. **插件弹窗化完整版**（第 9 节）——mini-app 插件类型 + iframe 沙箱，独立模块，可与批次 6-7 并行（文件作用域基本不冲突：`pluginStore.ts`/`MiniAppWindow.tsx` vs Dashboard 组件树）。
 9. **Agent Studio Planner 接入**（第 8 节）——放最后，因为直接触碰核心调度路径（`orchestrator.ts`），需要在前面 8 个批次把新前端跑稳之后再动风险最高的部分；且 8.1-8.5 之间有严格的内部依赖顺序（先 schema 动态化，再 prompt 拼接，再工具权限，最后才是"Agent 创建 Agent"）。
-10. **剩余 douyin 素材**（第 10 节：morphicons/orb-main/tim-ai-assistant/particle-heart）——穿插在批次 7（登录页用得上 particle-heart/orb-main）和其他视觉批次之间，无强依赖顺序。
+10. **剩余 douyin 素材**（第 10 节：morphicons/orb-main/tim-ai-assistant/particle-heart）——按生产交互价值逐项评估；`particle-heart` 不接入生产首屏，`orb-main`/`tim-ai-assistant` 仍需有明确业务挂载点后再实施。
 
 ## 13. 验证要求
 

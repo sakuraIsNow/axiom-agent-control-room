@@ -80,4 +80,5 @@ export type DashboardProps = {
   textModelCredentialId?: string;
   onThemeChange: (theme: UiTheme) => void;
   principalUserId?: string;
+  onboardingReady: boolean;
 };

@@ -30,12 +30,13 @@ import { generateReport } from './reportExport.js';
 import { nextRunAtForCadence, scheduleCadenceSchema } from './scheduleCadence.js';
 import { fallbackScheduleDraft, parseScheduleDraft, scheduleAgentPrompt } from './scheduleAgent.js';
 import { checkpointsFromEvents, diffCheckpointToTask, mergeCheckpointBranch } from './checkpointRuntime.js';
-import { attachPersistedContextMetadata, buildPersistedContextSummary, type DurableContextSourceMessage } from './contextSummary.js';
+import { aggregateContextSummaryQuality, attachPersistedContextMetadata, buildPersistedContextSummary, type ContextWindowOptions, type DurableContextSourceMessage } from './contextSummary.js';
 import { buildOperationsAlerts } from './operationsAlerts.js';
 import { buildInAppNotifications } from './inAppNotifications.js';
 import { createPluginRelease, inspectPluginCompatibility } from './pluginCompatibility.js';
 import { buildScheduleInsights } from './scheduleInsights.js';
 import { breadthFirstThreadDescendants, buildHarnessThreadGraph } from './harnessThreadGraph.js';
+import { outboundNotificationKinds, type NotificationEndpointLocation, type OutboundNotificationManager } from './outboundNotifications.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -384,6 +385,20 @@ const notificationReadSchema = z.object({
   message: 'At least one notification id or all=true is required.',
 });
 
+const outboundEventKindSchema = z.enum(outboundNotificationKinds as [typeof outboundNotificationKinds[number], ...typeof outboundNotificationKinds]);
+const outboundChannelCreateSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  endpoint: z.string().trim().min(1).max(2_048),
+  signingSecret: z.string().trim().min(16).max(512),
+  location: z.enum(['internet', 'local']).default('internet'),
+  eventKinds: z.array(outboundEventKindSchema).min(1).max(outboundNotificationKinds.length),
+  enabled: z.boolean().default(true),
+}).strict();
+const outboundChannelPatchSchema = outboundChannelCreateSchema.partial().strict().refine(
+  (value) => Object.keys(value).length > 0,
+  'At least one channel field is required.',
+);
+
 const noteSchema = z.object({
   message: z.string().min(1).max(8_000),
 });
@@ -666,6 +681,7 @@ export const createTaskApi = (dependencies: {
   memory?: TencentMemoryClient;
   resolveModelCredential?: (credentialId: string, tenantId: string, userId: string) => Promise<{ id: string; model: string } | null>;
   harnessAdapter?: HarnessAdapter;
+  outboundNotifications?: OutboundNotificationManager;
 }) => {
   const api = new Hono();
   const { store, hub, coordinator } = dependencies;
@@ -692,6 +708,7 @@ export const createTaskApi = (dependencies: {
   const templates = dependencies.templates;
   const plugins = dependencies.plugins;
   const agents = dependencies.agents;
+  const outboundNotifications = dependencies.outboundNotifications;
   const pluginSigningKey = process.env.AXIOM_PLUGIN_SIGNING_KEY?.trim() || undefined;
   const pluginSignatureRequired = process.env.AXIOM_REQUIRE_PLUGIN_SIGNATURE === 'true';
   const inspectPlugin = (plugin: UserPlugin) => inspectPluginCompatibility(plugin, toolRegistry?.catalog() ?? [], {
@@ -1164,7 +1181,7 @@ export const createTaskApi = (dependencies: {
     }));
   void scheduler.ready().then(() => scheduler.start()).catch(() => undefined);
 
-  const notificationFeed = async (principal: ReturnType<typeof identity>) => {
+  const notificationProjection = async (principal: Pick<ReturnType<typeof identity>, 'tenantId' | 'userId'>) => {
     const [tenantTasks, schedules, artifactCleanup] = await Promise.all([
       store.listTasks(principal.tenantId, 100),
       scheduler.list(principal.tenantId),
@@ -1172,20 +1189,25 @@ export const createTaskApi = (dependencies: {
     ]);
     const tasks = tenantTasks.filter((task) => task.userId === principal.userId);
     const eventSummaries = await store.getTaskEventSummaries(tasks.map((task) => task.id), principal.tenantId);
-    const source = {
+    return buildInAppNotifications({
       tasks,
       eventSummaries,
       schedules: schedules.filter((schedule) => schedule.userId === principal.userId),
       artifactCleanup,
-    };
-    const unreadProjection = buildInAppNotifications(source);
+    });
+  };
+
+  const notificationFeed = async (principal: ReturnType<typeof identity>) => {
+    const unreadProjection = await notificationProjection(principal);
+    await outboundNotifications?.reconcileScope(principal.tenantId, principal.userId, unreadProjection);
     const readIds = new Set(await store.getReadNotificationIds(
       principal.tenantId,
       principal.userId,
       unreadProjection.map((item) => item.id),
     ));
-    return buildInAppNotifications({ ...source, readIds });
+    return unreadProjection.map((item) => ({ ...item, read: readIds.has(item.id) }));
   };
+  outboundNotifications?.setSource((tenantId, userId) => notificationProjection({ tenantId, userId }));
 
   const pluginPrompt = (plugin: UserPlugin, rawInput: string, values: Record<string, string | number> | undefined) => {
     const fields = plugin.definition.inputSchema?.fields ?? [];
@@ -2014,11 +2036,19 @@ export const createTaskApi = (dependencies: {
   api.get('/runtime/stats', (c) => c.json(metrics?.snapshot() ?? null));
 
   api.get('/runtime/operations', async (c) => {
-    const { tenantId } = identity(c.req.raw.headers);
+    const { tenantId, userId } = identity(c.req.raw.headers);
     const requestedHours = Number(c.req.query('hours') ?? 24);
     const hours = Number.isFinite(requestedHours) ? Math.min(168, Math.max(1, Math.floor(requestedHours))) : 24;
-    const snapshot = await store.getOperationsSnapshot(tenantId, hours);
-    return c.json({ ...snapshot, ...(artifactCatalog ? { artifacts: await artifactCatalog.stats(tenantId) } : {}) });
+    const [snapshot, sessions, artifactStats] = await Promise.all([
+      store.getOperationsSnapshot(tenantId, hours),
+      store.listSessions(tenantId, userId, 500),
+      artifactCatalog ? artifactCatalog.stats(tenantId) : undefined,
+    ]);
+    return c.json({
+      ...snapshot,
+      contextSummaries: aggregateContextSummaryQuality(sessions.map((session) => session.contextSummary)),
+      ...(artifactStats ? { artifacts: artifactStats } : {}),
+    });
   });
 
   api.get('/runtime/alerts', async (c) => {
@@ -2803,6 +2833,92 @@ export const createTaskApi = (dependencies: {
     });
   });
 
+  api.get('/notification-channels', async (c) => {
+    if (!outboundNotifications) return c.json({ error: '外发通知服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const [channels, deliveries] = await Promise.all([
+      outboundNotifications.store.listChannels(principal.tenantId, principal.userId),
+      outboundNotifications.store.listDeliveries(principal.tenantId, principal.userId, 60),
+    ]);
+    return c.json({ channels, deliveries, supportedEventKinds: outboundNotificationKinds });
+  });
+
+  api.post('/notification-channels', async (c) => {
+    if (!outboundNotifications) return c.json({ error: '外发通知服务尚未初始化。' }, 503);
+    const parsed = outboundChannelCreateSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '通知渠道配置无效。', details: parsed.error.flatten() }, 400);
+    const principal = identity(c.req.raw.headers);
+    if (parsed.data.location === 'local' && process.env.NODE_ENV === 'production' && !['owner', 'admin'].includes(principal.role)) {
+      return c.json({ error: '正式环境只有管理员可以配置本地网络通知。' }, 403);
+    }
+    try {
+      const channel = await outboundNotifications.store.saveChannel({ ...parsed.data, tenantId: principal.tenantId, userId: principal.userId });
+      await outboundNotifications.reconcileScope(principal.tenantId, principal.userId);
+      return c.json({ channel }, 201);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '通知渠道保存失败。' }, 400);
+    }
+  });
+
+  api.patch('/notification-channels/:channelId', async (c) => {
+    if (!outboundNotifications) return c.json({ error: '外发通知服务尚未初始化。' }, 503);
+    const parsed = outboundChannelPatchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '通知渠道配置无效。', details: parsed.error.flatten() }, 400);
+    const principal = identity(c.req.raw.headers);
+    const channelId = c.req.param('channelId');
+    const current = await outboundNotifications.store.getChannel(channelId, principal.tenantId, principal.userId);
+    if (!current) return c.json({ error: '通知渠道不存在。' }, 404);
+    const location = parsed.data.location ?? current.location;
+    if (location === 'local' && process.env.NODE_ENV === 'production' && !['owner', 'admin'].includes(principal.role)) {
+      return c.json({ error: '正式环境只有管理员可以配置本地网络通知。' }, 403);
+    }
+    try {
+      const channel = await outboundNotifications.store.saveChannel({
+        tenantId: principal.tenantId,
+        userId: principal.userId,
+        name: parsed.data.name ?? current.name,
+        endpoint: parsed.data.endpoint ?? current.endpoint,
+        signingSecret: parsed.data.signingSecret ?? current.signingSecret,
+        location,
+        eventKinds: parsed.data.eventKinds ?? current.eventKinds,
+        enabled: parsed.data.enabled ?? current.enabled,
+      }, channelId);
+      await outboundNotifications.reconcileScope(principal.tenantId, principal.userId);
+      return c.json({ channel });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '通知渠道保存失败。' }, 400);
+    }
+  });
+
+  api.delete('/notification-channels/:channelId', async (c) => {
+    if (!outboundNotifications) return c.json({ error: '外发通知服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const deleted = await outboundNotifications.store.deleteChannel(c.req.param('channelId'), principal.tenantId, principal.userId);
+    return deleted ? c.body(null, 204) : c.json({ error: '通知渠道不存在。' }, 404);
+  });
+
+  api.post('/notification-channels/:channelId/test', async (c) => {
+    if (!outboundNotifications) return c.json({ error: '外发通知服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    try {
+      const delivery = await outboundNotifications.enqueueTest(c.req.param('channelId'), principal.tenantId, principal.userId);
+      return delivery ? c.json({ delivery }) : c.json({ error: '测试投递没有生成审计记录。' }, 500);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '测试通知发送失败。' }, 409);
+    }
+  });
+
+  api.post('/notification-deliveries/:deliveryId/retry', async (c) => {
+    if (!outboundNotifications) return c.json({ error: '外发通知服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const deliveryId = c.req.param('deliveryId');
+    const queued = await outboundNotifications.store.retry(deliveryId, principal.tenantId, principal.userId);
+    if (!queued) return c.json({ error: '只有当前用户的死信投递可以重试。' }, 409);
+    await outboundNotifications.flush(20, deliveryId);
+    const delivery = await outboundNotifications.store.getDelivery(deliveryId, principal.tenantId, principal.userId);
+    return c.json({ delivery });
+  });
+
   api.get('/tasks', async (c) => {
     const { tenantId } = identity(c.req.raw.headers);
     const requestedLimit = Number(c.req.query('limit') ?? 50);
@@ -2922,23 +3038,28 @@ export const createTaskApi = (dependencies: {
     const { tenantId, userId } = identity(c.req.raw.headers);
     try {
       const previous = (await store.listSessions(tenantId, userId, 100)).find((session) => session.id === sessionId);
+      const contextWindowOptions: ContextWindowOptions = {
+        recentMessages: 12,
+        triggerMessages: 16,
+        maxMessages: 24,
+        maxCharacters: 48_000,
+        maxSummaryCharacters: 8_000,
+        maxTokens: Math.max(512, Number(process.env.AXIOM_CONTEXT_MAX_TOKENS ?? 12_000)),
+        tokenizerName: 'axiom-estimate-v2',
+        tokenizerMode: 'estimated',
+      };
       let contextSummary = buildPersistedContextSummary(
         sessionId,
         parsed.data.messages as DurableContextSourceMessage[],
         previous?.contextSummary,
-        {
-          recentMessages: 12,
-          triggerMessages: 16,
-          maxMessages: 24,
-          maxCharacters: 48_000,
-          maxSummaryCharacters: 8_000,
-          maxTokens: Math.max(512, Number(process.env.AXIOM_CONTEXT_MAX_TOKENS ?? 12_000)),
-        },
+        contextWindowOptions,
       );
       if (contextSummary) {
         contextSummary = attachPersistedContextMetadata(
           contextSummary,
           await contextSummaryMetadata(tenantId, userId, sessionId, parsed.data.messages, contextSummary.coveredMessageIds),
+          8_000,
+          contextWindowOptions,
         );
       }
       const session = await store.upsertSession(tenantId, userId, {

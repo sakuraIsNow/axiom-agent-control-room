@@ -19,6 +19,7 @@ import { OperationsConsole } from './OperationsConsole';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { ReviewConfirmDialog } from './ReviewConfirmDialog';
 import { NotificationCenter } from './NotificationCenter';
+import { FirstRunGuide } from './FirstRunGuide';
 import { groupTaskRuns } from '../../lib/taskGrouping';
 import type { DashboardProps } from './dashboardTypes';
 import { ThemePicker } from '../ThemePicker';
@@ -27,6 +28,7 @@ import '../../styles/dashboard.css';
 
 const commandSendIcon = 'M5 12h14M13 6l6 6-6 6';
 const commandStopIcon = 'M7 7h10v10H7Z';
+const ONBOARDING_KEY = 'axiom-onboarding-seen-v2';
 
 const modeLabel: Record<DashboardProps['mode'], string> = { analyze: '分析', build: '构建', decide: '决策' };
 
@@ -37,7 +39,7 @@ export function AxiomDashboard(props: DashboardProps) {
     selectedNodeId, onSelectAgent, taskProfile, reviewResult, reviewApprovalTaskId, reviewNote, reviewActionBusy,
     onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, onRefreshTasks, sessionId,
     sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, textModelCredentialId, theme, onThemeChange, principalUserId: principalUserIdProp,
-    attachments, onAddAttachments, onRemoveAttachment,
+    attachments, onAddAttachments, onRemoveAttachment, onboardingReady,
   } = props;
   const nav = useDashboardStore((state) => state.nav);
   const selectedTaskId = useDashboardStore((state) => state.selectedTaskId);
@@ -49,6 +51,7 @@ export function AxiomDashboard(props: DashboardProps) {
   const [pendingDelete, setPendingDelete] = useState<{ kind: 'task' | 'session'; id: string; taskIds?: string[] } | null>(null);
   const [pendingReviewAction, setPendingReviewAction] = useState<'approve' | 'reject' | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [onboardingSeen, setOnboardingSeen] = useState(() => localStorage.getItem(ONBOARDING_KEY) === '1');
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const workflowMainRef = useRef<HTMLElement | null>(null);
   const urlTaskOpenedRef = useRef(false);
@@ -138,9 +141,23 @@ export function AxiomDashboard(props: DashboardProps) {
   const notificationRefreshKey = taskCatalog.length > 0
     ? `${taskCatalog.length}:${taskCatalog[0]?.id}:${taskCatalog[0]?.status}:${taskCatalog[0]?.updatedAt}`
     : 'empty';
+  const dismissOnboarding = () => {
+    localStorage.setItem(ONBOARDING_KEY, '1');
+    setOnboardingSeen(true);
+  };
   const openNewConversation = () => {
+    dismissOnboarding();
     onNewTask();
     setNav('chat');
+  };
+  const navigateFromDashboard = (destination: Parameters<typeof setNav>[0]) => {
+    dismissOnboarding();
+    setNav(destination);
+  };
+  const selectOnboardingWorkspace = (destination: 'chat' | 'plugins' | 'workflows') => {
+    dismissOnboarding();
+    if (destination === 'chat') openNewConversation();
+    else setNav(destination);
   };
   const sendFromDashboard = () => {
     if (!draft.trim()) return;
@@ -172,6 +189,8 @@ export function AxiomDashboard(props: DashboardProps) {
       : await onRejectReview();
     if (succeeded) setPendingReviewAction(null);
   };
+  const hasUserHistory = taskCatalog.length > 0 || sessions.some((session) => session.messages.length > 0 || Boolean(session.activeTaskId));
+  const showOnboarding = onboardingReady && nav === 'tasks' && !onboardingSeen && !hasUserHistory;
 
   return <main className="axiom-dashboard" data-theme={theme} data-readiness={readiness}>
     <header className="dash-header">
@@ -193,7 +212,7 @@ export function AxiomDashboard(props: DashboardProps) {
       </div>
     </header>
     <div ref={layoutRef} className={`dash-layout ${nav === 'chat' ? 'chat-active' : nav === 'plugins' ? 'plugins-active' : nav === 'templates' ? 'templates-active' : nav === 'workflows' ? 'workflows-active' : nav === 'operations' ? 'operations-active' : ''}`}>
-      <DashboardNavRail nav={nav} onNav={setNav} onNewTask={openNewConversation} />
+      <DashboardNavRail nav={nav} onNav={navigateFromDashboard} onNewTask={openNewConversation} />
       {nav === 'templates' ? <section className="dash-main dash-main-templates">{templateWorkspace}</section>
         : nav === 'plugins' ? <section className="dash-main dash-main-plugins">{pluginWorkspace}</section>
         : nav === 'workflows' ? <section ref={workflowMainRef} className="dash-main dash-main-workflows"><WorkflowStudio /></section>
@@ -279,6 +298,11 @@ export function AxiomDashboard(props: DashboardProps) {
         />
       </>}
     </div>
+    {showOnboarding && <FirstRunGuide
+      onStartConversation={() => selectOnboardingWorkspace('chat')}
+      onOpenWorkspace={selectOnboardingWorkspace}
+      onDismiss={dismissOnboarding}
+    />}
     {pendingDelete && <DeleteConfirmDialog busy={deleteBusy} onCancel={() => setPendingDelete(null)} onConfirm={() => { void confirmDelete(); }} />}
     {pendingReviewAction && <ReviewConfirmDialog action={pendingReviewAction} note={reviewNote} busy={reviewActionBusy} onCancel={() => setPendingReviewAction(null)} onConfirm={() => { void confirmReview(); }} />}
   </main>;

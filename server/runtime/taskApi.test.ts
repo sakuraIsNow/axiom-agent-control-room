@@ -1992,10 +1992,19 @@ test('persists versioned context summaries with task artifacts and human-control
     const firstSummary = (await saved.json() as { session: { contextSummary?: import('./contextSummary.js').PersistedContextSummary } }).session.contextSummary;
     assert.ok(firstSummary);
     assert.equal(firstSummary.version, 1);
+    assert.equal(firstSummary.quality?.lastAction, 'created');
+    assert.equal(firstSummary.quality?.tokenizer.mode, 'estimated');
+    assert.notEqual(firstSummary.quality?.compressionPercent, null);
     assert.ok(firstSummary.artifactIds.includes('step-result:context:analysis:abc'));
     assert.equal(firstSummary.approvalEventIds.length, 1);
     assert.match(firstSummary.content, /人工要求：保留迁移兼容性/);
     assert.match(firstSummary.content, /未完成事项/);
+    const operationsResponse = await request(firstApi, '/runtime/operations?hours=24', { headers });
+    assert.equal(operationsResponse.status, 200);
+    const contextOperations = (await operationsResponse.json() as { contextSummaries: { summaries: number; estimatedSummaries: number; compressionPercent: number | null } }).contextSummaries;
+    assert.equal(contextOperations.summaries, 1);
+    assert.equal(contextOperations.estimatedSummaries, 1);
+    assert.notEqual(contextOperations.compressionPercent, null);
     await firstStore.close();
     firstStore = undefined;
 
@@ -2015,6 +2024,7 @@ test('persists versioned context summaries with task artifacts and human-control
     });
     const secondSummary = (await updated.json() as { session: { contextSummary?: import('./contextSummary.js').PersistedContextSummary } }).session.contextSummary;
     assert.equal(secondSummary?.version, 2);
+    assert.equal(secondSummary?.quality?.lastAction, 'incremental');
     assert.ok((secondSummary?.coveredMessageIds.length ?? 0) > firstSummary.coveredMessageIds.length);
   } finally {
     await firstStore?.close();

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { agentCatalog, appendMissingAgentDirectory, workerAgents } from './agentCatalog.js';
+import { agentCatalog, appendMissingAgentDirectory, supplementAgentDirectoryResponse, workerAgents } from './agentCatalog.js';
 
 test('agent catalog reports registered roles separately from schedulable workers', () => {
   assert.equal(agentCatalog.length, 6);
@@ -32,4 +32,27 @@ test('live directory supplement fills omitted built-in and published custom Agen
 test('live directory supplement can answer an empty model response without a static fallback', () => {
   const result = appendMissingAgentDirectory('', [{ id: 'custom-review', roleId: 'custom-review', name: '合规审查员' }]);
   assert.equal(result, '实时目录补充：合规审查员。');
+});
+
+test('capability response supplements a live configured status when the model only uses an internal id', () => {
+  const result = supplementAgentDirectoryResponse('你有联网搜索的能力吗', '可以通过 search-agent 完成。', [
+    { id: 'search-agent', label: '联网搜索 Agent', available: true },
+    { id: 'vision-agent', label: '视觉分析 Agent', available: true },
+  ]);
+  assert.match(result, /已配置联网搜索/);
+  assert.match(result, /联网搜索 Agent/);
+  assert.doesNotMatch(result, /视觉分析 Agent/);
+  assert.match(result, /实际执行时再次验证/);
+});
+
+test('capability response preserves unavailable state when model wording is empty or uses a synonym', () => {
+  const empty = supplementAgentDirectoryResponse('能联网检索吗', '', [
+    { id: 'search-agent', label: '联网搜索 Agent', available: false },
+  ]);
+  assert.equal(empty, '实时能力状态：联网搜索尚未配置，联网搜索 Agent当前不可用。');
+
+  const synonym = supplementAgentDirectoryResponse('支持网络搜索功能吗', '支持检索。', [
+    { id: 'search-agent', label: '联网搜索 Agent', available: true },
+  ]);
+  assert.match(synonym, /支持检索。\n\n实时能力状态：已配置联网搜索/);
 });

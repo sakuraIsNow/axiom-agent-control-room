@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attachPersistedContextMetadata, buildContextWindow, buildPersistedContextSummary, estimateTokens, messageText, summarizeMessages, validatePersistedContextSummary, type ContextMessage, type DurableContextSourceMessage } from './contextSummary.js';
+import { aggregateContextSummaryQuality, attachPersistedContextMetadata, buildContextWindow, buildPersistedContextSummary, estimateTokens, messageText, summarizeMessages, validatePersistedContextSummary, type ContextMessage, type DurableContextSourceMessage } from './contextSummary.js';
 
 const turn = (role: ContextMessage['role'], content: string): ContextMessage => ({ role, content });
 
@@ -109,8 +109,17 @@ test('persistent summaries update incrementally and rebuild when a covered sourc
   const first = buildPersistedContextSummary('session-context', messages);
   assert.ok(first);
   assert.equal(first.version, 1);
+  assert.equal(first.quality?.lastAction, 'created');
+  assert.equal(first.quality?.tokenizer.mode, 'estimated');
+  assert.notEqual(first.quality?.compressionPercent, null);
   assert.equal(validatePersistedContextSummary(first, messages), true);
   assert.ok(first.coveredMessageIds.length > 0);
+
+  const reused = buildPersistedContextSummary('session-context', messages, first!);
+  assert.ok(reused);
+  assert.equal(reused.version, 1);
+  assert.equal(reused.quality?.lastAction, 'reused');
+  assert.equal(reused.quality?.reuseCount, 1);
 
   const appended = [
     ...messages,
@@ -123,6 +132,8 @@ test('persistent summaries update incrementally and rebuild when a covered sourc
   const second = buildPersistedContextSummary('session-context', appended, first!);
   assert.ok(second);
   assert.equal(second.version, 2);
+  assert.equal(second.quality?.lastAction, 'incremental');
+  assert.equal(second.quality?.incrementalCount, 1);
   assert.ok(second.coveredMessageIds.length > first!.coveredMessageIds.length);
   assert.equal(validatePersistedContextSummary(second, appended), true);
 
@@ -131,6 +142,8 @@ test('persistent summaries update incrementally and rebuild when a covered sourc
   const rebuilt = buildPersistedContextSummary('session-context', tampered, second!);
   assert.ok(rebuilt);
   assert.equal(rebuilt.version, 3);
+  assert.equal(rebuilt.quality?.lastAction, 'rebuilt');
+  assert.equal(rebuilt.quality?.rebuildCount, 1);
   assert.notEqual(rebuilt.sourceDigest, second!.sourceDigest);
   assert.equal(validatePersistedContextSummary(rebuilt, tampered), true);
 });
@@ -151,4 +164,36 @@ test('persistent summary metadata retains artifacts, approvals, human facts, and
   assert.match(enriched.content, /人工要求/);
   assert.match(enriched.content, /Agent 冲突/);
   assert.match(enriched.content, /未完成事项/);
+  assert.equal(enriched.quality?.summaryCharacters, enriched.content.length);
+});
+
+test('summary quality aggregation reports compression, reuse, rebuilds, and tokenizer trust', () => {
+  const messages = Array.from({ length: 20 }, (_, index): DurableContextSourceMessage => ({
+    id: `quality-${index}`,
+    role: index % 2 ? 'assistant' : 'user',
+    content: `quality message ${index} ${'repeat '.repeat(24)}`,
+  }));
+  const tokenizer = (text: string) => text.split(/\s+/u).filter(Boolean).length;
+  const first = buildPersistedContextSummary('quality-session', messages, undefined, {
+    tokenizer,
+    tokenizerName: 'provider-test-tokenizer',
+    tokenizerMode: 'exact',
+    maxSummaryCharacters: 320,
+  });
+  assert.ok(first?.quality);
+  const reused = buildPersistedContextSummary('quality-session', messages, first!, {
+    tokenizer,
+    tokenizerName: 'provider-test-tokenizer',
+    tokenizerMode: 'exact',
+    maxSummaryCharacters: 320,
+  });
+  assert.ok(reused?.quality);
+  const aggregated = aggregateContextSummaryQuality([reused, undefined]);
+  assert.equal(aggregated.summaries, 1);
+  assert.equal(aggregated.exactSummaries, 1);
+  assert.equal(aggregated.estimatedSummaries, 0);
+  assert.deepEqual(aggregated.tokenizerNames, ['provider-test-tokenizer']);
+  assert.equal(aggregated.reuseCount, 1);
+  assert.equal(aggregated.reuseRate, 50);
+  assert.ok((aggregated.compressionPercent ?? 0) > 0);
 });

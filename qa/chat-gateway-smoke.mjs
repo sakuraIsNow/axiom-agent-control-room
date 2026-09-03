@@ -47,8 +47,15 @@ try {
     if (event !== 'token' || !raw) return [];
     try { return [JSON.parse(raw).content || '']; } catch { return []; }
   }).join('');
-  if (!capabilityResponse.ok || !/联网搜索|搜索能力/.test(capabilityText) || !capabilityOutput.includes('"agentRole":"registry-agent"') || capabilityOutput.includes('fetch failed')) {
-    throw new Error(`search capability smoke failed: status=${capabilityResponse.status}`);
+  const capabilityChecks = {
+    status: capabilityResponse.status,
+    chineseCapability: /联网搜索|联网检索|网络搜索|搜索能力/.test(capabilityText),
+    liveStatus: /实时能力状态/.test(capabilityText),
+    registryRole: capabilityOutput.includes('"agentRole":"registry-agent"'),
+    upstreamFailureLeaked: capabilityOutput.includes('fetch failed'),
+  };
+  if (!capabilityResponse.ok || !capabilityChecks.chineseCapability || !capabilityChecks.liveStatus || !capabilityChecks.registryRole || capabilityChecks.upstreamFailureLeaked) {
+    throw new Error(`search capability smoke failed: ${JSON.stringify({ ...capabilityChecks, text: capabilityText.slice(-500) })}`);
   }
   console.log(JSON.stringify({ ok: true, multimodal: observedImage, markdownToken: true, searchCapability: true }));
 } finally {

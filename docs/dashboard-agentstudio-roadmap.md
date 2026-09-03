@@ -158,6 +158,8 @@ src/styles/
 
 ## Part C：登录开屏页
 
+> **2026-09-03 决策更新：本节方案已废弃。** 纯视觉开屏不承担认证，也会延迟用户完成第一项工作。生产入口现采用 `src/components/dashboard/FirstRunGuide.tsx`：只有服务端任务和会话均成功确认为空时才在真实任务台中显示“对话 / 插件 / Agent Nexus”三个入口；已有用户和读取失败场景不显示。下面内容仅保留为历史设计记录，不再进入执行计划。
+
 纯视觉开屏页，**不新增任何后端认证逻辑**（后端现状核实：`server/index.ts` 只有 `AXIOM_API_KEY` 服务间调用和反向代理注入的签名 principal 两种身份来源，`server/runtime/principal.ts` 是 HMAC 签名校验，完全没有用户名/密码/session 概念）。任意输入或点击即可进入，状态存 `localStorage`。
 
 - 鼠标响应网格背景：Canvas/WebGL 实现，网格顶点位移随鼠标接近度衰减扭曲（业界成熟技法）。**已尝试 `WebFetch` 访问 DeepSeek Harness 官网核实实际效果，被环境安全策略拦截；`WebSearch` 也未找到可靠的第三方描述**，因此不基于无法核实的具体网站细节，独立设计。
@@ -187,7 +189,7 @@ src/styles/
 2. **Dashboard 布局骨架 + 列表态**：`AxiomDashboard`/`DashboardNavRail`/`StatCards`/`TaskBoard`/`graphLayers.ts`/`graphPresentation.ts`/`TaskDetailPanel` 基础版。完成后跑 `visual-qa.mjs` 新断言，是后续批次地基，必须单独验收。
 3. **3D 轮播 + Agent 状态机**：`agentStateMachine.ts`/`AgentAvatar.tsx`/`AgentCarousel.tsx`。风险最高（`springStep` 参数需反复调试、必须验证任务台/沉浸模式两个 R3F Canvas 不同时挂载），单独跑帧率验收。
 4. **时间线 + AI 建议面板**：`TaskTimeline.tsx`、建议子区块、`ReviewResult` 数据接线。依赖批次 1，重点验证三种空状态覆盖。
-5. **登录开屏页**：独立模块，不依赖前 4 批，可并行或穿插。
+5. **首次使用路径**：原登录开屏方案已废弃，改为任务台内的真实操作入口并已完成验收。
 6. **QA 基线扩展 + 主题覆盖补全**：`shell.css`/`dashboard.css` 补齐 graphite/cobalt，`visual-qa.mjs` 新增 `.axiom-dashboard` 断言（保留全部现有 `.axiom-shell` 断言）。放最后，依赖前面批次的最终 DOM 结构。
 7. **Agent Studio 阶段一**：数据表 + CRUD API + 管理页，不接入 Planner，可与批次 2-4 并行（文件作用域基本不冲突）。
 

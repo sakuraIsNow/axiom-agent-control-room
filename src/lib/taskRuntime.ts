@@ -1,4 +1,4 @@
-import type { AgentMode, ChatRouteDecision, InAppNotificationFeed, OperationsAlertsSnapshot, OperationsSnapshot, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
+import type { AgentMode, ChatRouteDecision, InAppNotificationFeed, InAppNotificationKind, OperationsAlertsSnapshot, OperationsSnapshot, OutboundNotificationCatalog, OutboundNotificationChannel, OutboundNotificationDelivery, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
 import type { ExecutionPolicy } from '../types';
 import { consumeSseBlocks } from './sse';
 
@@ -100,6 +100,68 @@ export async function markInAppNotificationsRead(input: { ids?: string[]; all?: 
     throw new Error(body?.error ?? `通知状态更新失败 (${response.status})。`);
   }
   return { marked: body.marked, unreadCount: body.unreadCount };
+}
+
+export async function getOutboundNotificationCatalog(signal?: AbortSignal): Promise<OutboundNotificationCatalog> {
+  const response = await fetch('/api/notification-channels', { signal });
+  const body = await response.json().catch(() => null) as (Partial<OutboundNotificationCatalog> & { error?: string }) | null;
+  if (!response.ok || !Array.isArray(body?.channels) || !Array.isArray(body.deliveries) || !Array.isArray(body.supportedEventKinds)) {
+    throw new Error(body?.error ?? `通知渠道读取失败 (${response.status})。`);
+  }
+  return body as OutboundNotificationCatalog;
+}
+
+export type OutboundNotificationChannelDraft = {
+  name: string;
+  endpoint?: string;
+  signingSecret?: string;
+  location: 'internet' | 'local';
+  eventKinds: InAppNotificationKind[];
+  enabled: boolean;
+};
+
+export async function createOutboundNotificationChannel(input: OutboundNotificationChannelDraft & { endpoint: string; signingSecret: string }): Promise<OutboundNotificationChannel> {
+  const response = await fetch('/api/notification-channels', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = await response.json().catch(() => null) as { channel?: OutboundNotificationChannel; error?: string } | null;
+  if (!response.ok || !body?.channel) throw new Error(body?.error ?? `通知渠道创建失败 (${response.status})。`);
+  return body.channel;
+}
+
+export async function updateOutboundNotificationChannel(channelId: string, input: Partial<OutboundNotificationChannelDraft>): Promise<OutboundNotificationChannel> {
+  const response = await fetch(`/api/notification-channels/${encodeURIComponent(channelId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = await response.json().catch(() => null) as { channel?: OutboundNotificationChannel; error?: string } | null;
+  if (!response.ok || !body?.channel) throw new Error(body?.error ?? `通知渠道更新失败 (${response.status})。`);
+  return body.channel;
+}
+
+export async function deleteOutboundNotificationChannel(channelId: string) {
+  const response = await fetch(`/api/notification-channels/${encodeURIComponent(channelId)}`, { method: 'DELETE' });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(body?.error ?? `通知渠道删除失败 (${response.status})。`);
+  }
+}
+
+export async function testOutboundNotificationChannel(channelId: string): Promise<OutboundNotificationDelivery> {
+  const response = await fetch(`/api/notification-channels/${encodeURIComponent(channelId)}/test`, { method: 'POST' });
+  const body = await response.json().catch(() => null) as { delivery?: OutboundNotificationDelivery; error?: string } | null;
+  if (!response.ok || !body?.delivery) throw new Error(body?.error ?? `测试通知发送失败 (${response.status})。`);
+  return body.delivery;
+}
+
+export async function retryOutboundNotificationDelivery(deliveryId: string): Promise<OutboundNotificationDelivery> {
+  const response = await fetch(`/api/notification-deliveries/${encodeURIComponent(deliveryId)}/retry`, { method: 'POST' });
+  const body = await response.json().catch(() => null) as { delivery?: OutboundNotificationDelivery; error?: string } | null;
+  if (!response.ok || !body?.delivery) throw new Error(body?.error ?? `通知重投失败 (${response.status})。`);
+  return body.delivery;
 }
 
 export async function cleanupArtifacts(limit = 50, signal?: AbortSignal) {

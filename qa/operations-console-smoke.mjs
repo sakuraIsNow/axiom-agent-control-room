@@ -27,6 +27,7 @@ try {
     hasQueuePanel: await page.getByText('队列与租约', { exact: true }).count() === 1,
     hasModelPanel: await page.getByText('模型表现', { exact: true }).count() === 1,
     hasSlaPanel: await page.getByText('SLA 概览', { exact: true }).count() === 1,
+    hasContextSummaryPanel: await page.getByText('长对话整理', { exact: true }).count() === 1,
     rangeChoicesVisible: initialRangeCount === 3,
     rangeSwitchWorks: activeRange === '7 天',
     noHorizontalOverflow: await page.evaluate(() => document.body.scrollWidth <= window.innerWidth + 1),

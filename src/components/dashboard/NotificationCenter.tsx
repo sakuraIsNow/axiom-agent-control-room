@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   Bell,
   CalendarClock,
   CheckCheck,
@@ -8,6 +9,7 @@ import {
   FileWarning,
   LoaderCircle,
   RotateCcw,
+  Settings2,
   ShieldCheck,
   Wrench,
   X,
@@ -22,6 +24,7 @@ import {
 } from '../../lib/taskRuntime';
 import { resumeSchedule } from '../../lib/scheduleRuntime';
 import { userFacingError } from '../../lib/errorPresentation';
+import { NotificationChannelPanel } from './NotificationChannelPanel';
 
 const kindIcon = (kind: InAppNotification['kind']) => {
   if (kind === 'approval_required') return <ShieldCheck size={16} />;
@@ -60,6 +63,7 @@ export function NotificationCenter({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [panel, setPanel] = useState<'feed' | 'channels'>('feed');
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -91,10 +95,16 @@ export function NotificationCenter({
   useEffect(() => {
     if (!open) return;
     const closeOnPointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setPanel('feed');
+      }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') {
+        setOpen(false);
+        setPanel('feed');
+      }
     };
     document.addEventListener('pointerdown', closeOnPointer);
     document.addEventListener('keydown', closeOnEscape);
@@ -141,6 +151,7 @@ export function NotificationCenter({
       onNavigate(item.target.view);
     }
     setOpen(false);
+    setPanel('feed');
   };
 
   const openNotification = async (item: InAppNotification) => {
@@ -189,39 +200,47 @@ export function NotificationCenter({
       aria-expanded={open}
       onClick={() => {
         setOpen((value) => !value);
+        if (open) setPanel('feed');
         if (!open) void refresh();
       }}
     >
       <Bell size={15} />
       {unreadCount > 0 && <span>{unreadCount > 99 ? '99+' : unreadCount}</span>}
     </button>
-    {open && <section className="dash-notification-popover" role="dialog" aria-label="站内通知">
+    {open && <section className={`dash-notification-popover ${panel === 'channels' ? 'channels-open' : ''}`} role="dialog" aria-label={panel === 'channels' ? '外发通知渠道' : '站内通知'}>
       <header>
-        <div><strong>通知</strong>{unreadCount > 0 && <span>{unreadCount} 条未读</span>}</div>
         <div>
-          <button type="button" disabled={unreadCount === 0 || busy !== null} onClick={() => void markAllRead()} title="全部已读"><CheckCheck size={15} /></button>
-          <button type="button" onClick={() => setOpen(false)} title="关闭"><X size={15} /></button>
+          {panel === 'channels' && <button type="button" onClick={() => setPanel('feed')} title="返回通知"><ArrowLeft size={15} /></button>}
+          <strong>{panel === 'channels' ? '外发通知' : '通知'}</strong>
+          {panel === 'feed' && unreadCount > 0 && <span>{unreadCount} 条未读</span>}
+        </div>
+        <div>
+          {panel === 'feed' && <button type="button" onClick={() => setPanel('channels')} title="外发渠道"><Settings2 size={15} /></button>}
+          {panel === 'feed' && <button type="button" disabled={unreadCount === 0 || busy !== null} onClick={() => void markAllRead()} title="全部已读"><CheckCheck size={15} /></button>}
+          <button type="button" onClick={() => { setOpen(false); setPanel('feed'); }} title="关闭"><X size={15} /></button>
         </div>
       </header>
-      {error && <div className="dash-notification-error">{error}</div>}
-      <div className="dash-notification-list" aria-live="polite">
-        {loading && notifications.length === 0 && <div className="dash-notification-empty"><LoaderCircle className="dash-notification-spinner" size={18} />正在同步</div>}
-        {!loading && notifications.length === 0 && <div className="dash-notification-empty"><CheckCheck size={18} />当前没有待办通知</div>}
-        {notifications.map((item) => <article key={item.id} className={`dash-notification-item ${item.read ? 'read' : 'unread'} severity-${item.severity}`}>
-          <button type="button" className="dash-notification-main" onClick={() => void openNotification(item)}>
-            <span className="dash-notification-kind">{kindIcon(item.kind)}</span>
-            <span className="dash-notification-copy">
-              <span><strong>{item.title}</strong><time>{relativeTime(item.createdAt)}</time></span>
-              <small>{item.message}</small>
-            </span>
-            {!item.read && <i aria-label="未读" />}
-          </button>
-          <button type="button" className="dash-notification-action" disabled={busy !== null} onClick={() => void runAction(item)}>
-            {busy === item.id ? <LoaderCircle className="dash-notification-spinner" size={13} /> : item.action.kind !== 'open' ? <RotateCcw size={13} /> : null}
-            {item.action.label}
-          </button>
-        </article>)}
-      </div>
+      {panel === 'feed' ? <>
+        {error && <div className="dash-notification-error">{error}</div>}
+        <div className="dash-notification-list" aria-live="polite">
+          {loading && notifications.length === 0 && <div className="dash-notification-empty"><LoaderCircle className="dash-notification-spinner" size={18} />正在同步</div>}
+          {!loading && notifications.length === 0 && <div className="dash-notification-empty"><CheckCheck size={18} />当前没有待办通知</div>}
+          {notifications.map((item) => <article key={item.id} className={`dash-notification-item ${item.read ? 'read' : 'unread'} severity-${item.severity}`}>
+            <button type="button" className="dash-notification-main" onClick={() => void openNotification(item)}>
+              <span className="dash-notification-kind">{kindIcon(item.kind)}</span>
+              <span className="dash-notification-copy">
+                <span><strong>{item.title}</strong><time>{relativeTime(item.createdAt)}</time></span>
+                <small>{item.message}</small>
+              </span>
+              {!item.read && <i aria-label="未读" />}
+            </button>
+            <button type="button" className="dash-notification-action" disabled={busy !== null} onClick={() => void runAction(item)}>
+              {busy === item.id ? <LoaderCircle className="dash-notification-spinner" size={13} /> : item.action.kind !== 'open' ? <RotateCcw size={13} /> : null}
+              {item.action.label}
+            </button>
+          </article>)}
+        </div>
+      </> : <NotificationChannelPanel />}
     </section>}
   </div>;
 }

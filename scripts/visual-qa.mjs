@@ -50,6 +50,53 @@ const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: qaHeaders });
 const page = await context.newPage();
 const consoleErrors = [];
+const visualNotificationChannel = {
+  id: '7109e778-69c0-4f7c-9307-d7a3b6461e25',
+  name: '团队消息',
+  type: 'webhook',
+  location: 'internet',
+  endpointDisplay: 'https://hooks.example.com/…',
+  eventKinds: ['approval_required', 'task_failed', 'schedule_dead_letter'],
+  enabled: true,
+  hasSigningSecret: true,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+};
+let visualNotificationDeliveries = [{
+  id: '8109e778-69c0-4f7c-9307-d7a3b6461e25',
+  channelId: visualNotificationChannel.id,
+  channelName: visualNotificationChannel.name,
+  endpointDisplay: visualNotificationChannel.endpointDisplay,
+  notificationId: 'task-completed:visual-fixture',
+  eventKind: 'task_completed',
+  status: 'delivered',
+  attemptCount: 1,
+  totalAttempts: 1,
+  nextAttemptAt: new Date().toISOString(),
+  deliveredAt: new Date().toISOString(),
+  responseStatus: 204,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+}];
+await page.route('**/api/notification-channels**', async (route) => {
+  const request = route.request();
+  const path = new URL(request.url()).pathname;
+  if (request.method() === 'GET' && path === '/api/notification-channels') {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      channels: [visualNotificationChannel],
+      deliveries: visualNotificationDeliveries,
+      supportedEventKinds: ['approval_required', 'task_completed', 'partial_delivery', 'task_failed', 'plugin_failed', 'schedule_dead_letter', 'artifact_cleanup_failed'],
+    }) });
+    return;
+  }
+  if (request.method() === 'POST' && path.endsWith(`/${visualNotificationChannel.id}/test`)) {
+    const delivery = { ...visualNotificationDeliveries[0], id: `test-${Date.now()}`, notificationId: `test:${Date.now()}`, eventKind: 'test', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    visualNotificationDeliveries = [delivery, ...visualNotificationDeliveries];
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ delivery }) });
+    return;
+  }
+  await route.continue();
+});
 let nativeDialogOpened = false;
 let qaTaskId = null;
 let qaSessionId = null;
@@ -287,6 +334,24 @@ const notificationUsesDashboardGlass = await notificationPopover.evaluate((eleme
   const style = getComputedStyle(element);
   return style.backgroundImage.includes('radial-gradient') && style.backdropFilter.includes('blur') && Number.parseFloat(style.borderRadius) >= 8;
 });
+await notificationPopover.getByRole('button', { name: '外发渠道', exact: true }).click();
+const notificationChannelPanel = notificationPopover.getByTestId('notification-channel-panel');
+await notificationChannelPanel.waitFor({ state: 'visible' });
+const notificationChannelPanelUsable = await notificationChannelPanel.evaluate((element) => {
+  const rect = element.getBoundingClientRect();
+  const intro = element.querySelector('.dash-channel-intro');
+  return Boolean(intro) && rect.width >= 420 && rect.height > 150 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+});
+const notificationChannelCard = notificationChannelPanel.locator('.dash-channel-list article').filter({ hasText: visualNotificationChannel.name });
+await notificationChannelCard.getByText(visualNotificationChannel.endpointDisplay, { exact: true }).waitFor({ state: 'visible', timeout: 5_000 });
+const notificationChannelCardText = await notificationChannelCard.innerText();
+const notificationChannelShowsMaskedTarget = notificationChannelCardText.includes(visualNotificationChannel.endpointDisplay)
+  && !notificationChannelCardText.includes('signing');
+await notificationChannelPanel.getByRole('button', { name: '发送测试', exact: true }).click();
+await notificationChannelPanel.getByText('测试消息已送达。', { exact: true }).waitFor({ state: 'visible' });
+const notificationChannelTestWorks = await notificationChannelPanel.getByText('测试消息', { exact: false }).count() > 0;
+await page.screenshot({ path: resolve(outputDir, 'dashboard-notification-channels.png'), fullPage: false });
+await notificationPopover.getByRole('button', { name: '返回通知', exact: true }).click();
 let notificationHasRealActions = false;
 let notificationHasUnreadCount = false;
 await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications.png'), fullPage: false });
@@ -913,6 +978,15 @@ const mobileNotificationFitsViewport = await page.locator('.dash-notification-po
   const rect = element.getBoundingClientRect();
   return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
 });
+await page.locator('.dash-notification-popover').getByRole('button', { name: '外发渠道', exact: true }).click();
+await page.locator('[data-testid="notification-channel-panel"]').waitFor({ state: 'visible' });
+await page.locator('[data-testid="notification-channel-panel"]').getByText('团队消息', { exact: true }).waitFor({ state: 'visible' });
+const mobileNotificationChannelsFitViewport = await page.locator('.dash-notification-popover').evaluate((element) => {
+  const rect = element.getBoundingClientRect();
+  return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && document.body.scrollWidth <= innerWidth + 1;
+});
+await page.screenshot({ path: resolve(outputDir, 'dashboard-notification-channels-mobile.png'), fullPage: false });
+await page.locator('.dash-notification-popover').getByRole('button', { name: '返回通知', exact: true }).click();
 await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications-mobile.png'), fullPage: false });
 await page.locator('.dash-notification-popover').getByRole('button', { name: '关闭', exact: true }).click();
 await page.getByRole('button', { name: '插件', exact: true }).click();
@@ -951,10 +1025,72 @@ const mobileGraphFullscreenWorks = Boolean(mobileGraphRect && mobileGraphRect.wi
 await page.locator('.dash-agent-graph-expand').click();
 await page.screenshot({ path: resolve(outputDir, 'dashboard-chat-mobile.png'), fullPage: false });
 
+const existingUserGuideHidden = await page.locator('.dash-first-run-guide').count() === 0;
+const verifyFirstRunDestination = async ({ destination, selector, viewport, screenshot }) => {
+  const onboardingTenant = `${qaTenant}-onboarding-${destination}`;
+  const onboardingContext = await browser.newContext({
+    viewport,
+    extraHTTPHeaders: { 'x-axiom-tenant-id': onboardingTenant, 'x-axiom-user-id': onboardingTenant },
+  });
+  const onboardingPage = await onboardingContext.newPage();
+  onboardingPage.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(`[onboarding:${destination}] ${message.text()}`); });
+  onboardingPage.on('pageerror', (caught) => consoleErrors.push(`[onboarding:${destination}] ${caught.message}`));
+  try {
+    await onboardingPage.goto(baseUrl, { waitUntil: 'networkidle' });
+    const guide = onboardingPage.locator('.dash-first-run-guide');
+    await guide.waitFor({ state: 'visible', timeout: 20_000 });
+    if (screenshot) await onboardingPage.screenshot({ path: resolve(outputDir, screenshot), fullPage: false });
+    const noHorizontalOverflow = await onboardingPage.evaluate(() => document.body.scrollWidth <= innerWidth + 1);
+    await guide.locator(`button[data-destination="${destination}"]`).click();
+    await onboardingPage.locator(selector).waitFor({ state: 'visible', timeout: 10_000 });
+    const persisted = await onboardingPage.evaluate(() => localStorage.getItem('axiom-onboarding-seen-v2') === '1');
+    await onboardingPage.reload({ waitUntil: 'networkidle' });
+    const staysDismissed = await onboardingPage.locator('.dash-first-run-guide').count() === 0;
+    return { visible: true, navigated: true, persisted, staysDismissed, noHorizontalOverflow };
+  } finally {
+    await onboardingContext.close();
+  }
+};
+const firstRunChat = await verifyFirstRunDestination({
+  destination: 'chat',
+  selector: '.dash-chat-workspace',
+  viewport: { width: 1440, height: 900 },
+  screenshot: 'dashboard-first-run.png',
+});
+const firstRunPlugins = await verifyFirstRunDestination({
+  destination: 'plugins',
+  selector: '.dash-plugin-workspace',
+  viewport: { width: 390, height: 844 },
+  screenshot: 'dashboard-first-run-mobile.png',
+});
+const firstRunWorkflows = await verifyFirstRunDestination({
+  destination: 'workflows',
+  selector: '.dash-workflow-studio',
+  viewport: { width: 1440, height: 900 },
+});
+const onboardingDeepLinkTenant = `${qaTenant}-onboarding-deep-link`;
+const onboardingDeepLinkContext = await browser.newContext({
+  viewport: { width: 1440, height: 900 },
+  extraHTTPHeaders: { 'x-axiom-tenant-id': onboardingDeepLinkTenant, 'x-axiom-user-id': onboardingDeepLinkTenant },
+});
+const onboardingDeepLinkPage = await onboardingDeepLinkContext.newPage();
+onboardingDeepLinkPage.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(`[onboarding:deep-link] ${message.text()}`); });
+onboardingDeepLinkPage.on('pageerror', (caught) => consoleErrors.push(`[onboarding:deep-link] ${caught.message}`));
+await onboardingDeepLinkPage.goto(`${baseUrl}/?view=operations`, { waitUntil: 'networkidle' });
+await onboardingDeepLinkPage.locator('.ops-console').waitFor({ state: 'visible', timeout: 20_000 });
+const firstRunDeepLinkPreserved = await onboardingDeepLinkPage.locator('.dash-first-run-guide').count() === 0
+  && new URL(onboardingDeepLinkPage.url()).searchParams.get('view') === 'operations';
+await onboardingDeepLinkContext.close();
+
 const assertions = {
   defaultDashboard: dashboardLayout.dashboard,
   legacyShellRemovedFromFlow: !dashboardLayout.legacyShell,
   dashboardHasVisualContent: dashboardPixels.quantizedColors > 6 && dashboardPixels.averageLuminance > 3,
+  firstRunGuideHiddenForExistingUser: existingUserGuideHidden,
+  firstRunConversationEntryWorks: Object.values(firstRunChat).every(Boolean),
+  firstRunPluginEntryWorks: Object.values(firstRunPlugins).every(Boolean),
+  firstRunNexusEntryWorks: Object.values(firstRunWorkflows).every(Boolean),
+  firstRunDeepLinkPreserved,
   liquidGlassSurfaceActive: glassSurfaceActive,
   tokenHeadingReadable,
   currentModelIsVisible: currentModel.length > 0,
@@ -1085,9 +1221,13 @@ const assertions = {
   headerReadinessStillAvailable,
   notificationTriggerVisible,
   notificationUsesDashboardGlass,
+  notificationChannelPanelUsable,
+  notificationChannelShowsMaskedTarget,
+  notificationChannelTestWorks,
   notificationHasRealActions,
   notificationHasUnreadCount,
   mobileNotificationFitsViewport,
+  mobileNotificationChannelsFitViewport,
   readinessUsesChinesePresentation,
   readinessUsesDashboardGlass,
   readinessTimeRemoved,

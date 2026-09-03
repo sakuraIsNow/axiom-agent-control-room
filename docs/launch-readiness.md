@@ -4,13 +4,13 @@
 
 ## 结论
 
-当前版本是“本地或受控单节点生产候选”，不是可以直接暴露到公网的企业生产系统。任务、事件、租约恢复、动态路由、子 Agent 并行、Reviewer 质量门禁、PostgreSQL 持久化、PostgreSQL 调度和 Docker 沙箱已经形成可运行闭环。当前启动实例的 `GET /api/health` 返回 `ready`，业务 API 可以使用；`GET /api/runtime/readiness` 返回 `blocked`，唯一硬阻塞是本机 Docker 沙箱镜像当前不可用。SQLite、未启用签名租户身份、未配置视频服务和长期记忆、对象存储仍使用本地目录、触发器仍为单节点则作为降级项显示。Webhook HMAC、幂等、退避与死信状态已经实现，外部告警和多实例演练仍待完成。
+当前版本是“本地或受控单节点生产候选”，不是可以直接暴露到公网的企业生产系统。任务、事件、租约恢复、动态路由、子 Agent 并行、Reviewer 质量门禁、PostgreSQL 持久化、PostgreSQL 调度和 Docker 沙箱已经形成可运行闭环。当前启动实例的 `GET /api/health` 返回 `ready`；`GET /api/runtime/readiness` 返回 `degraded` 且没有硬阻塞，PostgreSQL、文本与图像模型、Docker 沙箱和 Prometheus 已就绪。未启用签名租户身份、未配置视频服务和长期记忆、对象存储仍使用本地目录是当前四项降级告警。用户级任务、日程和 Artifact 通知已经可以通过签名 Webhook 外发；邮件渠道、运营级系统告警自动外发和真实 PostgreSQL 多 Worker 演练仍待完成。
 
 这意味着：内部试用、单团队灰度和受控网络部署可以开始；面向多个租户、外部用户或高价值自动化任务前，必须完成下面的上线门禁。
 
 ## 最新本机验证（2026-09-03）
 
-在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1646.19 RPS / P95 9.24ms`、Readiness `2368.44 RPS / P95 5.12ms`、运行观测 `2272.16 RPS / P95 6.17ms`、任务列表 `3006.22 RPS / P95 3.29ms`。标准单元/API 门禁为 `349 passed / 0 failed`；`npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`。本次复杂 Runtime 产生 667 个连续事件、553 个可见流式增量和 32,506 Token，通过 Reviewer 75 分门禁并正常交付 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
+在当前 Windows 单节点、本地测试数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1584.58 RPS / P95 10.49ms`、Readiness `2421.89 RPS / P95 4.91ms`、运行观测 `813.29 RPS / P95 31.17ms`、任务列表 `2474.29 RPS / P95 6.05ms`。标准单元/API 门禁为 `358 passed / 0 failed`；`npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`，24 项均在第一次尝试通过。本次复杂 Runtime 产生 695 个连续事件、597 个可见流式增量和 24,985 Token，通过 Reviewer 95 分门禁并正常交付 785 字符的 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 
@@ -32,8 +32,10 @@
 | 插件发布与恢复 | 已可用 | 发布前检查完整结构、直连网络、外部资源、字段冲突和工具权限；修改后自动回草稿，历史版本以新版本恢复；Prompt 运行与 Mini App 打开前均重读当前版本；可选 HMAC 签名覆盖内容、权限和发布身份，内容、权限风险、签名或验签配置漂移时拒绝运行 |
 | 租户内插件市场 | 已可用 | 作者提交具体版本，签名租户 `owner/admin` 审核后生成不可变市场快照；安装固定版本，新版需显式升级；撤回版本立即禁止启动和运行，并可恢复到仍有效的安全审核版本。当前范围是租户内市场，不是跨租户公共应用商店 |
 | Checkpoint 分支与合并 | 已可用 | revision 原子冲突检测、幂等分支、差异比较和三方合并已通过单元/API/浏览器回归；冲突策略必须显式选择 |
-| 长结果与上下文恢复 | 已可用，外部对象存储待现场配置 | 大步骤输出使用 `result_ref`，普通 Agent 只接收预览，Reviewer/Synthesizer 有界回读；持久摘要带来源 digest，漂移后自动重建；对象存储故障时数据库保留全文 |
+| 长结果与上下文恢复 | 已可用，外部对象存储待现场配置 | 大步骤输出使用 `result_ref`，普通 Agent 只接收预览，Reviewer/Synthesizer 有界回读；持久摘要带来源 digest，漂移后自动重建；运行观测展示压缩、覆盖、复用、重建和 tokenizer 可信模式，当前默认仍是保守 Token 估算；对象存储故障时数据库保留全文 |
+| 首次使用路径 | 已可用 | 仅在默认任务页且任务和会话均成功确认为空时显示工作区内引导，三个入口直接进入对话、插件和 Agent Nexus；已有用户、接口读取失败和 URL 深链接恢复场景不误弹，桌面/移动端浏览器回归已覆盖 |
 | 运行告警 | 已可用 | `GET /api/runtime/alerts` 根据队列积压、租约过期、模型/工具失败、Artifact 清理和 Readiness 生成带严重级别的告警；阈值由环境变量控制 |
+| 用户外发 Webhook | 已可用，部署接收端待现场验收 | 从真实站内通知幂等投影到持久 Outbox；地址与签名密钥加密，投递带 HMAC 签名、租约、指数退避、死信、人工重投和脱敏审计；公网目标只允许 HTTPS 并在发送前复核 DNS。邮件渠道尚未实现 |
 
 ## 上线前必须补齐
 
@@ -48,7 +50,7 @@
 
 - 为已接入的 S3/COS/MinIO adapter 配置真实 bucket，运行 `npm run qa:object-storage` 完成双 Worker 读写/删除、租户前缀、生命周期策略和大文件回读验收；大文件分片能力仍需按目标供应商协议补充。
 - 使用运行观测中的 Artifact 面板检查孤儿和待清理数量；任务删除失败会保留在 `delete_pending` 重试队列，可通过 `POST /api/runtime/artifacts/cleanup` 由租户管理员重试。
-- scheduler、Webhook 在真实 PostgreSQL 多实例环境完成租约、幂等、退避、死信恢复和告警演练。
+- scheduler、入站 Webhook 与外发通知 Outbox 在真实 PostgreSQL 多实例环境完成租约、幂等、退避、死信恢复和故障演练；使用真实 HTTPS 接收端验证 HMAC、重复投递和密钥轮换。
 - PostgreSQL 配置备份、恢复演练、连接池上限、慢查询监控和迁移回滚策略。
 
 ### 3. 工具与执行安全
@@ -66,8 +68,8 @@
 ### 5. 质量、评测与运营
 
 - `npm run qa:business` 已按 HarnessEval-W 的分段思路保存 metadata、partial progress 和 artifact validation，覆盖按难度路由、跨轮 Agent/Skill 漂移、执行中改需求、Harness steer 真实状态、长结果边界、摘要恢复和 Checkpoint 冲突。下一步继续增加真实行业任务集、引用正确率、证据树和跨模型/跨版本质量基线；当前 6 个控制流分段不能代表所有真实业务准确率。
-- 记录每个模型请求的 trace/span、token、成本、重试、队列等待和人工接管率；把内存 counters 外置到 Prometheus/OTel。
-- 将 `GET /api/runtime/alerts` 接入通知渠道或 Grafana Alerting，并按租户配置告警阈值；当前接口只负责计算和展示，不直接发送外部通知。
+- 记录每个模型请求的 trace/span、token、成本、重试、队列等待和人工接管率；把内存 counters 外置到 Prometheus/OTel。当前摘要压缩、覆盖、复用和重建已进入持久运营快照，但 Provider 精确 tokenizer 与摘要语义质量基线仍待接入。
+- 用户级任务、日程和 Artifact 通知已经可通过签名 Webhook 外发；下一步将 `GET /api/runtime/alerts` 的运营级系统告警接入 Grafana Alerting、PagerDuty 或邮件，并按租户和环境配置阈值。当前通用邮件渠道尚未实现。
 - 对高风险输出增加引用、证据来源、置信度和“未验证假设”字段，并建立线上反馈闭环。
 
 ## 相对常见产品的差异

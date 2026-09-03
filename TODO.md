@@ -227,15 +227,16 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 
 验收：可创建、发布、归档自定义 Agent 定义并持久化（已用真实 HTTP/Playwright 端到端验证）；已验证发布角色进入 Planner schema、真实执行并按 `toolAllowlist` 拒绝未授权工具；Agent Store 不可用时回退内置 `fallbackPlan()`；`npm run check && npm test && npm run build` 通过。
 
-### P1.11 登录开屏页
+### P1.11 工作区内首次使用引导
 
-完整设计依据见 `docs/dashboard-agentstudio-roadmap.md` Part C。纯视觉开屏页，**不新增任何后端认证逻辑**。**尚未实现**（本轮优先完成 Dashboard + Agent Studio 主线 + 玻璃质感视觉修正，登录开屏页留待下一轮）。
+旧设计提出的粒子登录开屏只提供视觉展示，既不承担真实认证，也会推迟用户完成第一项工作。生产易用性评审后改为任务台内的情境引导，不再实现装饰性 `LoginScreen`。
 
-- [ ] 新增 `src/components/onboarding/LoginScreen.tsx`：鼠标响应网格背景（Canvas/WebGL，网格顶点位移随鼠标接近度衰减扭曲），任意输入或点击即可进入，状态存 `localStorage`（如 `axiom-onboarding-seen-v1`），已见过则跳过。
-- [ ] 原创设计 Axiom 品牌 logo，做粒子化重组动画（可参考 `particle-heart-main.zip` 的生命周期阶段状态机+参数化粒子池架构，MIT 协议，8 阶段：complete/disperse/float/return/base/rise/orbit/aggregate）。
-- [ ] `App.tsx` 顶层按 `localStorage` 标记决定是否插入该屏，不影响后续路由/状态逻辑。
+- [x] 新增 `src/components/dashboard/FirstRunGuide.tsx`：提供“发起第一次对话 / 创建插件 / 搭建 Agent Nexus”三个真实入口，选择后直接进入对应工作区。
+- [x] 只有会话与任务列表都成功读取、服务端和本地都没有实际历史、且 `axiom-onboarding-seen-v2` 未设置时才显示；读取失败、已有任务或已有对话时均不误弹。
+- [x] 关闭或选择入口后持久记忆；非默认工作区的 URL 深链接直接恢复目标页面，不被引导覆盖，也不影响会话恢复和任务同步；桌面使用中央毛玻璃操作面板，移动端使用底部紧凑布局。
+- [x] `npm run qa:visual` 覆盖全新租户的三个真实入口、刷新后不重复、已有用户不显示、运行观测深链接直达、390×844 无横向溢出和浏览器控制台零错误。
 
-验收：首次访问显示开屏页，任意交互后进入主界面且不再重复显示；`npm run qa:visual` 覆盖开屏页截图。
+验收：首次用户不离开真实任务台即可进入第一项工作，已有用户和数据读取异常场景不受影响。
 
 ### P1.12 视觉素材整合遗留项（尚未完成）
 
@@ -245,7 +246,7 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [x] `morphicons-main.zip`（MIT）：已安装 `morphicons` 并在任务状态、任务列表和插件画廊等动作图标中使用 `MorphIcon`；视觉回归确认图标挂载、状态切换和 reduced-motion 参数正常。
 - [ ] `orb-main.zip`（MIT，用户已确认本机有 GPU，可直接嵌入 WebGPU）：尚未落地。
 - [ ] `tim-ai-assistant-main.zip`（无 LICENSE，用户已确认认识作者、允许复用源码）：尚未复用任何代码。
-- [ ] `particle-heart-main.zip`（MIT）：8 阶段粒子生命周期架构尚未移植，等 P1.11 登录页一起做。
+- [x] `particle-heart-main.zip`（MIT）：完成适用性评估；不把纯展示粒子动画接入生产首屏，首次体验采用 P1.11 的真实操作入口，素材保留为非生产实验参考。
 
 ### P1.13 本轮 bug 修复与环境问题（2026-08-24）
 
@@ -315,7 +316,7 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [x] 本轮前端重构：新增 Axiom Studio 空间工作台，重做首屏信息架构、Command Bar、轨道/网络/事件视图、节点聚焦检查器与移动端导航；旧 Mission Deck、Immersive Control Room 和经典工作台保留为回退入口，并备份至 `frontend-backup/20260822-093402-pre-studio`。
 - [x] 本轮 P1.3：Agent 间结构化消息与中间 Artifact 共享；依赖步骤通过 `agent.message` 传递上游输出和 Artifact 引用，并补充运行时烟测，验证事件顺序、流式增量、终态和审查结果。
 - [x] 本轮 P1.3 调度增强：并行 Agent 的明确正/负结论冲突会持久化为 `agent.conflict` 并进入 Reviewer 上下文；Token 预算接近上限时自动压缩并行步骤并记录 `budget.constrained`，补充冲突与预算回归测试。
-- [x] 本轮 P1.9+P1.10：新建任务台 Dashboard（三栏布局、真实统计卡片、依赖层级列表态、历史任务玻璃轨道）与 Agent Studio（自定义 Agent 定义 CRUD、内置角色冲突检测、Planner 动态角色接入），设为新默认入口；沉浸模式保留真实 Agent Graph 与 3D 核心，旧经典工作台不再保留；`getTaskStats`/`agentStore`/自定义 Agent API 均已用真实 HTTP 请求和 Playwright 无头浏览器验证（0 console error）。P1.11 登录开屏和 P2 规模化能力仍按未完成项保留。
+- [x] 本轮 P1.9+P1.10：新建任务台 Dashboard（三栏布局、真实统计卡片、依赖层级列表态、历史任务玻璃轨道）与 Agent Studio（自定义 Agent 定义 CRUD、内置角色冲突检测、Planner 动态角色接入），设为新默认入口；沉浸模式保留真实 Agent Graph 与 3D 核心，旧经典工作台不再保留；`getTaskStats`/`agentStore`/自定义 Agent API 均已用真实 HTTP 请求和 Playwright 无头浏览器验证（0 console error）。P1.11 后续已按生产易用性决策完成为工作区内首次引导，P2 规模化能力继续按未完成项推进。
 
 ### 2026-08-25 frontend-rebuild-v2 执行记录
 - [x] P0.6/P0.7 安全一致性与 Readiness 真实探测已完成，补充 metadata/IPv6 SSRF、Docker probe 和真实 Provider/Memory 探测测试。
@@ -519,7 +520,8 @@ npm run qa:search-agent
 - [x] Nexus 运行会话使用稳定的 `agent-nexus-<workflowId>` 标识；每次执行携带最近 24 条对话上下文，Agent 可理解同一 Nexus 内的连续追问。
 - [x] 上下文自动摘要：普通对话、主页工作流和 Agent Nexus 在超过 16 轮或 48K 字符时，保留最近 12 轮原文并将更早消息压缩为有界摘要；摘要仅用于模型请求，不修改历史记录，附带回归测试。
 - [x] 上下文预算增强（第一阶段）：增加可替换 tokenizer 接口、默认保守 Token 估算、`AXIOM_CONTEXT_MAX_TOKENS` 配置，并在摘要结果返回版本号、覆盖范围和估算用量；即使预算很紧也保留最新用户输入。
-- [ ] 摘要后续增强：持久化摘要版本、覆盖范围和 Artifact/审批引用已完成；剩余 Provider 精确 tokenizer、摘要命中率、压缩比例和压缩前后质量指标。
+- [x] 摘要质量观测：持久化创建、复用、增量和重建动作，记录覆盖消息、原始/摘要 Token、压缩比例、复用率、重建次数与 tokenizer 可信模式，并在运行观测按当前用户聚合展示；默认明确标记为保守估算。
+- [ ] Provider 精确 tokenizer：接口边界与 `exact` 可信标记已具备，仍需接入目标 Provider 官方或严格等价实现；在此之前不得把估算标成精确。
 - [x] 重新进入 Nexus 时从该 Nexus 的已持久化任务恢复用户输入和最终 Agent 输出；不同 Nexus 的历史互不串线，不污染普通对话历史。
 - [x] 新增 `qa:workflow-history` 回归烟测，验证离开工作区再进入后历史消息仍可见。
 - [x] 2026-08-28 Scheduler reliability: failure backoff, dead-letter state, resume API, tenant isolation regression tests, and dashboard status display.
@@ -574,8 +576,9 @@ npm run qa:search-agent
 - [x] 运行观测告警第一阶段：新增 `GET /api/runtime/alerts`，从持久化队列、Worker 租约、模型/工具失败、人工待确认、Artifact 清理和 Readiness 生成严重/关注/提示三级告警；阈值可由环境变量调整，前端运行观测已展示。
 - [x] 插件签名、兼容性检查、版本回滚和权限声明：支持可选 HMAC-SHA256 发布证明、强制签名部署策略、内容篡改失败关闭、发布前/运行前复核、历史版本以新草稿恢复，以及面向普通用户的“版本与权限”面板。
 - [x] 租户内插件市场：已完成发布者身份、管理员审核、搜索、固定版本安装、显式升级/安全回退、卸载、版本撤回和运行时失效；市场快照移除插件开发对话，避免内部设计记录随插件分发。
-- [ ] Provider 精确 tokenizer 与压缩质量评估；摘要版本、覆盖范围、来源 digest 和关键引用持久化已完成。
-- [ ] 登录开屏与首次使用引导。
+- [x] 摘要压缩质量与复用观测：摘要版本、覆盖范围、来源 digest、关键引用、压缩比例、覆盖率、复用率、增量/重建次数和 tokenizer 模式已持久化并进入运营 API/界面。
+- [ ] Provider 精确 tokenizer 仍待目标 Provider 的真实实现与跨版本校准，当前默认是 `axiom-estimate-v2` 保守估算。
+- [x] 首次使用引导改为工作区内真实入口；旧的无认证粒子登录开屏已由生产易用性决策替代。
 - [x] 3D Graph 降级视图、移动端节点抽屉、长事件虚拟滚动和生产场景分包；当前生产 Graph 使用 CSS 3D，不依赖 WebGL，低动态与不可见状态会自动停止动画。
 
 ### 2026-08-29 运行验收与一致性修复
@@ -667,10 +670,11 @@ npm run qa:search-agent
 ### Agent 日程下一步
 
 1. [x] 站内交付通知：任务完成、部分交付、失败、需要人工确认、日程进入死信或 Artifact 清理失败时生成真实通知，并提供对应查看或恢复入口；通知正文不包含敏感模型凭据。
-2. [ ] 可选外发通知：在站内通知事实源之上增加用户可配置的 Webhook/邮件渠道、签名、重试、退避、死信和投递审计。
-3. [x] 日程健康回顾 Agent：按真实运行历史识别长期失败、成本异常和结果质量下降，只给出可确认的暂停、恢复或调整时间建议，不自行修改；“是否不再需要”属于用户意图，平台不根据低使用量擅自猜测或删除日程。
-4. [x] 月/周日历视图与冲突提示：在不暴露 cron 的前提下展示未来 7 天或 35 天执行窗口，按历史 Token、耗时和任务方式估算 30 分钟容量风险；高频日程有展开上限，避免计划接口无限膨胀。
-5. [x] 运行结果联动：只允许选择当前用户已完成且证据状态为 `verified` 的 Artifact 作为后续日程输入；保存来源 Task/日程、revision、更新时间和 SHA-256，执行时重新校验版本并保留租户边界。
+2. [x] 可选外发 Webhook：用户配置、加密存储、HMAC 签名、幂等 Outbox、租约、重试、退避、死信、人工重投和投递审计已完成。
+3. [ ] 邮件渠道：仍需按目标邮件供应商或 SMTP 服务实现，并完成退信、投诉和限流现场验收。
+4. [x] 日程健康回顾 Agent：按真实运行历史识别长期失败、成本异常和结果质量下降，只给出可确认的暂停、恢复或调整时间建议，不自行修改；“是否不再需要”属于用户意图，平台不根据低使用量擅自猜测或删除日程。
+5. [x] 月/周日历视图与冲突提示：在不暴露 cron 的前提下展示未来 7 天或 35 天执行窗口，按历史 Token、耗时和任务方式估算 30 分钟容量风险；高频日程有展开上限，避免计划接口无限膨胀。
+6. [x] 运行结果联动：只允许选择当前用户已完成且证据状态为 `verified` 的 Artifact 作为后续日程输入；保存来源 Task/日程、revision、更新时间和 SHA-256，执行时重新校验版本并保留租户边界。
 
 ### 2026-09-03 真实站内通知与恢复入口
 
@@ -739,3 +743,28 @@ npm run qa:search-agent
 - [x] 发布方可撤回具体版本；已安装的撤回版本在 `/launch` 和 `/run` 阶段均拒绝执行。仍有较早安全审核版本时，用户可显式恢复到该版本。
 - [x] 插件工作区增加“我的插件 / 插件市场 / 待审核”分区，以及安装、升级、卸载、审核、驳回和撤回确认交互；桌面与 390px 移动端均使用统一毛玻璃视觉且无横向溢出。
 - [x] 本批完整门禁通过：`npm run check`、`npm test`（349 passed / 0 failed）、`npm run build`、`npm run qa:visual` 和 `npm run qa:all`（24 passed / 0 failed / 4 skipped）；真实复杂 Runtime 产生 667 个连续事件、553 个流式增量和 32,506 Token，Reviewer 75 分通过并完整交付 Artifact。桌面与移动插件市场、发布恢复、真实启动、会话路由和浏览器 0 错误均通过；4 个跳过项只对应未配置的外部服务现场验收。
+
+### 2026-09-03 长对话质量观测与首次使用路径
+
+- [x] 改动前保存 `frontend-backup/20260903-pre-context-onboarding` 快照；持久摘要新增兼容旧数据的质量字段，记录创建、复用、增量、重建、覆盖消息、原始/摘要 Token、压缩比例和 tokenizer 可信模式。
+- [x] `GET /api/runtime/operations` 按当前租户用户聚合最多 500 个会话的摘要质量数字，不返回对话正文；运行观测新增“长对话整理”面板，明确显示保守估算或精确计数，不把短摘要的 `0%` 压缩率美化为正收益。
+- [x] 增加可插拔 tokenizer 名称与 `estimated/exact` 边界；默认 `axiom-estimate-v2` 始终标记为保守估算。Provider 精确 tokenizer 仍是独立未完成项，必须接入真实实现后才能标记 `exact`。
+- [x] 用工作区内 `FirstRunGuide` 替代无认证的粒子登录页；只有任务和会话都成功确认为空时显示，三个入口直接进入对话、插件和 Agent Nexus，已有用户与接口失败场景不误弹。
+- [x] 浏览器回归发现首次遮罩会阻止普通导航后，改为面板自身接收点击、左侧真实导航可直接完成引导；桌面、390×844、三个入口、刷新持久化、已有用户和运行观测深链接场景均重新通过，控制台 0 错误。
+- [x] 本批完整门禁通过：`npm run check`、`npm test`（350 passed / 0 failed）、`npm run build`、`npm run qa:operations`、`npm run qa:visual` 和 `npm run qa:all`（24 passed / 0 failed / 4 skipped）全部通过且无需重试；真实复杂 Runtime 产生 742 个连续事件、640 个 SSE 增量和 27,530 Token，Reviewer 65 分通过并交付 Artifact。4 个跳过项仍仅为未配置的 TencentDB MemoryCore、外部对象存储和 Harness/Codex sidecar 现场验收。
+
+### 2026-09-03 Registry 能力查询稳定性
+
+- [x] Registry 查询强制关闭联网搜索与外部事实需求；模型 Router 返回矛盾选择时，服务端归一化为单一 `registry-agent`，避免“你有哪些 Agent”被错误分配给搜索 Agent。
+- [x] 回答仍由模型组织自然语言，服务端仅按本次实时 Registry 快照补齐所问能力的准确状态；不使用固定 Agent 名单，不把内部英文 ID 当作已经向用户说明。
+- [x] 增加 Router、目录与聊天网关诊断回归；重启当前源码后 `npm run qa:chat` 连续 5 次均首轮通过。
+
+### 2026-09-03 外发 Webhook 通知闭环
+
+- [x] 改动前保存 `frontend-backup/20260903-pre-outbound-notifications` 快照；在站内通知事实源之上增加 SQLite/PostgreSQL 同构的持久 Outbox，按租户、用户、渠道和通知 ID 隔离并幂等入队。
+- [x] Webhook 地址和签名密钥使用 AES-256-GCM 加密落库；公网渠道只允许 HTTPS，发送前重新解析 DNS 并拒绝本机、私网、链路本地和云元数据地址，HTTP 不自动重定向。
+- [x] 投递使用 HMAC-SHA256 签名、10 秒超时、PostgreSQL `FOR UPDATE SKIP LOCKED` 或 SQLite 事务租约；可恢复状态码指数退避，最多 5 次后进入死信，普通不可恢复 4xx 直接进入死信。
+- [x] 通知中心增加统一毛玻璃外发渠道面板，支持新增、编辑、暂停、测试、删除、投递审计和死信人工重投；浏览器只显示脱敏地址，不回填密钥或原始查询参数。
+- [x] 删除渠道时擦除密文、地址和签名密钥，但保留脱敏投递审计；默认保留 90 天，可由 `AXIOM_NOTIFICATION_RETENTION_DAYS` 在 1 至 365 天内调整。
+- [x] 单元与 API 回归覆盖加密不泄漏、租户/用户隔离、签名、幂等、测试消息、成功投递、4xx 死信、人工重投、多 Worker 单次认领、SSRF 边界和软删除审计保留；最终 `npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`，24 个可运行项均在第一次尝试通过，标准单元/API 测试为 `358 passed / 0 failed`。
+- [ ] 邮件通知和平台运营级告警外发仍未完成；正式公网接收端与真实 PostgreSQL 多 Worker 故障演练也必须在部署环境单独验收。

@@ -176,7 +176,9 @@ const fallbackDecision = (input: ChatRouteInput, intent: ChatIntent, workflowRou
     : `${intent} ${input.message} ${reason}`;
   const selectedSkillIds = intent === 'task'
     ? unique(steps.flatMap((step) => step.skillIds))
-    : routeSkillIds(skillRoutingText, activeAgentIds[0]!);
+    : intent === 'agent-registry'
+      ? []
+      : routeSkillIds(skillRoutingText, activeAgentIds[0]!);
   const existing = currentGraphRoles(input);
   const scheduler: TurnSchedulingDecision = {
     route: workflowRoute, activeAgentIds, skippedAgentIds: existing.filter((id) => !activeAgentIds.includes(id)), appendAgentIds: activeAgentIds.filter((id) => !existing.includes(id)), selectedSkillIds,
@@ -346,6 +348,15 @@ const validateRouter = (router: ChatRouteDecision['router'], input: ChatRouteInp
   if (router.intent !== 'task' && !router.candidateAgentIds.includes(intentAgent[router.intent])) throw new Error('Required specialist is absent.');
 };
 const normalizeRouter = (router: ChatRouteDecision['router']): ChatRouteDecision['router'] => {
+  if (router.intent === 'agent-registry') {
+    return {
+      ...router,
+      requiresExternalFacts: false,
+      requiredCapabilities: ['registry-agent'],
+      candidateAgentIds: ['registry-agent'],
+      candidateSkillIds: [],
+    };
+  }
   const conversationIsActuallyTask = router.intent === 'conversation'
     && (router.taskKind !== 'conversation' || router.candidateAgentIds.some((id) => id !== 'direct-responder'));
   if (!conversationIsActuallyTask) return router;

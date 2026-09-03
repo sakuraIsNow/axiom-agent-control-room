@@ -594,6 +594,22 @@ export type OperationsSnapshot = {
   }>;
   tools: Array<{ name: string; calls: number; successes: number; failures: number; failureRate: number; lastFailureAt?: string }>;
   agents: Array<{ agentId: string; role?: string; started: number; completed: number; failed: number; successRate: number | null }>;
+  contextSummaries?: {
+    summaries: number;
+    sourceMessages: number;
+    sourceTokens: number;
+    summaryTokens: number;
+    compressionPercent: number | null;
+    averageCoveragePercent: number | null;
+    evaluations: number;
+    reuseCount: number;
+    reuseRate: number | null;
+    incrementalCount: number;
+    rebuildCount: number;
+    exactSummaries: number;
+    estimatedSummaries: number;
+    tokenizerNames: string[];
+  };
   reviewer: { started: number; completed: number; approved: number; rejected: number; humanTakeover: number; approvalRate: number | null };
   artifacts?: { total: number; active: number; orphaned: number; deletePending: number; deleted: number; cleanupFailures: number; totalBytes: number };
   sla: { terminalTasks: number; completed: number; failed: number; cancelled: number; successRate: number | null; p50DurationMs: number; p95DurationMs: number };
@@ -653,6 +669,44 @@ export type InAppNotificationFeed = {
   generatedAt: string;
   unreadCount: number;
   notifications: InAppNotification[];
+};
+
+export type OutboundNotificationChannel = {
+  id: string;
+  name: string;
+  type: 'webhook';
+  location: 'internet' | 'local';
+  endpointDisplay: string;
+  eventKinds: InAppNotificationKind[];
+  enabled: boolean;
+  hasSigningSecret: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OutboundNotificationDelivery = {
+  id: string;
+  channelId: string;
+  channelName: string;
+  endpointDisplay: string;
+  notificationId: string;
+  eventKind: InAppNotificationKind | 'test';
+  status: 'pending' | 'delivering' | 'retrying' | 'delivered' | 'dead_letter';
+  attemptCount: number;
+  totalAttempts: number;
+  nextAttemptAt: string;
+  lastAttemptAt?: string;
+  deliveredAt?: string;
+  responseStatus?: number;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OutboundNotificationCatalog = {
+  channels: OutboundNotificationChannel[];
+  deliveries: OutboundNotificationDelivery[];
+  supportedEventKinds: InAppNotificationKind[];
 };
 
 export type ScheduleCadence =
@@ -1022,6 +1076,23 @@ export type PersistedContextSummary = {
   unresolvedItems: string[];
   durableFacts: string[];
   createdAt: string;
+  quality?: {
+    schemaVersion: 1;
+    tokenizer: { name: string; mode: 'estimated' | 'exact' };
+    lastAction: 'created' | 'incremental' | 'rebuilt' | 'reused';
+    sourceMessages: number;
+    sourceCharacters: number;
+    sourceTokens: number;
+    summaryCharacters: number;
+    summaryTokens: number;
+    compressionPercent: number | null;
+    coveragePercent: number;
+    evaluations: number;
+    reuseCount: number;
+    incrementalCount: number;
+    rebuildCount: number;
+    updatedAt: string;
+  };
 };
 
 export type Session = {

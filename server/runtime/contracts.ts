@@ -1,4 +1,4 @@
-import type { PersistedContextSummary } from './contextSummary.js';
+import type { ContextSummaryOperations, PersistedContextSummary } from './contextSummary.js';
 
 export type TaskStatus =
   | 'queued'
@@ -952,6 +952,7 @@ export type OperationsSnapshot = {
   models: OperationsModelSummary[];
   tools: OperationsToolSummary[];
   agents: OperationsAgentSummary[];
+  contextSummaries?: ContextSummaryOperations;
   reviewer: {
     started: number;
     completed: number;

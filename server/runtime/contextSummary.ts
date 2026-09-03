@@ -40,6 +40,42 @@ export type PersistedContextSummary = {
   unresolvedItems: string[];
   durableFacts: string[];
   createdAt: string;
+  quality?: ContextSummaryQuality;
+};
+
+export type ContextSummaryQuality = {
+  schemaVersion: 1;
+  tokenizer: { name: string; mode: 'estimated' | 'exact' };
+  lastAction: 'created' | 'incremental' | 'rebuilt' | 'reused';
+  sourceMessages: number;
+  sourceCharacters: number;
+  sourceTokens: number;
+  summaryCharacters: number;
+  summaryTokens: number;
+  compressionPercent: number | null;
+  coveragePercent: number;
+  evaluations: number;
+  reuseCount: number;
+  incrementalCount: number;
+  rebuildCount: number;
+  updatedAt: string;
+};
+
+export type ContextSummaryOperations = {
+  summaries: number;
+  sourceMessages: number;
+  sourceTokens: number;
+  summaryTokens: number;
+  compressionPercent: number | null;
+  averageCoveragePercent: number | null;
+  evaluations: number;
+  reuseCount: number;
+  reuseRate: number | null;
+  incrementalCount: number;
+  rebuildCount: number;
+  exactSummaries: number;
+  estimatedSummaries: number;
+  tokenizerNames: string[];
 };
 
 export type DurableContextMetadata = Pick<PersistedContextSummary, 'artifactIds' | 'approvalEventIds' | 'unresolvedItems' | 'durableFacts'>;
@@ -52,6 +88,8 @@ export type ContextWindowOptions = {
   maxSummaryCharacters?: number;
   /** Model tokenizer hook. The default is a conservative, deterministic estimate. */
   tokenizer?: (text: string) => number;
+  tokenizerName?: string;
+  tokenizerMode?: 'estimated' | 'exact';
   maxTokens?: number;
   summaryVersion?: string;
 };
@@ -103,9 +141,77 @@ const defaults = {
   maxCharacters: 48_000,
   maxSummaryCharacters: 8_000,
   tokenizer: estimateTokens,
+  tokenizerName: 'axiom-estimate-v2',
+  tokenizerMode: 'estimated' as const,
   maxTokens: 12_000,
   summaryVersion: 'deterministic-v2',
 } as const;
+
+const ratioPercent = (numerator: number, denominator: number) => denominator > 0
+  ? Number((numerator / denominator * 100).toFixed(1))
+  : null;
+
+const summaryQuality = (
+  messages: DurableContextSourceMessage[],
+  covered: DurableContextSourceMessage[],
+  content: string,
+  previous: PersistedContextSummary | undefined,
+  action: ContextSummaryQuality['lastAction'],
+  options: ContextWindowOptions,
+): ContextSummaryQuality => {
+  const tokenizer = options.tokenizer ?? defaults.tokenizer;
+  const sourceCharacters = covered.reduce((total, message) => total + messageText(message).length, 0);
+  const sourceTokens = covered.reduce((total, message) => total + tokenizer(messageText(message)), 0);
+  const summaryTokens = tokenizer(content);
+  const previousQuality = previous?.quality;
+  const compressionRatio = ratioPercent(Math.max(0, sourceTokens - summaryTokens), sourceTokens);
+  return {
+    schemaVersion: 1,
+    tokenizer: {
+      name: options.tokenizerName?.trim() || (options.tokenizer ? 'custom-tokenizer' : defaults.tokenizerName),
+      mode: options.tokenizerMode ?? defaults.tokenizerMode,
+    },
+    lastAction: action,
+    sourceMessages: covered.length,
+    sourceCharacters,
+    sourceTokens,
+    summaryCharacters: content.length,
+    summaryTokens,
+    compressionPercent: compressionRatio,
+    coveragePercent: ratioPercent(covered.length, messages.length) ?? 0,
+    evaluations: (previousQuality?.evaluations ?? 0) + 1,
+    reuseCount: (previousQuality?.reuseCount ?? 0) + (action === 'reused' ? 1 : 0),
+    incrementalCount: (previousQuality?.incrementalCount ?? 0) + (action === 'incremental' ? 1 : 0),
+    rebuildCount: (previousQuality?.rebuildCount ?? 0) + (action === 'rebuilt' ? 1 : 0),
+    updatedAt: new Date().toISOString(),
+  };
+};
+
+export const aggregateContextSummaryQuality = (summaries: Array<PersistedContextSummary | undefined>): ContextSummaryOperations => {
+  const quality = summaries.flatMap((summary) => summary?.quality ? [summary.quality] : []);
+  const sourceTokens = quality.reduce((total, item) => total + item.sourceTokens, 0);
+  const summaryTokens = quality.reduce((total, item) => total + item.summaryTokens, 0);
+  const evaluations = quality.reduce((total, item) => total + item.evaluations, 0);
+  const reuseCount = quality.reduce((total, item) => total + item.reuseCount, 0);
+  const sourceMessages = quality.reduce((total, item) => total + item.sourceMessages, 0);
+  const weightedCoverage = quality.reduce((total, item) => total + item.coveragePercent * item.sourceMessages, 0);
+  return {
+    summaries: quality.length,
+    sourceMessages,
+    sourceTokens,
+    summaryTokens,
+    compressionPercent: ratioPercent(Math.max(0, sourceTokens - summaryTokens), sourceTokens),
+    averageCoveragePercent: sourceMessages > 0 ? Number((weightedCoverage / sourceMessages).toFixed(1)) : null,
+    evaluations,
+    reuseCount,
+    reuseRate: ratioPercent(reuseCount, evaluations),
+    incrementalCount: quality.reduce((total, item) => total + item.incrementalCount, 0),
+    rebuildCount: quality.reduce((total, item) => total + item.rebuildCount, 0),
+    exactSummaries: quality.filter((item) => item.tokenizer.mode === 'exact').length,
+    estimatedSummaries: quality.filter((item) => item.tokenizer.mode === 'estimated').length,
+    tokenizerNames: [...new Set(quality.map((item) => item.tokenizer.name))].sort(),
+  };
+};
 
 const normalize = (value: string) => value
   .replace(/\u0000/g, '')
@@ -201,13 +307,22 @@ export const buildPersistedContextSummary = (
   const unchanged = previousIsPrefix
     && previous!.sourceDigest === digest
     && previous!.coveredMessageIds.length === covered.length;
-  if (unchanged) return previous!;
+  if (unchanged) {
+    return {
+      ...previous!,
+      quality: summaryQuality(messages, covered, previous!.content, previous, 'reused', options),
+    };
+  }
+  const action: ContextSummaryQuality['lastAction'] = !previous
+    ? 'created'
+    : previousIsPrefix ? 'incremental' : 'rebuilt';
+  const boundedContent = bounded(content, maxCharacters);
   return {
     summaryId: `context-summary:${sessionId}`,
     sessionId,
     version: Math.max(1, (previous?.version ?? 0) + 1),
     algorithm: durableAlgorithm,
-    content: bounded(content, maxCharacters),
+    content: boundedContent,
     coveredMessageIds: covered.map((message) => message.id),
     coveredFrom: covered[0]?.id,
     coveredTo: covered.at(-1)?.id,
@@ -217,6 +332,7 @@ export const buildPersistedContextSummary = (
     unresolvedItems: [],
     durableFacts: [],
     createdAt: new Date().toISOString(),
+    quality: summaryQuality(messages, covered, boundedContent, previous, action, options),
   };
 };
 
@@ -224,6 +340,7 @@ export const attachPersistedContextMetadata = (
   summary: PersistedContextSummary,
   metadata: DurableContextMetadata,
   maxCharacters = defaults.maxSummaryCharacters,
+  options: Pick<ContextWindowOptions, 'tokenizer' | 'tokenizerName' | 'tokenizerMode'> = {},
 ): PersistedContextSummary => {
   const artifactIds = [...new Set(metadata.artifactIds)].slice(0, 100);
   const approvalEventIds = [...new Set(metadata.approvalEventIds)].slice(0, 100);
@@ -240,7 +357,20 @@ export const attachPersistedContextMetadata = (
   const content = ledger
     ? `${summaryOpening}${bounded(`${sourceBody}\n\n【执行状态索引】\n${ledger}`, bodyBudget)}${summaryClosing}`
     : summary.content;
-  return { ...summary, content: bounded(content, maxCharacters), artifactIds, approvalEventIds, unresolvedItems, durableFacts };
+  const boundedContent = bounded(content, maxCharacters);
+  const tokenizer = options.tokenizer ?? defaults.tokenizer;
+  const quality = summary.quality ? {
+    ...summary.quality,
+    tokenizer: {
+      name: options.tokenizerName?.trim() || summary.quality.tokenizer.name,
+      mode: options.tokenizerMode ?? summary.quality.tokenizer.mode,
+    },
+    summaryCharacters: boundedContent.length,
+    summaryTokens: tokenizer(boundedContent),
+    compressionPercent: ratioPercent(Math.max(0, summary.quality.sourceTokens - tokenizer(boundedContent)), summary.quality.sourceTokens),
+    updatedAt: new Date().toISOString(),
+  } : undefined;
+  return { ...summary, content: boundedContent, artifactIds, approvalEventIds, unresolvedItems, durableFacts, ...(quality ? { quality } : {}) };
 };
 
 const dedupeKey = (value: string) => value

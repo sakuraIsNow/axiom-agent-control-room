@@ -642,6 +642,7 @@ function ProviderVaultAction({ kind, name, settings, state, onSave }: {
 
 function App() {
   const [sessions, setSessions] = useState<Session[]>(loadSessions);
+  const [sessionsReady, setSessionsReady] = useState(false);
   const initialUrlState = useMemo(() => readDashboardUrlState(), []);
   const initialSessionId = initialUrlState.sessionId && sessions.some((session) => session.id === initialUrlState.sessionId)
     ? initialUrlState.sessionId
@@ -726,6 +727,7 @@ function App() {
   const [pausedAssistantId, setPausedAssistantId] = useState<string | null>(null);
   const [readinessOpen, setReadinessOpen] = useState(false);
   const [taskCatalog, setTaskCatalog] = useState<WorkflowTaskSummary[]>([]);
+  const [taskCatalogReady, setTaskCatalogReady] = useState(false);
   const [taskStatusFilter, setTaskStatusFilter] = useState<WorkflowTaskStatus | 'all'>('all');
   const [taskCatalogOpen, setTaskCatalogOpen] = useState(true);
   const [taskCatalogBusy, setTaskCatalogBusy] = useState(false);
@@ -890,6 +892,7 @@ function App() {
           const normalized = next.length > 0 ? next : [createSession()];
           return normalized;
         });
+        setSessionsReady(true);
       })
       .catch((caught) => {
         if (controller.signal.aborted) return;
@@ -1132,6 +1135,7 @@ function App() {
     setTaskCatalogBusy(true);
     try {
       setTaskCatalog(await listWorkflowTasks(30));
+      setTaskCatalogReady(true);
       setTaskCatalogError(null);
     } catch (caught) {
       setTaskCatalogError(userFacingError(caught, '任务列表暂时不可用'));
@@ -3627,6 +3631,7 @@ function App() {
             provider={activeProvider}
             textModelCredentialId={providerSettings.text.useCustom ? providerSettings.text.credentialId : undefined}
             onThemeChange={setUiTheme}
+            onboardingReady={sessionsReady && taskCatalogReady}
           />
       </Suspense>
 

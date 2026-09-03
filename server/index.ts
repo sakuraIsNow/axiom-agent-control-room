@@ -24,7 +24,7 @@ import { ToolRegistry } from './runtime/toolRegistry.js';
 import { createTemplateStore } from './runtime/templateStore.js';
 import { createPluginStore } from './runtime/pluginStore.js';
 import { createAgentStore } from './runtime/agentStore.js';
-import { agentCatalog, appendMissingAgentDirectory } from './runtime/agentCatalog.js';
+import { agentCatalog, appendMissingAgentDirectory, supplementAgentDirectoryResponse } from './runtime/agentCatalog.js';
 import { deepSeekCapabilityInfo } from './runtime/providerCapabilities.js';
 import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
 import { chatRouteDecisionSchema, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision } from './runtime/chatRouter.js';
@@ -39,6 +39,7 @@ import { createProviderCredentialStore, type ProviderCredentialKind } from './ru
 import { consumeSseBlocks } from './runtime/sse.js';
 import { resolveTraceContext } from './runtime/trace.js';
 import { CodexHarnessAdapter, DeepSeekHarnessAdapter } from './runtime/harnessClient.js';
+import { createOutboundNotificationStore, OutboundNotificationManager } from './runtime/outboundNotifications.js';
 
 dotenv.config({ path: resolve(process.cwd(), '.env.local'), quiet: true });
 dotenv.config({ quiet: true });
@@ -174,6 +175,10 @@ const pluginStore = createPluginStore();
 await pluginStore.initialize();
 const agentStore = createAgentStore();
 await agentStore.initialize();
+const outboundNotificationStore = createOutboundNotificationStore();
+await outboundNotificationStore.initialize();
+const outboundNotifications = new OutboundNotificationManager(outboundNotificationStore, fetch, logger);
+outboundNotifications.start();
 const eventHub = new EventHub();
 eventHub.subscribeAll((event) => {
   metrics.recordEvent(event);
@@ -597,6 +602,7 @@ app.route('/api', createTaskApi({
     return credential?.kind === 'text' ? { id: credential.id, model: credential.model } : null;
   },
   harnessAdapter,
+  outboundNotifications,
 }));
 
 const parseImageData = (imageData: string) => {
@@ -1717,7 +1723,7 @@ app.post('/api/chat', async (c) => {
         }
 
         if (routing.intent === 'agent-registry' && registrySnapshot) {
-          const supplemented = appendMissingAgentDirectory(outputText, [
+          const supplemented = supplementAgentDirectoryResponse(latestUserMessage, outputText, [
             ...registrySnapshot.coreAgents,
             ...registrySnapshot.serviceAgents,
             ...registrySnapshot.customAgents.filter((agent) => agent.status === 'published'),
@@ -1873,6 +1879,8 @@ const shutdown = async (signal: string) => {
   await templateStore.close();
   await taskStore.close();
   await providerCredentialStore.close?.();
+  await outboundNotifications.stop();
+  await outboundNotificationStore.close();
   memoryCompensationWorker.stop();
   await runtimeMemory.close();
   logger.info({ signal }, 'graceful shutdown completed');

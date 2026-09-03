@@ -495,6 +495,9 @@ test('capability questions remain registry requests without substring false posi
     assert.equal(capability.intent, 'agent-registry', message);
     assert.equal(capability.agentRole, 'registry-agent', message);
     assert.equal(capability.execution, 'gateway', message);
+    assert.equal(capability.requiresSearch, false, message);
+    assert.deepEqual(capability.skillIds, [], message);
+    assert.equal(capability.router.requiresExternalFacts, false, message);
   }
 
   const ordinary = fallbackChatRoute({ message: '智能体如何协作完成一个系统设计？', mode: 'analyze' });

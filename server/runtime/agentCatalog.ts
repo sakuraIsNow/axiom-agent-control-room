@@ -21,6 +21,8 @@ export type LiveAgentDirectoryEntry = {
   roleId?: string;
   name?: string;
   status?: string;
+  available?: boolean;
+  capabilities?: string[];
 };
 
 const directoryToken = (value: unknown) => String(value ?? '')
@@ -64,6 +66,47 @@ export const appendMissingAgentDirectory = (
   const remaining = missing.length - names.length;
   const suffix = `\n\n实时目录补充：${names.join('、')}${remaining > 0 ? `，另有 ${remaining} 个 Agent` : ''}。`;
   return content ? `${content}${suffix}` : suffix.slice(2);
+};
+
+type CapabilityQuestion = {
+  agentId: string;
+  label: string;
+  pattern: RegExp;
+};
+
+const capabilityQuestions: CapabilityQuestion[] = [
+  { agentId: 'search-agent', label: '联网搜索', pattern: /(?:联网|网络|实时).{0,8}(?:搜索|检索)|(?:搜索|检索).{0,8}(?:能力|功能)|web\s*search/i },
+  { agentId: 'vision-agent', label: '图片识别', pattern: /(?:图片|图像|视觉).{0,8}(?:识别|分析|理解)|(?:识图|看图)/i },
+  { agentId: 'document-agent', label: '文档分析', pattern: /(?:文档|pdf|word|docx).{0,8}(?:分析|读取|识别|理解)/i },
+  { agentId: 'drawing-agent', label: '图片生成', pattern: /(?:绘图|画图|图片生成|图像生成)/i },
+  { agentId: 'video-agent', label: '视频生成', pattern: /(?:视频).{0,8}(?:生成|制作)/i },
+  { agentId: 'report-agent', label: '报告导出', pattern: /(?:报告).{0,8}(?:导出|下载|生成)|(?:导出).{0,8}(?:pdf|word|latex|md)/i },
+];
+
+/**
+ * Capability questions should not expand into the entire Agent catalog. Keep
+ * the model-authored answer, then append one live, narrowly scoped status line
+ * so an internal id or a synonym cannot hide whether the capability is really
+ * configured for this request.
+ */
+export const supplementAgentDirectoryResponse = (
+  question: string,
+  content: string,
+  entries: readonly LiveAgentDirectoryEntry[],
+) => {
+  const capability = capabilityQuestions.find((candidate) => candidate.pattern.test(question));
+  if (!capability) return appendMissingAgentDirectory(content, entries);
+
+  const entry = entries.find((candidate) => candidate.id === capability.agentId || candidate.roleId === capability.agentId);
+  if (!entry) return content;
+
+  const agentName = directoryDisplayName(entry);
+  const status = entry.available === false
+    ? `实时能力状态：${capability.label}尚未配置，${agentName}当前不可用。`
+    : entry.available === true
+      ? `实时能力状态：已配置${capability.label}，由${agentName}处理；外部服务会在实际执行时再次验证。`
+      : `实时能力状态：已登记${capability.label}，由${agentName}处理；是否可用以实际执行结果为准。`;
+  return content.trim() ? `${content}\n\n${status}` : status;
 };
 
 export const agentCatalog: AgentCatalogEntry[] = [
