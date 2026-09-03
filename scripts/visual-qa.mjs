@@ -322,9 +322,29 @@ const pluginResizeResult = await pluginResizeResponse;
 await pluginWindowSizeEditor.waitFor({ state: 'hidden' });
 const pluginWindowResizeSaved = pluginResizeResult.ok()
   && (await page.locator('.dash-plugin-live-preview > header small').textContent())?.trim() === '700 x 520';
+const pluginCompatibilityResponse = page.waitForResponse((response) => response.request().method() === 'GET'
+  && new URL(response.url()).pathname === `/api/plugins/${qaPluginId}/compatibility`, { timeout: 5_000 });
+await page.getByRole('button', { name: '版本与权限', exact: true }).click();
+const pluginCompatibilityResult = await pluginCompatibilityResponse;
+const pluginLifecyclePanel = page.locator('.dash-plugin-lifecycle');
+await pluginLifecyclePanel.waitFor({ state: 'visible' });
+const pluginLifecycleText = await pluginLifecyclePanel.innerText();
+const pluginLifecycleVisible = pluginCompatibilityResult.ok()
+  && pluginLifecycleText.includes('可以发布')
+  && pluginLifecycleText.includes('调用平台 Agent')
+  && pluginLifecycleText.includes('v1');
+await pluginLifecyclePanel.getByRole('button', { name: '恢复', exact: true }).first().click();
+const pluginRollbackConfirmation = await page.locator('.dash-plugin-delete-backdrop').isVisible()
+  && (await page.locator('.dash-plugin-delete-backdrop').innerText()).includes('恢复版本 1？')
+  && (await page.locator('.dash-plugin-delete-backdrop').innerText()).includes('新的草稿版本');
+await page.locator('.dash-plugin-delete-backdrop').getByRole('button', { name: '取消', exact: true }).click();
 await page.screenshot({ path: resolve(outputDir, 'dashboard-plugin-designer.png'), fullPage: false });
 await page.getByRole('button', { name: '返回插件', exact: false }).click();
+const pluginLaunchResponse = page.waitForResponse((response) => response.request().method() === 'POST'
+  && new URL(response.url()).pathname === `/api/plugins/${qaPluginId}/launch`, { timeout: 5_000 });
 await page.getByRole('button', { name: `打开插件 ${fixturePluginName}`, exact: true }).click();
+const pluginLaunchResult = await pluginLaunchResponse;
+const pluginLaunchVerified = pluginLaunchResult.ok();
 await page.locator('.mini-app-backdrop').waitFor({ state: 'visible' });
 await page.waitForTimeout(260);
 const miniAppUsesExclusiveModal = await page.locator('.mini-app-window[aria-modal="true"]').isVisible()
@@ -345,6 +365,20 @@ const pluginWindowResizePersists = Math.abs(resizedMiniAppRect.width - 700) <= 3
   && Math.abs(resizedMiniAppRect.height - 520) <= 3;
 await page.screenshot({ path: resolve(outputDir, 'dashboard-mini-app.png'), fullPage: false });
 await page.getByRole('button', { name: '关闭插件', exact: true }).click();
+await page.getByRole('button', { name: `修改插件 ${fixturePluginName}`, exact: true }).click();
+const pluginCompatibilityAfterOpen = page.waitForResponse((response) => response.request().method() === 'GET'
+  && new URL(response.url()).pathname === `/api/plugins/${qaPluginId}/compatibility`, { timeout: 5_000 });
+await page.getByRole('button', { name: '版本与权限', exact: true }).click();
+await pluginCompatibilityAfterOpen;
+await page.locator('.dash-plugin-lifecycle').getByRole('button', { name: '恢复', exact: true }).first().click();
+const pluginRollbackResponse = page.waitForResponse((response) => response.request().method() === 'POST'
+  && new URL(response.url()).pathname === `/api/plugins/${qaPluginId}/rollback`, { timeout: 5_000 });
+await page.locator('.dash-plugin-delete-backdrop').getByRole('button', { name: '确认恢复', exact: true }).click();
+const pluginRollbackResult = await pluginRollbackResponse;
+await page.locator('.dash-plugin-delete-backdrop').waitFor({ state: 'hidden' });
+const pluginRollbackWorks = pluginRollbackResult.ok()
+  && (await page.locator('.dash-plugin-design-chat > header small').textContent())?.trim() === '版本 3';
+await page.getByRole('button', { name: '返回插件', exact: false }).click();
 await page.getByRole('button', { name: `删除插件 ${fixturePluginName}`, exact: true }).click();
 const pluginDeleteWarnsIrreversible = await page.locator('.dash-plugin-delete-backdrop').isVisible()
   && (await page.locator('.dash-plugin-delete-backdrop').innerText()).includes('删除后无法恢复');
@@ -943,6 +977,10 @@ const assertions = {
   pluginWindowResizeAvailable,
   pluginWindowResizeSaved,
   pluginWindowResizePersists,
+  pluginLifecycleVisible,
+  pluginRollbackConfirmation,
+  pluginRollbackWorks,
+  pluginLaunchVerified,
   miniAppUsesExclusiveModal,
   miniAppBackdropUsesGlass,
   miniAppSandboxIsOpaque,

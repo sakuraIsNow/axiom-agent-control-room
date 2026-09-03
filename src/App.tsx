@@ -41,7 +41,7 @@ import { streamAgentResponse } from './lib/agentStream';
 import { generateImage, readImageAsDataUrl } from './lib/imageGeneration';
 import { approveWorkflowPlan, approveWorkflowReview, approveWorkflowTool, cancelWorkflowTask, controlWorkflowNode, createWorkflowTask, deleteWorkflowTask, getWorkflowArtifact, getWorkflowTask, listWorkflowTasks, pauseWorkflowTask, rejectWorkflowPlan, rejectWorkflowReview, rejectWorkflowTool, replanWorkflowTask, resumeWorkflowTask, retryWorkflowTask, sendTaskGuidance, sendTaskNote, streamWorkflowEvents } from './lib/taskRuntime';
 import { createTemplateFromCatalog, exportWorkflowTemplate, importWorkflowTemplate, listBuiltInTemplates, listWorkflowTemplates, publishWorkflowTemplate, shareWorkflowTemplate } from './lib/templateRuntime';
-import { createPlugin, deletePlugin as deleteUserPluginRequest, listPlugins, runPlugin, streamPluginWithAgent, updatePlugin } from './lib/pluginRuntime';
+import { createPlugin, deletePlugin as deleteUserPluginRequest, inspectPluginCompatibility, launchMiniApp, listPlugins, publishPlugin, rollbackPlugin, runPlugin, streamPluginWithAgent, updatePlugin } from './lib/pluginRuntime';
 import { loadUiTheme, type UiTheme } from './lib/uiTheme';
 import { agentDisplayName } from './lib/agentPresentation';
 import { MiniAppWindow, type MiniAppAgentProgress } from './components/plugins/MiniAppWindow';
@@ -1360,12 +1360,45 @@ function App() {
     if (pluginBusy) return;
     setPluginBusy(true);
     try {
-      const updated = await updatePlugin(plugin.id, { status: 'published' });
+      const { plugin: updated } = await publishPlugin(plugin.id);
       setUserPlugins((current) => current.map((item) => item.id === updated.id ? updated : item));
       setSelectedPlugin((current) => current?.id === updated.id ? null : current);
       setPluginError(null);
     } catch (caught) {
       setPluginError(userFacingError(caught, '插件发布失败'));
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy]);
+
+  const openUserMiniApp = useCallback(async (plugin: UserPlugin) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      const { plugin: current } = await launchMiniApp(plugin.id);
+      setUserPlugins((plugins) => plugins.map((item) => item.id === current.id ? current : item));
+      setSelectedPlugin((selected) => selected?.id === current.id ? current : selected);
+      setMiniAppPlugin(current);
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件打开失败'));
+    } finally {
+      setPluginBusy(false);
+    }
+  }, [pluginBusy]);
+
+  const rollbackUserPlugin = useCallback(async (plugin: UserPlugin, version: number) => {
+    if (pluginBusy) return;
+    setPluginBusy(true);
+    setPluginError(null);
+    try {
+      const { plugin: updated } = await rollbackPlugin(plugin.id, version);
+      setUserPlugins((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setSelectedPlugin((current) => current?.id === updated.id ? updated : current);
+      setMiniAppPlugin((current) => current?.id === updated.id ? null : current);
+    } catch (caught) {
+      setPluginError(userFacingError(caught, '插件版本恢复失败'));
+      throw caught;
     } finally {
       setPluginBusy(false);
     }
@@ -3377,8 +3410,10 @@ function App() {
               agentLive={pluginAgentLive}
               onRefresh={() => { void refreshPlugins(); }}
               onSelect={(plugin) => { setSelectedPlugin(plugin); setPluginValues({}); }}
-              onOpenMiniApp={setMiniAppPlugin}
+              onOpenMiniApp={(plugin) => { void openUserMiniApp(plugin); }}
               onPublish={(plugin) => { void publishUserPlugin(plugin); }}
+              onCheckCompatibility={(plugin) => inspectPluginCompatibility(plugin.id)}
+              onRollback={rollbackUserPlugin}
               onResize={resizeUserPluginWindow}
               onDelete={deleteUserPlugin}
               onRun={() => { void runSelectedPlugin(); }}

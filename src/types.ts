@@ -826,6 +826,35 @@ export type PluginDesignMessage = {
   createdAt: string;
 };
 
+export type PluginDeclaredPermission = {
+  id: string;
+  label: string;
+  kind: 'platform-agent' | 'tool';
+  risk: 'low' | 'medium' | 'high' | 'critical';
+};
+
+export type PluginRelease = {
+  schemaVersion: 1;
+  platformVersion: string;
+  pluginVersion: number;
+  integrity: string;
+  signature?: string;
+  signedAt: string;
+  signedBy: string;
+  permissions: PluginDeclaredPermission[];
+  warnings: string[];
+};
+
+export type PluginCompatibilityReport = {
+  compatible: boolean;
+  errors: string[];
+  warnings: string[];
+  permissions: PluginDeclaredPermission[];
+  integrity: string;
+  releaseState: 'draft' | 'unsigned' | 'signed' | 'invalid';
+  signatureRequired: boolean;
+};
+
 export type UserPlugin = {
   id: string;
   tenantId: string;
@@ -850,6 +879,18 @@ export type UserPlugin = {
     agentInstructions?: string;
     designConversation?: PluginDesignMessage[];
   };
+  history: Array<{
+    version: number;
+    definition: UserPlugin['definition'];
+    name?: string;
+    description?: string;
+    icon?: string;
+    visibility?: 'private' | 'team';
+    release?: PluginRelease;
+    updatedAt: string;
+    updatedBy: string;
+  }>;
+  release?: PluginRelease;
   createdBy: string;
   createdAt: string;
   updatedAt: string;

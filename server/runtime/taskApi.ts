@@ -33,6 +33,7 @@ import { checkpointsFromEvents, diffCheckpointToTask, mergeCheckpointBranch } fr
 import { attachPersistedContextMetadata, buildPersistedContextSummary, type DurableContextSourceMessage } from './contextSummary.js';
 import { buildOperationsAlerts } from './operationsAlerts.js';
 import { buildInAppNotifications } from './inAppNotifications.js';
+import { createPluginRelease, inspectPluginCompatibility } from './pluginCompatibility.js';
 import { buildScheduleInsights } from './scheduleInsights.js';
 import { breadthFirstThreadDescendants, buildHarnessThreadGraph } from './harnessThreadGraph.js';
 
@@ -244,6 +245,7 @@ const createPluginSchema = z.object({
 });
 
 const updatePluginSchema = createPluginSchema.partial().extend({ status: z.enum(['draft', 'published', 'archived']).optional() });
+const rollbackPluginSchema = z.object({ version: z.number().int().positive() }).strict();
 const pluginAgentProviderSchema = z.object({
   credentialId: z.string().uuid().optional(),
   apiUrl: z.string().url().max(2_000).optional(),
@@ -681,6 +683,16 @@ export const createTaskApi = (dependencies: {
   const templates = dependencies.templates;
   const plugins = dependencies.plugins;
   const agents = dependencies.agents;
+  const pluginSigningKey = process.env.AXIOM_PLUGIN_SIGNING_KEY?.trim() || undefined;
+  const pluginSignatureRequired = process.env.AXIOM_REQUIRE_PLUGIN_SIGNATURE === 'true';
+  const inspectPlugin = (plugin: UserPlugin) => inspectPluginCompatibility(plugin, toolRegistry?.catalog() ?? [], {
+    signingKey: pluginSigningKey,
+    signatureRequired: pluginSignatureRequired,
+  });
+  const inspectPluginForPublish = (plugin: UserPlugin) => inspectPluginCompatibility(plugin, toolRegistry?.catalog() ?? [], {
+    signingKey: pluginSigningKey,
+    signatureRequired: false,
+  });
   const readinessDependencies = {
     memory,
     model,
@@ -1187,11 +1199,19 @@ export const createTaskApi = (dependencies: {
   };
 
   api.get('/plugins', async (c) => {
-    if (!plugins) return c.json({ error: 'Plugins are not initialized.' }, 503);
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
     const principal = identity(c.req.raw.headers);
     const requestedLimit = Number(c.req.query('limit') ?? 50);
     const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 50;
     return c.json({ plugins: await plugins.listPlugins(principal.tenantId, limit, templateAccess(principal)) });
+  });
+
+  api.get('/plugins/:pluginId/compatibility', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const plugin = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId, templateAccess(principal));
+    if (!plugin) return c.json({ error: '插件不存在。' }, 404);
+    return c.json({ report: inspectPlugin(plugin) });
   });
 
   api.post('/plugins', async (c) => {
@@ -1442,13 +1462,14 @@ export const createTaskApi = (dependencies: {
   });
 
   api.patch('/plugins/:pluginId', async (c) => {
-    if (!plugins) return c.json({ error: 'Plugins are not initialized.' }, 503);
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
     const parsed = updatePluginSchema.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: 'Invalid plugin update.', details: parsed.error.flatten() }, 400);
+    if (!parsed.success) return c.json({ error: '插件修改内容无效。', details: parsed.error.flatten() }, 400);
     const principal = identity(c.req.raw.headers);
     const current = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId);
-    if (!current) return c.json({ error: 'Plugin not found.' }, 404);
-    if (!canManagePlugin(current, principal)) return c.json({ error: 'Only the plugin owner or tenant admin can edit this plugin.' }, 403);
+    if (!current) return c.json({ error: '插件不存在。' }, 404);
+    if (!canManagePlugin(current, principal)) return c.json({ error: '只有插件创建者或租户管理员可以修改此插件。' }, 403);
+    if (parsed.data.status === 'published') return c.json({ error: '请使用插件发布操作完成兼容检查。' }, 409);
     try {
       const plugin = await plugins.updatePlugin(current.id, principal.tenantId, {
         updatedBy: principal.userId,
@@ -1466,6 +1487,59 @@ export const createTaskApi = (dependencies: {
     }
   });
 
+  api.post('/plugins/:pluginId/publish', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const current = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId);
+    if (!current) return c.json({ error: '插件不存在。' }, 404);
+    if (!canManagePlugin(current, principal)) return c.json({ error: '只有插件创建者或租户管理员可以发布此插件。' }, 403);
+    if (pluginSignatureRequired && !pluginSigningKey) {
+      return c.json({ error: '部署要求插件签名，但服务端尚未配置签名密钥。', report: inspectPlugin(current) }, 503);
+    }
+    const report = inspectPluginForPublish(current);
+    if (!report.compatible) return c.json({ error: '插件未通过发布检查。', report }, 409);
+    const release = createPluginRelease(current, report, principal.userId, pluginSigningKey);
+    try {
+      const plugin = await plugins.publishPlugin(current.id, principal.tenantId, release);
+      return c.json({ plugin, report: inspectPlugin(plugin) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '插件发布失败。';
+      return c.json({ error: message }, /not found/i.test(message) ? 404 : 409);
+    }
+  });
+
+  api.post('/plugins/:pluginId/rollback', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const parsed = rollbackPluginSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '请选择需要恢复的历史版本。' }, 400);
+    const principal = identity(c.req.raw.headers);
+    const current = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId);
+    if (!current) return c.json({ error: '插件不存在。' }, 404);
+    if (!canManagePlugin(current, principal)) return c.json({ error: '只有插件创建者或租户管理员可以恢复版本。' }, 403);
+    try {
+      const plugin = await plugins.rollbackPlugin(current.id, principal.tenantId, parsed.data.version, principal.userId);
+      return c.json({ plugin, report: inspectPlugin(plugin) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '插件版本恢复失败。';
+      return c.json({ error: message }, /not found/i.test(message) ? 404 : 409);
+    }
+  });
+
+  api.post('/plugins/:pluginId/launch', async (c) => {
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
+    const principal = identity(c.req.raw.headers);
+    const plugin = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId, templateAccess(principal));
+    if (!plugin) return c.json({ error: '插件不存在。' }, 404);
+    if (plugin.kind !== 'mini-app') return c.json({ error: '只有 Mini App 插件可以在独立窗口中打开。' }, 409);
+    if (plugin.status !== 'published') {
+      if (!canManagePlugin(plugin, principal)) return c.json({ error: '只有插件创建者或租户管理员可以预览草稿。' }, 403);
+      return c.json({ plugin, mode: 'preview' as const, report: inspectPlugin(plugin) });
+    }
+    const report = inspectPlugin(plugin);
+    if (!report.compatible) return c.json({ error: '插件当前版本未通过运行检查，请修复后重新发布。', report }, 409);
+    return c.json({ plugin, mode: 'run' as const, report });
+  });
+
   api.delete('/plugins/:pluginId', async (c) => {
     if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
     const principal = identity(c.req.raw.headers);
@@ -1477,17 +1551,16 @@ export const createTaskApi = (dependencies: {
   });
 
   api.post('/plugins/:pluginId/run', async (c) => {
-    if (!plugins) return c.json({ error: 'Plugins are not initialized.' }, 503);
+    if (!plugins) return c.json({ error: '插件服务尚未初始化。' }, 503);
     const parsed = runPluginSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'A plugin session and input are required.', details: parsed.error.flatten() }, 400);
     const principal = identity(c.req.raw.headers);
     const plugin = await plugins.getPlugin(c.req.param('pluginId'), principal.tenantId, templateAccess(principal));
-    if (!plugin) return c.json({ error: 'Plugin not found.' }, 404);
+    if (!plugin) return c.json({ error: '插件不存在。' }, 404);
     if (plugin.kind === 'mini-app') return c.json({ error: 'Mini-app plugins open in the client window and do not create a workflow task.' }, 409);
-    if (plugin.status !== 'published') return c.json({ error: 'Only published plugins can run.' }, 409);
-    const configuredTools = new Set((toolRegistry?.catalog() ?? []).map((tool) => tool.name));
-    const unavailableTool = (plugin.definition.toolNames ?? []).find((name) => !configuredTools.has(name));
-    if (unavailableTool) return c.json({ error: `Plugin references unavailable tool: ${unavailableTool}.` }, 409);
+    if (plugin.status !== 'published') return c.json({ error: '只有已发布插件可以运行。' }, 409);
+    const compatibility = inspectPlugin(plugin);
+    if (!compatibility.compatible) return c.json({ error: '插件当前版本未通过运行检查，请修复后重新发布。', report: compatibility }, 409);
     try {
       const input = pluginPrompt(plugin, parsed.data.input ?? '', parsed.data.values);
       if (!input.trim()) return c.json({ error: 'Plugin input is required.' }, 400);

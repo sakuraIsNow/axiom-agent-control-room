@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Bot, Check, ExternalLink, Maximize2, Pencil, Play, Plus, RefreshCw, Save, Send, Sparkles, Trash2, X } from 'lucide-react';
-import type { AgentMode, PluginInputField, PluginVisualEffect, UserPlugin } from '../../types';
+import { ArrowLeft, Bot, Check, ExternalLink, History, Maximize2, Pencil, Play, Plus, RefreshCw, RotateCcw, Save, Send, ShieldAlert, ShieldCheck, Sparkles, Trash2, X } from 'lucide-react';
+import type { AgentMode, PluginCompatibilityReport, PluginInputField, PluginVisualEffect, UserPlugin } from '../../types';
 import { secureArtifactDocument } from '../../lib/chatArtifacts';
 import { appearanceForPlugin, PluginGlyph, pluginEffects } from './PluginGlyph';
 
@@ -35,6 +35,8 @@ export type PluginWorkspaceProps = {
   onSelect: (plugin: UserPlugin | null) => void;
   onOpenMiniApp: (plugin: UserPlugin) => void;
   onPublish: (plugin: UserPlugin) => void;
+  onCheckCompatibility: (plugin: UserPlugin) => Promise<PluginCompatibilityReport>;
+  onRollback: (plugin: UserPlugin, version: number) => Promise<void>;
   onResize: (plugin: UserPlugin, width: number, height: number) => Promise<void>;
   onDelete: (plugin: UserPlugin) => Promise<void>;
   onRun: () => void;
@@ -51,11 +53,16 @@ export type PluginWorkspaceProps = {
 export function PluginWorkspace(props: PluginWorkspaceProps) {
   const {
     plugins, selectedPlugin, busy, running, error, values, freeform, createOpen, shellDraft, designerInput, agentLive,
-    onRefresh, onSelect, onOpenMiniApp, onPublish, onResize, onDelete, onRun, onValuesChange, onFreeformChange,
+    onRefresh, onSelect, onOpenMiniApp, onPublish, onCheckCompatibility, onRollback, onResize, onDelete, onRun, onValuesChange, onFreeformChange,
     onOpenCreate, onCloseCreate, onShellDraftChange, onCreateShell, onDesignerInputChange, onDesignWithAgent,
   } = props;
   const [pendingDelete, setPendingDelete] = useState<UserPlugin | null>(null);
   const [sizeEditorOpen, setSizeEditorOpen] = useState(false);
+  const [lifecycleOpen, setLifecycleOpen] = useState(false);
+  const [compatibility, setCompatibility] = useState<PluginCompatibilityReport | null>(null);
+  const [compatibilityError, setCompatibilityError] = useState('');
+  const [compatibilityBusy, setCompatibilityBusy] = useState(false);
+  const [pendingRollback, setPendingRollback] = useState<number | null>(null);
   const [sizeDraft, setSizeDraft] = useState({ width: 720, height: 520 });
   const designMessagesRef = useRef<HTMLDivElement>(null);
   const selectedAppearance = useMemo(() => selectedPlugin ? appearanceForPlugin(selectedPlugin) : null, [selectedPlugin]);
@@ -74,7 +81,38 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
       height: selectedPlugin?.definition.height ?? 520,
     });
     setSizeEditorOpen(false);
+    setLifecycleOpen(false);
+    setCompatibility(null);
+    setCompatibilityError('');
+    setPendingRollback(null);
   }, [selectedPlugin?.id]);
+
+  useEffect(() => {
+    setCompatibility(null);
+  }, [selectedPlugin?.version]);
+
+  const checkCompatibility = async () => {
+    if (!selectedPlugin || compatibilityBusy) return;
+    setCompatibilityBusy(true);
+    setCompatibilityError('');
+    try {
+      setCompatibility(await onCheckCompatibility(selectedPlugin));
+    } catch (caught) {
+      setCompatibilityError(caught instanceof Error ? caught.message : '插件检查失败');
+    } finally {
+      setCompatibilityBusy(false);
+    }
+  };
+
+  const toggleLifecycle = () => {
+    const next = !lifecycleOpen;
+    setLifecycleOpen(next);
+    if (next && !compatibility) void checkCompatibility();
+  };
+
+  const lifecyclePanel = selectedPlugin && lifecycleOpen
+    ? <PluginLifecyclePanel plugin={selectedPlugin} report={compatibility} busy={busy || compatibilityBusy} error={compatibilityError} onRefresh={() => { void checkCompatibility(); }} onRollback={setPendingRollback} />
+    : null;
 
   const sizeIsValid = Number.isInteger(sizeDraft.width) && sizeDraft.width >= 320 && sizeDraft.width <= 1_200
     && Number.isInteger(sizeDraft.height) && sizeDraft.height >= 240 && sizeDraft.height <= 900;
@@ -87,6 +125,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
         <div className="dash-workspace-actions">
           <button type="button" className="labeled" onClick={() => onOpenMiniApp(selectedPlugin)}><ExternalLink size={15} />打开</button>
           <button type="button" className="labeled" aria-expanded={sizeEditorOpen} onClick={() => setSizeEditorOpen((open) => !open)}><Maximize2 size={15} />窗口大小</button>
+          <button type="button" className="labeled" aria-expanded={lifecycleOpen} onClick={toggleLifecycle}><History size={15} />版本与权限</button>
           {selectedPlugin.status === 'draft' && <button type="button" className="primary labeled" onClick={() => onPublish(selectedPlugin)} disabled={busy}><Check size={15} />发布</button>}
           <button type="button" aria-label="删除插件" title="删除" onClick={() => setPendingDelete(selectedPlugin)}><Trash2 size={15} /></button>
         </div>
@@ -103,6 +142,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
         <span className={`dash-plugin-size-range ${sizeIsValid ? '' : 'invalid'}`}>宽 320–1200 · 高 240–900</span>
         <button type="submit" className="primary labeled" disabled={busy || !sizeIsValid}><Save size={15} />{busy ? '正在保存' : '保存大小'}</button>
       </form>}
+      {lifecyclePanel}
       <div className="dash-plugin-designer-layout">
         <section className="dash-plugin-design-chat glass-panel">
           <header><span><Bot size={15} />插件开发 Agent</span><small>版本 {selectedPlugin.version}</small></header>
@@ -125,13 +165,15 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
         </section>
       </div>
       {pendingDelete && <PluginDeleteDialog plugin={pendingDelete} busy={busy} onCancel={() => setPendingDelete(null)} onConfirm={async () => { await onDelete(pendingDelete); setPendingDelete(null); }} />}
+      {pendingRollback !== null && <PluginRollbackDialog plugin={selectedPlugin} version={pendingRollback} busy={busy} onCancel={() => setPendingRollback(null)} onConfirm={async () => { await onRollback(selectedPlugin, pendingRollback); setPendingRollback(null); }} />}
     </div>;
   }
 
   if (selectedPlugin) {
     return <div className="dash-plugin-workspace">
-      <header className="dash-workspace-heading"><div><button type="button" className="dash-plugin-back" onClick={() => onSelect(null)}><ArrowLeft size={15} />返回插件</button><h1>{selectedPlugin.name}</h1></div></header>
+      <header className="dash-workspace-heading"><div><button type="button" className="dash-plugin-back" onClick={() => onSelect(null)}><ArrowLeft size={15} />返回插件</button><h1>{selectedPlugin.name}</h1></div><div className="dash-workspace-actions"><button type="button" className="labeled" aria-expanded={lifecycleOpen} onClick={toggleLifecycle}><History size={15} />版本与权限</button>{selectedPlugin.status === 'draft' && <button type="button" className="primary labeled" onClick={() => onPublish(selectedPlugin)} disabled={busy}><Check size={15} />发布</button>}<button type="button" aria-label="删除插件" title="删除" onClick={() => setPendingDelete(selectedPlugin)}><Trash2 size={15} /></button></div></header>
       {error && <div className="dash-plugin-error">{error}</div>}
+      {lifecyclePanel}
       <section className="dash-plugin-run glass-panel">
         <p>{selectedPlugin.description || '填写本次任务内容，然后交给 Agent 执行。'}</p>
         <div className="dash-plugin-run-fields">
@@ -140,6 +182,8 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
         </div>
         <footer><span>版本 {selectedPlugin.version} · {modeLabels[selectedPlugin.definition.mode]}</span><button type="button" className="primary" onClick={onRun} disabled={busy || running}><Play size={16} />{busy ? '正在启动' : '运行插件'}</button></footer>
       </section>
+      {pendingDelete && <PluginDeleteDialog plugin={pendingDelete} busy={busy} onCancel={() => setPendingDelete(null)} onConfirm={async () => { await onDelete(pendingDelete); setPendingDelete(null); }} />}
+      {pendingRollback !== null && <PluginRollbackDialog plugin={selectedPlugin} version={pendingRollback} busy={busy} onCancel={() => setPendingRollback(null)} onConfirm={async () => { await onRollback(selectedPlugin, pendingRollback); setPendingRollback(null); }} />}
     </div>;
   }
 
@@ -196,6 +240,34 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
   </div>;
 }
 
+function PluginLifecyclePanel({ plugin, report, busy, error, onRefresh, onRollback }: {
+  plugin: UserPlugin;
+  report: PluginCompatibilityReport | null;
+  busy: boolean;
+  error: string;
+  onRefresh: () => void;
+  onRollback: (version: number) => void;
+}) {
+  const releaseLabel = report?.releaseState === 'signed' ? '签名有效'
+    : report?.releaseState === 'unsigned' ? '完整性已校验'
+      : report?.releaseState === 'invalid' ? '发布证明失效'
+        : '尚未发布';
+  const snapshots = [...plugin.history].sort((left, right) => right.version - left.version);
+  return <section className="dash-plugin-lifecycle glass-panel" aria-live="polite">
+    <header>
+      <div><span className={report?.compatible ? 'ready' : 'blocked'}>{report?.compatible ? <ShieldCheck size={18} /> : <ShieldAlert size={18} />}</span><div><strong>{report?.compatible ? '可以发布' : report ? '需要处理' : '正在检查'}</strong><small>当前版本 {plugin.version} · {releaseLabel}</small></div></div>
+      <button type="button" className="labeled" onClick={onRefresh} disabled={busy}><RefreshCw size={14} className={busy ? 'spin' : ''} />重新检查</button>
+    </header>
+    {error && <p className="dash-plugin-lifecycle-error">{error}</p>}
+    {report && <div className="dash-plugin-lifecycle-grid">
+      <div className="dash-plugin-permissions"><span>本版本权限</span>{report.permissions.length ? <div>{report.permissions.map((permission) => <span className={`risk-${permission.risk}`} key={permission.id}>{permission.label}</span>)}</div> : <strong>不申请额外权限</strong>}</div>
+      <div className="dash-plugin-integrity"><span>完整性</span><strong>{report.integrity.slice(0, 18)}...</strong>{report.signatureRequired && <small>部署要求签名</small>}</div>
+      {(report.errors.length > 0 || report.warnings.length > 0) && <div className="dash-plugin-findings">{report.errors.map((message) => <p className="error" key={message}>{message}</p>)}{report.warnings.map((message) => <p key={message}>{message}</p>)}</div>}
+    </div>}
+    <div className="dash-plugin-versions"><div><span>历史版本</span><small>恢复会创建一个新的草稿版本</small></div>{snapshots.length === 0 ? <p>修改插件后，这里会保留可恢复版本。</p> : <div>{snapshots.map((snapshot) => <article key={`${snapshot.version}-${snapshot.updatedAt}`}><span>v{snapshot.version}</span><time>{new Date(snapshot.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time><button type="button" className="labeled" disabled={busy} onClick={() => onRollback(snapshot.version)}><RotateCcw size={13} />恢复</button></article>)}</div>}</div>
+  </section>;
+}
+
 function PluginField({ field, values, onValuesChange }: { field: PluginInputField; values: Record<string, string>; onValuesChange: (values: Record<string, string>) => void }) {
   return <label><span>{field.label}{field.required ? ' *' : ''}</span>{field.type === 'textarea'
     ? <textarea rows={4} value={values[field.id] ?? ''} onChange={(event) => onValuesChange({ ...values, [field.id]: event.target.value })} />
@@ -211,6 +283,17 @@ function PluginDeleteDialog({ plugin, busy, onCancel, onConfirm }: { plugin: Use
       <h2 id="plugin-delete-title">确认删除？</h2>
       <p>“{plugin.name}”删除后无法恢复</p>
       <div className="dash-confirm-actions"><button type="button" onClick={onCancel} disabled={busy}>取消</button><button type="button" className="danger" onClick={() => { void onConfirm(); }} disabled={busy}>{busy ? '正在删除' : '删除'}</button></div>
+    </section>
+  </div>;
+}
+
+function PluginRollbackDialog({ plugin, version, busy, onCancel, onConfirm }: { plugin: UserPlugin; version: number; busy: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
+  return <div className="dash-confirm-backdrop dash-plugin-delete-backdrop" role="presentation">
+    <section className="dash-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="plugin-rollback-title">
+      <span className="dash-confirm-icon"><RotateCcw size={20} /></span>
+      <h2 id="plugin-rollback-title">恢复版本 {version}？</h2>
+      <p>“{plugin.name}”会生成一个新的草稿版本，当前版本仍保留</p>
+      <div className="dash-confirm-actions"><button type="button" onClick={onCancel} disabled={busy}>取消</button><button type="button" className="primary" onClick={() => { void onConfirm(); }} disabled={busy}>{busy ? '正在恢复' : '确认恢复'}</button></div>
     </section>
   </div>;
 }

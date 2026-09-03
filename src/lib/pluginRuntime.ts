@@ -1,4 +1,4 @@
-import type { AgentMode, ExecutionPolicy, PluginAppearance, PluginInputField, TextProviderSettings, UserPlugin, WorkflowTask } from '../types';
+import type { AgentMode, ExecutionPolicy, PluginAppearance, PluginCompatibilityReport, PluginInputField, TextProviderSettings, UserPlugin, WorkflowTask } from '../types';
 import { consumeSseBlocks } from './sse';
 
 const readJson = async <T>(response: Response, fallback: string) => {
@@ -86,6 +86,30 @@ export async function updatePlugin(pluginId: string, patch: Partial<Pick<UserPlu
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
   });
   return (await readJson<{ plugin: UserPlugin }>(response, '插件更新失败')).plugin;
+}
+
+export async function inspectPluginCompatibility(pluginId: string) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/compatibility`);
+  return (await readJson<{ report: PluginCompatibilityReport }>(response, '插件检查失败')).report;
+}
+
+export async function publishPlugin(pluginId: string) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/publish`, { method: 'POST' });
+  return readJson<{ plugin: UserPlugin; report: PluginCompatibilityReport }>(response, '插件发布失败');
+}
+
+export async function rollbackPlugin(pluginId: string, version: number) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/rollback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  });
+  return readJson<{ plugin: UserPlugin; report: PluginCompatibilityReport }>(response, '插件版本恢复失败');
+}
+
+export async function launchMiniApp(pluginId: string) {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(pluginId)}/launch`, { method: 'POST' });
+  return readJson<{ plugin: UserPlugin; report: PluginCompatibilityReport; mode: 'preview' | 'run' }>(response, '插件打开失败');
 }
 
 export async function updatePluginWithAgent(input: {

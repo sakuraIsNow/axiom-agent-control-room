@@ -92,7 +92,7 @@ Synthesizer：只汇总已验证的结果
 
 ```text
 npm run check       通过
-npm test            339 passed / 0 failed
+npm test            347 passed / 0 failed
 npm run build       通过
 npm run qa:search-agent
                     通过
@@ -195,7 +195,9 @@ npm run perf:smoke
 
 ![插件中心](docs/images/plugins.png)
 
-插件可以由 Agent 协助创建，也可以自己配置。发布后从插件中心打开，插件运行期间会使用平台配置的模型和工具。
+插件可以由 Agent 协助创建，也可以自己配置。发布前会检查外部依赖、直连网络、字段冲突和工具可用性，并列出它申请的平台 Agent/工具权限。每次修改都会保留历史版本，恢复旧版本时会生成一个新草稿，不覆盖现有记录。
+
+生产部署可以为发布版本生成完整性签名：配置至少 32 个字符的 `AXIOM_PLUGIN_SIGNING_KEY` 后，新发布插件会保存覆盖内容、权限、发布人和时间的 HMAC 签名；再启用 `AXIOM_REQUIRE_PLUGIN_SIGNATURE=true`，运行时只接受校验一致的版本。Prompt 插件运行和 Mini App 打开前都会从服务端重新读取当前版本并复核；内容、权限风险或验签配置变化时会拒绝运行。已有未签名插件需要在“版本与权限”中检查后重新发布。
 
 ### ⚙️ 设置：换成你自己的模型
 

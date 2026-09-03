@@ -1006,6 +1006,139 @@ test('mini-app builder Agent persists full revisions and owners can permanently 
   }
 });
 
+test('plugin release API validates compatibility, records publish evidence, and restores a historical version', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  const plugins = new SqlitePluginStore(':memory:');
+  await store.initialize();
+  await plugins.initialize();
+  const api = createTaskApi({
+    store,
+    plugins,
+    hub: new EventHub(),
+    coordinator: { nudge() {}, abort() {} } as never,
+  });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-plugin-release', 'x-axiom-user-id': 'owner-plugin-release' };
+  try {
+    const createdResponse = await request(api, '/plugins', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        name: '版本插件', description: '第一版', kind: 'prompt', visibility: 'private',
+        definition: { mode: 'analyze', promptPrefix: '分析输入并给出结论。', toolNames: [] },
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { plugin: { id: string } };
+
+    const compatibility = await request(api, `/plugins/${created.plugin.id}/compatibility`, { headers });
+    assert.equal(compatibility.status, 200);
+    assert.equal(((await compatibility.json()) as { report: { compatible: boolean } }).report.compatible, true);
+
+    const unsafePublish = await request(api, `/plugins/${created.plugin.id}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ status: 'published' }),
+    });
+    assert.equal(unsafePublish.status, 409);
+
+    const publish = await request(api, `/plugins/${created.plugin.id}/publish`, { method: 'POST', headers });
+    assert.equal(publish.status, 200);
+    const published = await publish.json() as { plugin: { status: string; version: number; release?: { integrity: string } }; report: { releaseState: string } };
+    assert.equal(published.plugin.status, 'published');
+    assert.match(published.plugin.release?.integrity ?? '', /^sha256:/);
+    assert.equal(published.report.releaseState, 'unsigned');
+
+    const promptLaunch = await request(api, `/plugins/${created.plugin.id}/launch`, { method: 'POST', headers });
+    assert.equal(promptLaunch.status, 409);
+
+    const edit = await request(api, `/plugins/${created.plugin.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ description: '第二版', definition: { mode: 'build', promptPrefix: '生成可执行结果。', toolNames: [] } }),
+    });
+    assert.equal(edit.status, 200);
+    const edited = await edit.json() as { plugin: { status: string; version: number; release?: unknown } };
+    assert.equal(edited.plugin.version, 2);
+    assert.equal(edited.plugin.status, 'draft');
+    assert.equal(edited.plugin.release, undefined);
+
+    const deniedRollback = await request(api, `/plugins/${created.plugin.id}/rollback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-plugin-release', 'x-axiom-user-id': 'other-user' },
+      body: JSON.stringify({ version: 1 }),
+    });
+    assert.equal(deniedRollback.status, 403);
+
+    const rollback = await request(api, `/plugins/${created.plugin.id}/rollback`, {
+      method: 'POST', headers, body: JSON.stringify({ version: 1 }),
+    });
+    assert.equal(rollback.status, 200);
+    const restored = await rollback.json() as { plugin: { status: string; version: number; description: string; definition: { mode: string } } };
+    assert.equal(restored.plugin.version, 3);
+    assert.equal(restored.plugin.status, 'draft');
+    assert.equal(restored.plugin.description, '第一版');
+    assert.equal(restored.plugin.definition.mode, 'analyze');
+  } finally {
+    await plugins.close();
+    await store.close();
+  }
+});
+
+test('mini-app launch reloads the current version and fails closed when release evidence is invalid', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  const plugins = new SqlitePluginStore(':memory:');
+  await store.initialize();
+  await plugins.initialize();
+  const api = createTaskApi({
+    store,
+    plugins,
+    hub: new EventHub(),
+    coordinator: { nudge() {}, abort() {} } as never,
+  });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-mini-launch', 'x-axiom-user-id': 'owner-mini-launch' };
+  try {
+    const createdResponse = await request(api, '/plugins', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        name: '启动校验', description: 'Mini App', kind: 'mini-app', visibility: 'private',
+        definition: { mode: 'build', htmlContent: '<!doctype html><html><body>ready</body></html>', toolNames: [] },
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { plugin: { id: string } };
+
+    const preview = await request(api, `/plugins/${created.plugin.id}/launch`, { method: 'POST', headers });
+    assert.equal(preview.status, 200);
+    assert.equal(((await preview.json()) as { mode: string }).mode, 'preview');
+
+    const publish = await request(api, `/plugins/${created.plugin.id}/publish`, { method: 'POST', headers });
+    assert.equal(publish.status, 200);
+    const launched = await request(api, `/plugins/${created.plugin.id}/launch`, { method: 'POST', headers });
+    assert.equal(launched.status, 200);
+    const launchPayload = await launched.json() as { mode: string; report: { compatible: boolean } };
+    assert.equal(launchPayload.mode, 'run');
+    assert.equal(launchPayload.report.compatible, true);
+
+    const current = await plugins.getPlugin(created.plugin.id, 'tenant-mini-launch');
+    assert.ok(current);
+    await plugins.publishPlugin(current.id, current.tenantId, {
+      schemaVersion: 1,
+      platformVersion: '1.1.0',
+      pluginVersion: current.version,
+      integrity: 'sha256:invalid',
+      signedAt: '2026-09-03T00:00:00.000Z',
+      signedBy: 'owner-mini-launch',
+      permissions: [],
+      warnings: [],
+    });
+    const rejected = await request(api, `/plugins/${created.plugin.id}/launch`, { method: 'POST', headers });
+    assert.equal(rejected.status, 409);
+    assert.equal(((await rejected.json()) as { report: { releaseState: string } }).report.releaseState, 'invalid');
+  } finally {
+    await plugins.close();
+    await store.close();
+  }
+});
+
 test('mini-app builder SSE streams immediate status and progress before persisting a complete revision', async () => {
   const store = new SqliteTaskStore(':memory:');
   const plugins = new SqlitePluginStore(':memory:');

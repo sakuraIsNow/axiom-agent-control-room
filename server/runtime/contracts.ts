@@ -299,6 +299,37 @@ export type MiniAppPluginDefinition = {
 
 export type UserPluginDefinition = PromptPluginDefinition | MiniAppPluginDefinition;
 
+export type PluginDeclaredPermission = {
+  id: string;
+  label: string;
+  kind: 'platform-agent' | 'tool';
+  risk: 'low' | 'medium' | 'high' | 'critical';
+};
+
+export type PluginRelease = {
+  schemaVersion: 1;
+  platformVersion: string;
+  pluginVersion: number;
+  integrity: string;
+  signature?: string;
+  signedAt: string;
+  signedBy: string;
+  permissions: PluginDeclaredPermission[];
+  warnings: string[];
+};
+
+export type PluginVersionSnapshot = {
+  version: number;
+  definition: UserPluginDefinition;
+  name?: string;
+  description?: string;
+  icon?: string;
+  visibility?: UserPluginVisibility;
+  release?: PluginRelease;
+  updatedAt: string;
+  updatedBy: string;
+};
+
 export type UserPlugin = {
   id: string;
   tenantId: string;
@@ -310,7 +341,8 @@ export type UserPlugin = {
   visibility: UserPluginVisibility;
   version: number;
   definition: UserPluginDefinition;
-  history: Array<{ version: number; definition: UserPluginDefinition; updatedAt: string; updatedBy: string }>;
+  history: PluginVersionSnapshot[];
+  release?: PluginRelease;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -334,6 +366,8 @@ export interface PluginStore {
   getPlugin(pluginId: string, tenantId?: string, access?: TemplateAccess): Promise<UserPlugin | null>;
   createPlugin(input: CreateUserPluginInput): Promise<UserPlugin>;
   updatePlugin(pluginId: string, tenantId: string, input: UpdateUserPluginInput): Promise<UserPlugin>;
+  publishPlugin(pluginId: string, tenantId: string, release: PluginRelease): Promise<UserPlugin>;
+  rollbackPlugin(pluginId: string, tenantId: string, version: number, updatedBy: string): Promise<UserPlugin>;
   deletePlugin(pluginId: string, tenantId: string): Promise<boolean>;
 }
 

@@ -161,8 +161,8 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [x] 插件管理与运行迁入左侧完整工作区，保留版本标识和插件运行 lineage 元数据；Mini App 运行结果仍使用隔离窗口。
 - [x] 插件参数 schema 校验；工具引用必须来自 Tool Registry。
 - [ ] Workflow Plugin 复用 Task/Run/Event/SSE 的图形化编排。
-- [ ] 插件失败恢复、签名和兼容性检查。
-- [ ] 插件市场与 Agent Studio。
+- [x] 插件失败恢复、签名和兼容性检查：Agent 流式失败不保存半成品；发布前检查完整 HTML、禁止直连网络、工具可用性、字段冲突和权限；支持 HMAC 发布证明、运行时完整性复核与历史版本恢复。
+- [ ] 插件市场；Agent Studio 和 Planner 动态角色接入已完成，不再与市场建设混为一项。
 
 ### P1.7 前端电影级重构
 
@@ -572,7 +572,8 @@ npm run qa:search-agent
 - [x] Agent Nexus 分支可解释性第一阶段：`branch.selected`/`branch.skipped` 事件记录表达式、来源 Agent 状态、置信度、输出字符数和命中结果；不持久化完整上游正文，便于 UI/运营审计而不扩大事件体积。
 - [ ] OpenTelemetry、Prometheus、日志关联、队列/Worker 指标和跨重启持久化。
 - [x] 运行观测告警第一阶段：新增 `GET /api/runtime/alerts`，从持久化队列、Worker 租约、模型/工具失败、人工待确认、Artifact 清理和 Readiness 生成严重/关注/提示三级告警；阈值可由环境变量调整，前端运行观测已展示。
-- [ ] 插件签名、兼容性检查、版本回滚、权限声明和插件市场。
+- [x] 插件签名、兼容性检查、版本回滚和权限声明：支持可选 HMAC-SHA256 发布证明、强制签名部署策略、内容篡改失败关闭、发布前/运行前复核、历史版本以新草稿恢复，以及面向普通用户的“版本与权限”面板。
+- [ ] 插件市场：仍需可信发布者、审核、搜索、安装、升级、撤回和供应链处置流程。
 - [ ] Provider 精确 tokenizer 与压缩质量评估；摘要版本、覆盖范围、来源 digest 和关键引用持久化已完成。
 - [ ] 登录开屏与首次使用引导。
 - [x] 3D Graph 降级视图、移动端节点抽屉、长事件虚拟滚动和生产场景分包；当前生产 Graph 使用 CSS 3D，不依赖 WebGL，低动态与不可见状态会自动停止动画。
@@ -719,3 +720,13 @@ npm run qa:search-agent
 - [x] 新增 provider-neutral Harness Thread Graph，从持久任务事件投影父子 Thread、open/closed 状态和稳定广度优先后代；终态任务关闭全部 Thread，`thread.resumed` 可重新打开，非法循环关系被拒绝。
 - [x] 新增 `GET /api/tasks/:taskId/thread-graph` 与 `?root=<threadId>`，覆盖不存在根 Thread、跨租户 404、终态关闭和 BFS descendants；Codex `thread/closed` 已归一化为 `thread.closed`。
 - [x] 本批完整门禁通过：`npm run check`、`npm test`（339 passed / 0 failed）、`npm run build`、`npm run qa:visual`、`npm run qa:agentgraph3d` 和 `npm run qa:all`（24 passed / 0 failed / 4 skipped）。复杂 Runtime 产生 733 个连续事件、604 个流式增量和 36,556 Token；4 个跳过项仍仅对应未配置的外部服务现场验收。
+
+### 2026-09-03 插件发布与恢复闭环
+
+- [x] 改动前保存 `frontend-backup/20260903-pre-plugin-lifecycle` 快照；SQLite/PostgreSQL PluginStore 增加持久发布证明，并兼容旧数据自动增加 `release_json`。
+- [x] 新增发布前兼容检查：阻止 Mini App 直连网络和外部资源、插件类型漂移、重复字段、缺失提示词及不可用工具；平台 Agent 与 Tool Registry 权限按真实定义派生，并保留高风险审批提示。
+- [x] 新增可选 HMAC-SHA256 发布签名和 `AXIOM_REQUIRE_PLUGIN_SIGNATURE` 强制策略；签名覆盖内容、权限、发布人和时间且密钥至少 32 个字符，Prompt 运行与 Mini App 打开前均从服务端重读当前版本并复核，内容、权限风险、签名或验签配置漂移时失败关闭。默认保持旧未签名插件兼容，启用强制策略后需重新发布。
+- [x] 插件修改后自动回到草稿并清除旧发布证明；历史版本保存名称、说明、外观、可见范围、定义和发布信息，恢复旧版会创建递增的新草稿版本，不覆盖当前历史。
+- [x] 团队成员只可见已发布的团队插件，创建者仍可查看自己的草稿；发布、恢复和删除继续受创建者/租户管理员权限约束。
+- [x] 插件设计页新增毛玻璃“版本与权限”面板、兼容状态、权限清单、完整性摘要、历史滚动列表和恢复确认；浏览器视觉回归验证真实 compatibility API、历史 v1、恢复确认和 0 控制台错误。
+- [x] 本批完整门禁通过：`npm run check`、`npm test`（347 passed / 0 failed）、`npm run build`、`npm run qa:visual` 和 `npm run qa:all`（24 passed / 0 failed / 4 skipped）；复杂 Runtime 产生 726 个连续事件、612 个流式增量和 37,097 Token，Reviewer 65 分通过，插件真实启动复核、版本恢复和浏览器 0 错误均通过。4 个跳过项仍只对应未配置的外部服务现场验收。

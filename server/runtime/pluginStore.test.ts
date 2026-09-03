@@ -32,8 +32,13 @@ test('team plugins are visible to members while private plugins remain owner-sco
   try {
     await store.createPlugin({ tenantId: 'tenant-a', createdBy: 'user-a', name: 'Private', description: '', definition });
     const team = await store.createPlugin({ tenantId: 'tenant-a', createdBy: 'user-a', name: 'Team', description: '', visibility: 'team', definition });
+    const draftVisible = await store.listPlugins('tenant-a', 50, { userId: 'user-b', role: 'member' });
+    assert.deepEqual(draftVisible, []);
+    const published = await store.publishPlugin(team.id, 'tenant-a', {
+      schemaVersion: 1, platformVersion: '1.1.0', pluginVersion: 1, integrity: 'sha256:test', signedAt: '2026-09-03T00:00:00.000Z', signedBy: 'user-a', permissions: [], warnings: [],
+    });
     const visible = await store.listPlugins('tenant-a', 50, { userId: 'user-b', role: 'member' });
-    assert.deepEqual(visible.map((item) => item.id), [team.id]);
+    assert.deepEqual(visible.map((item) => item.id), [published.id]);
   } finally {
     await store.close();
   }
@@ -77,4 +82,41 @@ test('mini-app window keeps untrusted HTML in a scripts-only sandbox', async () 
   assert.match(source, /aria-modal="true"/);
   assert.doesNotMatch(source, /allow-same-origin/);
   assert.doesNotMatch(source, /dangerouslySetInnerHTML/);
+});
+
+test('plugin publish evidence is cleared by edits and historical versions roll forward as a new draft', async () => {
+  const store = new SqlitePluginStore(':memory:');
+  await store.initialize();
+  try {
+    const created = await store.createPlugin({ tenantId: 'tenant-a', createdBy: 'user-a', name: 'Review', description: 'v1', definition });
+    const release = {
+      schemaVersion: 1 as const,
+      platformVersion: '1.1.0',
+      pluginVersion: created.version,
+      integrity: 'sha256:test',
+      signedAt: '2026-09-03T00:00:00.000Z',
+      signedBy: 'user-a',
+      permissions: [],
+      warnings: [],
+    };
+    const published = await store.publishPlugin(created.id, 'tenant-a', release);
+    assert.equal(published.status, 'published');
+    assert.equal(published.release?.integrity, 'sha256:test');
+
+    const edited = await store.updatePlugin(created.id, 'tenant-a', { description: 'v2', definition: { ...definition, mode: 'build' }, updatedBy: 'user-a' });
+    assert.equal(edited.version, 2);
+    assert.equal(edited.status, 'draft');
+    assert.equal(edited.release, undefined);
+    assert.equal(edited.history[0]?.description, 'v1');
+
+    const restored = await store.rollbackPlugin(created.id, 'tenant-a', 1, 'user-a');
+    assert.equal(restored.version, 3);
+    assert.equal(restored.status, 'draft');
+    assert.equal(restored.description, 'v1');
+    assert.equal(restored.definition.mode, 'analyze');
+    assert.equal(restored.history.length, 2);
+    await assert.rejects(() => store.rollbackPlugin(created.id, 'tenant-a', 99, 'user-a'), /version not found/i);
+  } finally {
+    await store.close();
+  }
 });

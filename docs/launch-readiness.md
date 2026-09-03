@@ -10,7 +10,7 @@
 
 ## 最新本机验证（2026-09-03）
 
-在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1616.91 RPS / P95 10.44ms`、Readiness `2382.89 RPS / P95 4.72ms`、运行观测 `1919.22 RPS / P95 7.11ms`、任务列表 `2699.16 RPS / P95 4.06ms`。标准单元/API 门禁为 `339 passed / 0 failed`；`npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`。本次复杂 Runtime 产生 733 个连续事件、604 个可见流式增量和 36,556 Token，通过 Reviewer 门禁并正常交付 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
+在当前 Windows 单节点、SQLite 本地数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1217.32 RPS / P95 15.81ms`、Readiness `1851.78 RPS / P95 7.01ms`、运行观测 `2001.22 RPS / P95 6.39ms`、任务列表 `3059.98 RPS / P95 3.45ms`。标准单元/API 门禁为 `347 passed / 0 failed`；`npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`。本次复杂 Runtime 产生 726 个连续事件、612 个可见流式增量和 37,097 Token，通过 Reviewer 65 分门禁并正常交付 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 
@@ -29,6 +29,7 @@
 | 可观测性 | 基础可用 | Prometheus 文本指标、持久任务/事件运营快照和告警 API 已启用；进程内 counters 重启清零，OTel exporter 尚未接入 |
 | Harness/Codex transport | 协议级完成，现场接入待配置 | DeepSeek ACP 与 Codex app-server v2 JSON-RPC stdio、Thread/Turn/Item 事件、审批回放、断点恢复和断流补偿已通过 fake sidecar；真实 sidecar 需固定版本和 workspace |
 | Agent Nexus 控制流 | 已可用 | 条件 DSL、多 Loop/嵌套 Loop（最多 256 步）、分支事件、DAG 展开和节点级局部重跑已通过单元/API 回归 |
+| 插件发布与恢复 | 已可用 | 发布前检查完整结构、直连网络、外部资源、字段冲突和工具权限；修改后自动回草稿，历史版本以新版本恢复；Prompt 运行与 Mini App 打开前均重读当前版本；可选 HMAC 签名覆盖内容、权限和发布身份，内容、权限风险、签名或验签配置漂移时拒绝运行 |
 | Checkpoint 分支与合并 | 已可用 | revision 原子冲突检测、幂等分支、差异比较和三方合并已通过单元/API/浏览器回归；冲突策略必须显式选择 |
 | 长结果与上下文恢复 | 已可用，外部对象存储待现场配置 | 大步骤输出使用 `result_ref`，普通 Agent 只接收预览，Reviewer/Synthesizer 有界回读；持久摘要带来源 digest，漂移后自动重建；对象存储故障时数据库保留全文 |
 | 运行告警 | 已可用 | `GET /api/runtime/alerts` 根据队列积压、租约过期、模型/工具失败、Artifact 清理和 Readiness 生成带严重级别的告警；阈值由环境变量控制 |
