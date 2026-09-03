@@ -1,4 +1,4 @@
-import type { AgentMode, ScheduleCadence, ScheduleDraft, ScheduledTrigger, WorkflowTaskSummary } from '../types';
+import type { AgentMode, ScheduleCadence, ScheduleDraft, ScheduleHealthActionAudit, ScheduleInsights, ScheduledTrigger, WorkflowTaskSummary } from '../types';
 
 const readJson = async <T>(response: Response, fallback: string) => {
   const body = await response.json().catch(() => null) as T & { error?: string } | null;
@@ -8,8 +8,23 @@ const readJson = async <T>(response: Response, fallback: string) => {
 
 export async function listSchedules(signal?: AbortSignal) {
   const response = await fetch('/api/schedules', { signal });
-  const body = await readJson<{ schedules?: ScheduledTrigger[]; latestRuns?: Record<string, WorkflowTaskSummary> }>(response, '日程列表读取失败');
-  return { schedules: body.schedules ?? [], latestRuns: body.latestRuns ?? {} };
+  const body = await readJson<{ schedules?: ScheduledTrigger[]; latestRuns?: Record<string, WorkflowTaskSummary>; healthActions?: ScheduleHealthActionAudit[] }>(response, '日程列表读取失败');
+  return { schedules: body.schedules ?? [], latestRuns: body.latestRuns ?? {}, healthActions: body.healthActions ?? [] };
+}
+
+export async function getScheduleInsights(days = 35, signal?: AbortSignal) {
+  const safeDays = Math.min(42, Math.max(1, Math.floor(days)));
+  const response = await fetch(`/api/schedules/insights?days=${safeDays}`, { signal });
+  return readJson<ScheduleInsights>(response, '日程计划读取失败');
+}
+
+export async function applyScheduleHealthAction(scheduleId: string, suggestionId: string) {
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/health-action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ suggestionId }),
+  });
+  return readJson<{ schedule: ScheduledTrigger; applied: ScheduleHealthActionAudit }>(response, '日程调整失败');
 }
 
 export async function draftSchedule(input: { request: string; sessionId: string; timezone?: string; modelCredentialId?: string }) {
@@ -27,6 +42,7 @@ export async function createSchedule(input: {
   input: string;
   mode: AgentMode;
   modelCredentialId?: string;
+  inputArtifactTaskId?: string;
   cadence?: ScheduleCadence;
   intervalSeconds?: number;
   enabled?: boolean;
@@ -37,6 +53,21 @@ export async function createSchedule(input: {
     body: JSON.stringify({ ...input, enabled: input.enabled ?? true }),
   });
   return (await readJson<{ schedule: ScheduledTrigger }>(response, '日程创建失败')).schedule;
+}
+
+export type ScheduleArtifactCandidate = {
+  artifactId: string;
+  taskId: string;
+  sourceScheduleId?: string;
+  title: string;
+  createdAt: string;
+  bytes: number;
+  revision: number;
+};
+
+export async function listScheduleArtifactInputs(signal?: AbortSignal) {
+  const response = await fetch('/api/schedules/artifact-inputs?limit=50', { signal });
+  return (await readJson<{ artifacts?: ScheduleArtifactCandidate[] }>(response, '可接续结果读取失败')).artifacts ?? [];
 }
 
 export async function removeSchedule(scheduleId: string) {

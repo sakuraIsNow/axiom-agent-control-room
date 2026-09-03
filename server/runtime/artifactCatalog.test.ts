@@ -26,7 +26,15 @@ test('SQLite Artifact catalog is idempotent, tenant-scoped, and tracks reference
     assert.equal((await workerB.stats('tenant-a')).active, 1);
     assert.equal((await workerB.stats('tenant-b')).total, 0);
 
+    const linked = await workerB.register({
+      id: 'result:task-a', tenantId: 'tenant-a', taskId: 'schedule-a', source: 'result',
+      storageKey: 's3://bucket/a', bytes: 42, referenceKey: 'schedule-input:schedule-a',
+    });
+    assert.equal(linked.referenceCount, 2);
     assert.equal(await workerB.removeTaskReferences('tenant-a', 'task-a', ['result:task-a']), 1);
+    assert.equal((await workerA.get('tenant-a', 'result:task-a'))?.referenceCount, 1);
+    assert.equal((await workerA.get('tenant-a', 'result:task-a'))?.status, 'active');
+    assert.equal(await workerB.removeTaskReferences('tenant-a', 'schedule-a', ['result:task-a']), 1);
     const orphan = (await workerA.listOrphans('tenant-a'))[0];
     assert.equal(orphan?.id, 'result:task-a');
     assert.equal(orphan?.status, 'orphaned');

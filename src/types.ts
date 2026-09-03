@@ -676,6 +676,15 @@ export type ScheduledTrigger = {
   input: string;
   mode: AgentMode;
   modelCredentialId?: string;
+  inputArtifact?: {
+    artifactId: string;
+    sourceTaskId: string;
+    sourceScheduleId?: string;
+    sourceTaskRevision: number;
+    sourceTaskUpdatedAt: string;
+    contentSha256: string;
+    title: string;
+  };
   cadence: ScheduleCadence;
   intervalSeconds: number;
   enabled: boolean;
@@ -686,6 +695,79 @@ export type ScheduledTrigger = {
   lastError?: string;
   lastRunStatus?: 'success' | 'failed' | 'dead-letter';
   deadLetteredAt?: string;
+};
+
+export type ScheduleOccurrence = {
+  id: string;
+  scheduleId: string;
+  title: string;
+  startsAt: string;
+  estimatedDurationMinutes: number;
+  estimatedLoad: number;
+  windowLoad: number;
+  capacity: 'available' | 'busy' | 'overloaded';
+  conflictScheduleIds: string[];
+};
+
+export type ScheduleCapacityConflict = {
+  id: string;
+  startsAt: string;
+  endsAt: string;
+  load: number;
+  limit: number;
+  scheduleIds: string[];
+  titles: string[];
+};
+
+export type ScheduleHealthSuggestion = {
+  id: string;
+  scheduleId: string;
+  kind: 'failure_streak' | 'cost_spike' | 'quality_decline' | 'capacity_conflict';
+  severity: 'attention' | 'warning';
+  title: string;
+  reason: string;
+  evidence: string[];
+  recommendedAction: 'pause' | 'resume' | 'reschedule';
+  actionLabel: string;
+  proposedCadence?: ScheduleCadence;
+};
+
+export type ScheduleInsights = {
+  generatedAt: string;
+  range: { from: string; to: string; days: number; truncated: boolean };
+  capacity: { limit: number; peakLoad: number; busyWindows: number; overloadedWindows: number };
+  occurrences: ScheduleOccurrence[];
+  conflicts: ScheduleCapacityConflict[];
+  suggestions: ScheduleHealthSuggestion[];
+};
+
+export type ScheduleHealthActionAudit = {
+  id: string;
+  scheduleId: string;
+  suggestionId: string;
+  kind: ScheduleHealthSuggestion['kind'];
+  action: ScheduleHealthSuggestion['recommendedAction'];
+  reason: string;
+  evidence: string[];
+  proposedCadence?: ScheduleCadence;
+  before: {
+    enabled: boolean;
+    cadence: ScheduleCadence;
+    nextRunAt: string;
+    failureCount: number;
+    lastRunStatus?: ScheduledTrigger['lastRunStatus'];
+    deadLetteredAt?: string;
+  };
+  after: {
+    enabled: boolean;
+    cadence: ScheduleCadence;
+    nextRunAt: string;
+    failureCount: number;
+    lastRunStatus?: ScheduledTrigger['lastRunStatus'];
+    deadLetteredAt?: string;
+  };
+  confirmedBy: string;
+  confirmedAt: string;
 };
 
 export type UserDefinedAgentKind = 'worker' | 'quality' | 'output';

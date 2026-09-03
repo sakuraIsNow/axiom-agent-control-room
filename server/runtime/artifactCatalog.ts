@@ -52,6 +52,7 @@ export interface ArtifactCatalog {
   close(): Promise<void>;
   reconcile(): Promise<number>;
   register(input: ArtifactRegisterInput): Promise<ArtifactRecord>;
+  get(tenantId: string, artifactId: string): Promise<ArtifactRecord | null>;
   markDeletePending(tenantId: string, artifactId: string, reason?: string): Promise<boolean>;
   removeTaskReferences(tenantId: string, taskId: string, artifactIds?: string[]): Promise<number>;
   markDeleted(tenantId: string, artifactId: string): Promise<boolean>;
@@ -215,7 +216,7 @@ export class SqliteArtifactCatalog implements ArtifactCatalog {
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT (tenant_id, artifact_id, reference_key) DO NOTHING
       `).run(tenantId, id, taskId, referenceKey, createdAt);
-      if (inserted.changes > 0) this.db.prepare(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = ? AND artifact_id = ?) WHERE tenant_id = ? AND id = ?`).run(tenantId, id, tenantId, id);
+      if (inserted.changes > 0) this.db.prepare(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = ? AND artifact_id = ?), status = CASE WHEN status = 'orphaned' THEN 'active' ELSE status END WHERE tenant_id = ? AND id = ?`).run(tenantId, id, tenantId, id);
       const row = this.db.prepare('SELECT * FROM artifact_records WHERE tenant_id = ? AND id = ?').get(tenantId, id) as Record<string, unknown>;
       this.db.exec('COMMIT');
       return fromRow(row);
@@ -223,6 +224,11 @@ export class SqliteArtifactCatalog implements ArtifactCatalog {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  async get(tenantId: string, artifactId: string) {
+    const row = this.db.prepare('SELECT * FROM artifact_records WHERE tenant_id = ? AND id = ?').get(tenantId, artifactId) as Record<string, unknown> | undefined;
+    return row ? fromRow(row) : null;
   }
 
   async markDeletePending(tenantId: string, artifactId: string, reason = '') {
@@ -236,8 +242,11 @@ export class SqliteArtifactCatalog implements ArtifactCatalog {
     try {
       const where = ids.length ? ` AND artifact_id IN (${ids.map(() => '?').join(',')})` : '';
       const params = ids.length ? [tenantId, taskId, ...ids] : [tenantId, taskId];
+      const affected = this.db.prepare(`SELECT DISTINCT artifact_id FROM artifact_references WHERE tenant_id = ? AND task_id = ?${where}`).all(...params) as Array<{ artifact_id: string }>;
       const removed = this.db.prepare(`DELETE FROM artifact_references WHERE tenant_id = ? AND task_id = ?${where}`).run(...params);
-      this.db.prepare(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = artifact_records.tenant_id AND artifact_id = artifact_records.id), status = CASE WHEN status = 'active' AND (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = artifact_records.tenant_id AND artifact_id = artifact_records.id) = 0 THEN 'orphaned' ELSE status END WHERE tenant_id = ? AND task_id = ?${ids.length ? ` AND id IN (${ids.map(() => '?').join(',')})` : ''}`).run(...params);
+      for (const { artifact_id: artifactId } of affected) {
+        this.db.prepare(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = ? AND artifact_id = ?), status = CASE WHEN status = 'active' AND (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = ? AND artifact_id = ?) = 0 THEN 'orphaned' ELSE status END WHERE tenant_id = ? AND id = ?`).run(tenantId, artifactId, tenantId, artifactId, tenantId, artifactId);
+      }
       this.db.exec('COMMIT');
       return Number(removed.changes ?? 0);
     } catch (error) {
@@ -333,7 +342,7 @@ export class PostgresArtifactCatalog implements ArtifactCatalog {
           storage_key = COALESCE(EXCLUDED.storage_key, artifact_records.storage_key), bytes = GREATEST(artifact_records.bytes, EXCLUDED.bytes), mime_type = COALESCE(EXCLUDED.mime_type, artifact_records.mime_type), expires_at = COALESCE(artifact_records.expires_at, EXCLUDED.expires_at), task_id = CASE WHEN artifact_records.status = 'deleted' THEN EXCLUDED.task_id ELSE artifact_records.task_id END, status = CASE WHEN artifact_records.status = 'deleted' THEN 'active' ELSE artifact_records.status END, deleted_at = CASE WHEN artifact_records.status = 'deleted' THEN NULL ELSE artifact_records.deleted_at END
       `, [id, tenantId, taskId, input.source, input.storageKey ?? null, Math.max(0, input.bytes ?? 0), input.mimeType ?? null, createdAt, expiresAt]);
       await client.query(`INSERT INTO artifact_references (tenant_id, artifact_id, task_id, reference_key, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`, [tenantId, id, taskId, referenceKey, createdAt]);
-      await client.query(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = $1 AND artifact_id = $2) WHERE tenant_id = $1 AND id = $2`, [tenantId, id]);
+      await client.query(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = $1 AND artifact_id = $2), status = CASE WHEN status = 'orphaned' THEN 'active' ELSE status END WHERE tenant_id = $1 AND id = $2`, [tenantId, id]);
       const result = await client.query('SELECT * FROM artifact_records WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
       await client.query('COMMIT');
       return fromRow(result.rows[0] as Record<string, unknown>);
@@ -343,6 +352,11 @@ export class PostgresArtifactCatalog implements ArtifactCatalog {
     } finally {
       client.release();
     }
+  }
+
+  async get(tenantId: string, artifactId: string) {
+    const result = await this.pool.query('SELECT * FROM artifact_records WHERE tenant_id = $1 AND id = $2', [tenantId, artifactId]);
+    return result.rows[0] ? fromRow(result.rows[0] as Record<string, unknown>) : null;
   }
 
   async markDeletePending(tenantId: string, artifactId: string, reason = '') {
@@ -355,12 +369,16 @@ export class PostgresArtifactCatalog implements ArtifactCatalog {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      const affected = ids.length
+        ? await client.query<{ artifact_id: string }>(`SELECT DISTINCT artifact_id FROM artifact_references WHERE tenant_id = $1 AND task_id = $2 AND artifact_id = ANY($3::text[])`, [tenantId, taskId, ids])
+        : await client.query<{ artifact_id: string }>(`SELECT DISTINCT artifact_id FROM artifact_references WHERE tenant_id = $1 AND task_id = $2`, [tenantId, taskId]);
       const deleted = ids.length
         ? await client.query(`DELETE FROM artifact_references WHERE tenant_id = $1 AND task_id = $2 AND artifact_id = ANY($3::text[])`, [tenantId, taskId, ids])
         : await client.query(`DELETE FROM artifact_references WHERE tenant_id = $1 AND task_id = $2`, [tenantId, taskId]);
-      const idClause = ids.length ? ' AND id = ANY($3::text[])' : '';
-      const params = ids.length ? [tenantId, taskId, ids] : [tenantId, taskId];
-      await client.query(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = artifact_records.tenant_id AND artifact_id = artifact_records.id), status = CASE WHEN status = 'active' AND (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = artifact_records.tenant_id AND artifact_id = artifact_records.id) = 0 THEN 'orphaned' ELSE status END WHERE tenant_id = $1 AND task_id = $2${idClause}`, params);
+      const affectedIds = affected.rows.map((row) => row.artifact_id);
+      if (affectedIds.length > 0) {
+        await client.query(`UPDATE artifact_records SET reference_count = (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = artifact_records.tenant_id AND artifact_id = artifact_records.id), status = CASE WHEN status = 'active' AND (SELECT COUNT(*) FROM artifact_references WHERE tenant_id = artifact_records.tenant_id AND artifact_id = artifact_records.id) = 0 THEN 'orphaned' ELSE status END WHERE tenant_id = $1 AND id = ANY($2::text[])`, [tenantId, affectedIds]);
+      }
       await client.query('COMMIT');
       return deleted.rowCount ?? 0;
     } catch (error) {

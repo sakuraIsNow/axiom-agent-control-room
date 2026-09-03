@@ -666,9 +666,9 @@ npm run qa:search-agent
 
 1. [x] 站内交付通知：任务完成、部分交付、失败、需要人工确认、日程进入死信或 Artifact 清理失败时生成真实通知，并提供对应查看或恢复入口；通知正文不包含敏感模型凭据。
 2. [ ] 可选外发通知：在站内通知事实源之上增加用户可配置的 Webhook/邮件渠道、签名、重试、退避、死信和投递审计。
-3. [ ] 日程健康回顾 Agent：按运行历史识别长期失败、成本异常、结果质量下降和不再需要的日程，只给出可确认的调整建议，不自行改频率或删除日程。
-4. [ ] 月/周日历视图与冲突提示：在不暴露 cron 的前提下展示未来执行窗口，并提示大量高成本日程在同一时间集中触发的容量风险。
-5. [ ] 运行结果联动：允许把一个日程的已验证 Artifact 作为后续日程的输入，同时保留来源、版本和租户边界，形成可审计的周期性 Agent 流程。
+3. [x] 日程健康回顾 Agent：按真实运行历史识别长期失败、成本异常和结果质量下降，只给出可确认的暂停、恢复或调整时间建议，不自行修改；“是否不再需要”属于用户意图，平台不根据低使用量擅自猜测或删除日程。
+4. [x] 月/周日历视图与冲突提示：在不暴露 cron 的前提下展示未来 7 天或 35 天执行窗口，按历史 Token、耗时和任务方式估算 30 分钟容量风险；高频日程有展开上限，避免计划接口无限膨胀。
+5. [x] 运行结果联动：只允许选择当前用户已完成且证据状态为 `verified` 的 Artifact 作为后续日程输入；保存来源 Task/日程、revision、更新时间和 SHA-256，执行时重新校验版本并保留租户边界。
 
 ### 2026-09-03 真实站内通知与恢复入口
 
@@ -679,6 +679,16 @@ npm run qa:search-agent
 - [x] 页面右上角增加毛玻璃通知中心，支持未读数、单条/全部已读、15 秒可见页轮询、点击外部或 `Escape` 关闭以及桌面/移动端自适应；所有展示状态均来自服务端事实源。
 - [x] 新增通知投影、API、SQLite 已读持久化和租户/用户隔离回归；`npm run check`、`npm test`（326/326）、`npm run build`、`npm run qa:visual` 均通过。
 - [x] 完整 `npm run qa:all` 通过：`24 passed / 0 failed / 4 skipped`；跳过项仅为未配置的 TencentDB MemoryCore、外部 Artifact 对象存储和 DeepSeek/Codex Harness sidecar 现场验收，不将本地替代实现计作外部生产通过。
+
+### 2026-09-03 日程智能、确认审计与结果接续
+
+- [x] 改动前保存 `frontend-backup/20260903-pre-schedule-intelligence` 快照；周视图、未来 35 天视图、峰值负载、容量冲突和健康建议全部使用服务端真实日程与运行记录。
+- [x] 日程健康建议使用稳定 ID；确认时在 PostgreSQL 事务中锁定日程、校验确认前状态、修改日程并写入 `schedule_health_actions` 审计，同一建议不可重放，并按租户与用户隔离。内存实现保持同一契约，页面显示最近已确认调整。
+- [x] 新增 `GET /api/schedules/insights`、`GET /api/schedules/health-actions`、`POST /api/schedules/:scheduleId/health-action` 和 `GET /api/schedules/artifact-inputs`；确认动作、审计历史与 Artifact 候选均来自真实后端状态。
+- [x] 已验证 Artifact 接续会固定来源版本和内容摘要，最多向模型上下文注入 24,000 字符，完整结果仍由 Artifact 保存；来源任务删除时，只要下游日程仍持有引用就不会误删对象，删除日程后释放引用。
+- [x] 修复日程和任务的同租户跨用户越权、来源任务删除误清理共享 Artifact、下游引用释放错误以及孤儿 Artifact 重新引用后状态未恢复的问题。
+- [x] 新增容量、健康、确认重放、状态漂移、用户隔离、Artifact 版本与生命周期回归；`npm run check`、`npm test`（334 passed / 0 failed）、`npm run build` 和 `npm run qa:visual` 均通过，视觉门禁包含真实确认与审计回显、桌面/移动布局和浏览器零错误。
+- [x] 完整 `npm run qa:all` 通过：`24 passed / 0 failed / 4 skipped`；路由 4/4、业务过程 6/6、运行时 634 个连续事件、Agent Nexus Loop、会话恢复、人工审核和并发性能均通过，4 个跳过项仍只对应未配置的外部生产服务。
 
 ### 2026-09-02 执行中实时引导与路由交互
 

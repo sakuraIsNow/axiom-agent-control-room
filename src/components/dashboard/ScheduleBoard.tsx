@@ -1,29 +1,37 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Activity,
   Bot,
+  CalendarDays,
   CalendarClock,
   Check,
   ChevronDown,
   ChevronUp,
   Clock3,
   History,
+  Link2,
   Play,
   Plus,
   RotateCcw,
+  ShieldAlert,
   Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
 import {
+  applyScheduleHealthAction,
   createSchedule,
   draftSchedule,
+  getScheduleInsights,
   listScheduleRuns,
+  listScheduleArtifactInputs,
   listSchedules,
   removeSchedule,
   resumeSchedule,
   runSchedule,
 } from '../../lib/scheduleRuntime';
-import type { AgentMode, ScheduleCadence, ScheduleDraft, ScheduledTrigger, WorkflowTaskSummary } from '../../types';
+import type { ScheduleArtifactCandidate } from '../../lib/scheduleRuntime';
+import type { AgentMode, ScheduleCadence, ScheduleDraft, ScheduleHealthActionAudit, ScheduleHealthSuggestion, ScheduleInsights, ScheduledTrigger, WorkflowTaskSummary } from '../../types';
 import { userFacingError } from '../../lib/errorPresentation';
 
 const modeLabel: Record<AgentMode, string> = { analyze: '分析', build: '构建', decide: '决策' };
@@ -51,6 +59,14 @@ const cadenceText = (cadence: ScheduleCadence) => {
   return `每 ${cadence.intervalSeconds} 秒`;
 };
 
+const dateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const calendarDays = (from: string, count: number) => Array.from({ length: count }, (_, index) => {
+  const date = new Date(from);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + index);
+  return date;
+});
+
 const runStatus = (status: WorkflowTaskSummary['status']) => ({
   completed: '已完成', failed: '失败', cancelled: '已取消', paused: '已暂停', waiting_for_human: '等待确认',
   awaiting_approval: '等待批准', queued: '排队中', planning: '编排中', running: '执行中', reviewing: '审核中',
@@ -64,9 +80,21 @@ const evidenceText = (run: WorkflowTaskSummary) => {
   return '无需验证';
 };
 
+const healthActionLabel: Record<ScheduleHealthActionAudit['action'], string> = {
+  pause: '已确认暂停',
+  resume: '已确认恢复',
+  reschedule: '已确认调整时间',
+};
+
 export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: string; modelCredentialId?: string }) {
   const [schedules, setSchedules] = useState<ScheduledTrigger[]>([]);
   const [latestRuns, setLatestRuns] = useState<Record<string, WorkflowTaskSummary>>({});
+  const [insights, setInsights] = useState<ScheduleInsights | null>(null);
+  const [healthActions, setHealthActions] = useState<ScheduleHealthActionAudit[]>([]);
+  const [artifactInputs, setArtifactInputs] = useState<ScheduleArtifactCandidate[]>([]);
+  const [inputArtifactTaskId, setInputArtifactTaskId] = useState('');
+  const [calendarMode, setCalendarMode] = useState<'week' | 'month'>('week');
+  const [confirmSuggestion, setConfirmSuggestion] = useState<ScheduleHealthSuggestion | null>(null);
   const [runs, setRuns] = useState<Record<string, WorkflowTaskSummary[]>>({});
   const [expandedSchedule, setExpandedSchedule] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -82,9 +110,17 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
 
   const refresh = useCallback(async () => {
     try {
-      const overview = await listSchedules();
+      const [overview, insightSnapshot, artifactCandidates] = await Promise.all([
+        listSchedules(),
+        getScheduleInsights(35),
+        listScheduleArtifactInputs().catch(() => []),
+      ]);
       setSchedules(overview.schedules);
       setLatestRuns(overview.latestRuns);
+      setHealthActions(overview.healthActions);
+      setInsights(insightSnapshot);
+      setArtifactInputs(artifactCandidates);
+      setError(null);
     } catch (caught) {
       setError(userFacingError(caught, '加载日程失败。'));
     }
@@ -106,6 +142,14 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     const timer = window.setInterval(() => void loadRuns(expandedSchedule), 5_000);
     return () => window.clearInterval(timer);
   }, [expandedSchedule, loadRuns]);
+  useEffect(() => {
+    if (!confirmSuggestion) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) setConfirmSuggestion(null);
+    };
+    document.addEventListener('keydown', close);
+    return () => document.removeEventListener('keydown', close);
+  }, [busy, confirmSuggestion]);
 
   const nextSchedule = useMemo(() => schedules
     .filter((schedule) => schedule.enabled && schedule.lastRunStatus !== 'dead-letter')
@@ -132,9 +176,10 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     setError(null);
     try {
       const { draft } = draftResult;
-      await createSchedule({ sessionId, title: draft.title, input: draft.input, mode: draft.mode, cadence: draft.schedule, modelCredentialId });
+      await createSchedule({ sessionId, title: draft.title, input: draft.input, mode: draft.mode, cadence: draft.schedule, modelCredentialId, inputArtifactTaskId: inputArtifactTaskId || undefined });
       setRequest('');
       setDraftResult(null);
+      setInputArtifactTaskId('');
       await refresh();
     } catch (caught) {
       setError(userFacingError(caught, '保存日程失败。'));
@@ -148,9 +193,10 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     setBusy('advanced');
     setError(null);
     try {
-      await createSchedule({ sessionId, title, input, mode, intervalSeconds: Math.max(15, Math.round(intervalMinutes * 60)), modelCredentialId });
+      await createSchedule({ sessionId, title, input, mode, intervalSeconds: Math.max(15, Math.round(intervalMinutes * 60)), modelCredentialId, inputArtifactTaskId: inputArtifactTaskId || undefined });
       setTitle('');
       setInput('');
+      setInputArtifactTaskId('');
       setAdvancedOpen(false);
       await refresh();
     } catch (caught) {
@@ -212,6 +258,33 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     }
   };
 
+  const applySuggestion = async () => {
+    if (!confirmSuggestion) return;
+    setBusy(`health:${confirmSuggestion.id}`);
+    setError(null);
+    try {
+      await applyScheduleHealthAction(confirmSuggestion.scheduleId, confirmSuggestion.id);
+      setConfirmSuggestion(null);
+      await refresh();
+    } catch (caught) {
+      setError(userFacingError(caught, '这条建议没有执行。'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const visibleDays = useMemo(() => insights
+    ? calendarDays(insights.range.from, calendarMode === 'week' ? 7 : 35)
+    : [], [calendarMode, insights]);
+  const occurrencesByDay = useMemo(() => {
+    const grouped = new Map<string, NonNullable<ScheduleInsights>['occurrences']>();
+    for (const occurrence of insights?.occurrences ?? []) {
+      const key = dateKey(new Date(occurrence.startsAt));
+      grouped.set(key, [...(grouped.get(key) ?? []), occurrence]);
+    }
+    return grouped;
+  }, [insights]);
+
   return <div className="dash-agent-studio schedule-workspace">
     <div className="schedule-hero">
       <div className="schedule-hero-copy">
@@ -243,6 +316,15 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
       </button>
     </div>
 
+    {artifactInputs.length > 0 && <label className="schedule-artifact-link">
+      <span><Link2 size={14} />接续已验证结果</span>
+      <select value={inputArtifactTaskId} onChange={(event) => setInputArtifactTaskId(event.target.value)}>
+        <option value="">不接续，独立执行</option>
+        {artifactInputs.map((artifact) => <option key={artifact.taskId} value={artifact.taskId}>{artifact.title}</option>)}
+      </select>
+      {inputArtifactTaskId && <small>执行时会校验来源版本；原结果变化时自动停止，不会静默使用新内容。</small>}
+    </label>}
+
     {error && <div className="dash-agent-studio-error">{error}</div>}
 
     {draftResult && <section className="schedule-draft" aria-label="待确认的日程草案">
@@ -266,6 +348,68 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
       </footer>
     </section>}
 
+    <section className="schedule-intelligence" aria-label="日程计划">
+      <header>
+        <div>
+          <span><CalendarDays size={15} />执行计划</span>
+          <strong>{insights?.capacity.overloadedWindows ? `${insights.capacity.overloadedWindows} 个时间冲突` : '未来安排正常'}</strong>
+        </div>
+        <div className="schedule-view-switch" aria-label="日历范围">
+          <button type="button" aria-pressed={calendarMode === 'week'} onClick={() => setCalendarMode('week')}>本周</button>
+          <button type="button" aria-pressed={calendarMode === 'month'} onClick={() => setCalendarMode('month')}>未来 35 天</button>
+        </div>
+      </header>
+      <div className="schedule-capacity-strip">
+        <span><Activity size={13} />峰值负载 <strong>{insights?.capacity.peakLoad ?? 0}/{insights?.capacity.limit ?? 4}</strong></span>
+        <i className={(insights?.capacity.overloadedWindows ?? 0) > 0 ? 'warning' : 'healthy'} />
+        <small>{insights?.range.truncated ? '高频日程已折叠' : '按 30 分钟窗口估算'}</small>
+      </div>
+      <div className={`schedule-calendar ${calendarMode}`}>
+        {visibleDays.map((day) => {
+          const dayOccurrences = occurrencesByDay.get(dateKey(day)) ?? [];
+          const overloaded = dayOccurrences.some((item) => item.capacity === 'overloaded');
+          return <div key={dateKey(day)} className={`schedule-calendar-day ${overloaded ? 'overloaded' : ''}`}>
+            <header><span>{weekdayLabel[day.getDay()]}</span><strong>{day.getDate()}</strong></header>
+            <div>
+              {dayOccurrences.slice(0, calendarMode === 'week' ? 4 : 2).map((occurrence) => <button
+                type="button"
+                key={occurrence.id}
+                className={`schedule-occurrence ${occurrence.capacity}`}
+                title={`${occurrence.title} · 预计负载 ${occurrence.windowLoad}/${insights?.capacity.limit ?? 4}`}
+                onClick={() => document.getElementById(`schedule-${occurrence.scheduleId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+              >
+                <time>{new Date(occurrence.startsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                <span>{occurrence.title}</span>
+              </button>)}
+              {dayOccurrences.length === 0 && calendarMode === 'week' && <small>空闲</small>}
+              {dayOccurrences.length > (calendarMode === 'week' ? 4 : 2) && <em>+{dayOccurrences.length - (calendarMode === 'week' ? 4 : 2)}</em>}
+            </div>
+          </div>;
+        })}
+      </div>
+    </section>
+
+    {(insights?.suggestions.length ?? 0) > 0 && <section className="schedule-health-agent" aria-label="日程健康建议">
+      <header><span><ShieldAlert size={15} />健康 Agent</span><em>{insights?.suggestions.length}</em></header>
+      <div>
+        {insights?.suggestions.map((suggestion) => <article key={suggestion.id} className={suggestion.severity}>
+          <span><strong>{suggestion.title}</strong><small>{schedules.find((item) => item.id === suggestion.scheduleId)?.title}</small></span>
+          <p>{suggestion.reason}</p>
+          <button type="button" disabled={busy !== null} onClick={() => setConfirmSuggestion(suggestion)}>{suggestion.actionLabel}</button>
+        </article>)}
+      </div>
+    </section>}
+
+    {healthActions.length > 0 && <section className="schedule-health-history" aria-label="已确认的日程调整">
+      <div className="schedule-health-history-title"><Check size={15} /><span>已确认调整</span></div>
+      <div className="schedule-health-history-list">
+        {healthActions.slice(0, 4).map((action) => <div key={action.id} className="schedule-health-history-row">
+          <span><strong>{healthActionLabel[action.action]}</strong><small>{schedules.find((item) => item.id === action.scheduleId)?.title ?? '已删除日程'}</small></span>
+          <time dateTime={action.confirmedAt}>{new Date(action.confirmedAt).toLocaleString()}</time>
+        </div>)}
+      </div>
+    </section>}
+
     <details className="schedule-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
       <summary><Plus size={14} />高级设置：固定间隔</summary>
       <div className="dash-agent-studio-form">
@@ -286,7 +430,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
         const latest = latestRuns[schedule.id];
         const expanded = expandedSchedule === schedule.id;
         const completedOnce = schedule.cadence.kind === 'once' && !schedule.enabled && schedule.lastRunStatus === 'success';
-        return <article key={schedule.id} className={`dash-agent-card schedule-card ${schedule.lastRunStatus === 'dead-letter' ? 'schedule-dead-letter' : ''}`}>
+        return <article id={`schedule-${schedule.id}`} key={schedule.id} className={`dash-agent-card schedule-card ${schedule.lastRunStatus === 'dead-letter' ? 'schedule-dead-letter' : ''}`}>
           <div className="schedule-card-main">
             <div className="dash-agent-card-head">
               <strong>{schedule.title}</strong>
@@ -299,6 +443,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
             <div className="schedule-meta">
               <span><CalendarClock size={13} />{cadenceText(schedule.cadence)}</span>
               <span><Bot size={13} />自动编排</span>
+              {schedule.inputArtifact && <span><Link2 size={13} />接续 {schedule.inputArtifact.title}</span>}
               {!completedOnce && schedule.enabled && <span>下次 {new Date(schedule.nextRunAt).toLocaleString()}</span>}
             </div>
             {latest && <div className="schedule-latest-run">
@@ -327,5 +472,17 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
         </article>;
       })}
     </div>
+    {confirmSuggestion && <div className="schedule-confirm-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !busy) setConfirmSuggestion(null);
+    }}>
+      <section className="schedule-confirm-dialog" role="dialog" aria-modal="true" aria-label="确认日程调整">
+        <header><span><ShieldAlert size={16} />确认调整</span><button type="button" aria-label="关闭日程调整" disabled={busy !== null} onClick={() => setConfirmSuggestion(null)}><X size={15} /></button></header>
+        <strong>{confirmSuggestion.title}</strong>
+        <p>{confirmSuggestion.reason}</p>
+        <div>{confirmSuggestion.evidence.map((item) => <span key={item}>{item}</span>)}</div>
+        {confirmSuggestion.proposedCadence && <small>调整后：{cadenceText(confirmSuggestion.proposedCadence)}</small>}
+        <footer><button type="button" className="secondary" autoFocus disabled={busy !== null} onClick={() => setConfirmSuggestion(null)}>取消</button><button type="button" disabled={busy !== null} onClick={() => void applySuggestion()}>{busy ? '正在应用' : confirmSuggestion.actionLabel}</button></footer>
+      </section>
+    </div>}
   </div>;
 }

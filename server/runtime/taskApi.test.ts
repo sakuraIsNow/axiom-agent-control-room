@@ -13,6 +13,8 @@ import type { WorkflowTask } from './contracts.js';
 import type { ModelClient, ModelCompletionRequest } from './modelClient.js';
 import { TencentMemoryClient } from './memoryClient.js';
 import { SqliteMemoryCaptureReceiptStore } from './memoryCaptureStore.js';
+import { SqliteArtifactCatalog } from './artifactCatalog.js';
+import { FileArtifactStore } from './artifactStore.js';
 import { signPrincipal } from './principal.js';
 import { signWebhookPayload } from './webhookSecurity.js';
 import type { HarnessAdapter, HarnessCapabilities, HarnessCommandResult, HarnessEvent, HarnessThread, HarnessThreadInput, HarnessTurn, HarnessTurnInput } from './harness.js';
@@ -1280,14 +1282,18 @@ test('reject-review pauses the task and records a durable rejection', async () =
 
 test('deletes only terminal tasks and removes their persisted event history', async () => {
   const { store, api } = await createHarness();
+  const headers = { 'x-axiom-user-id': 'operator' };
   try {
     const task = await seedTask(store, 'running');
-    const blocked = await request(api, `/tasks/${task.id}`, { method: 'DELETE' });
+    const blocked = await request(api, `/tasks/${task.id}`, { method: 'DELETE', headers });
     assert.equal(blocked.status, 409);
     assert.ok(await store.getTask(task.id));
 
     await store.updateTask(task.id, { status: 'completed' });
-    const deleted = await request(api, `/tasks/${task.id}`, { method: 'DELETE' });
+    const crossUserDelete = await request(api, `/tasks/${task.id}`, { method: 'DELETE', headers: { 'x-axiom-user-id': 'other-user' } });
+    assert.equal(crossUserDelete.status, 404);
+    assert.ok(await store.getTask(task.id));
+    const deleted = await request(api, `/tasks/${task.id}`, { method: 'DELETE', headers });
     assert.equal(deleted.status, 204);
     assert.equal(await store.getTask(task.id), null);
     assert.deepEqual(await store.getEvents(task.id), []);
@@ -1313,7 +1319,7 @@ test('deleting a terminal task cleans its result and event-linked Artifacts', as
     const task = await seedTask(store, 'completed');
     await store.appendEvent(task, { type: 'artifact.created', payload: { artifactId: 'tool:task:step:call' } });
     await store.appendEvent(task, { type: 'tool.completed', payload: { artifact: { id: 'step-output:task:step' } } });
-    const response = await request(api, `/tasks/${task.id}`, { method: 'DELETE' });
+    const response = await request(api, `/tasks/${task.id}`, { method: 'DELETE', headers: { 'x-axiom-user-id': 'operator' } });
     assert.equal(response.status, 204);
     assert.deepEqual(new Set(deleted), new Set([
       `result:${task.id}`,
@@ -2048,6 +2054,7 @@ test('schedule runs are tenant-isolated, routed per execution, and do not move t
   });
   const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-schedule-run', 'x-axiom-user-id': 'user-schedule-run' };
   const otherHeaders = { ...headers, 'x-axiom-tenant-id': 'tenant-schedule-other' };
+  const otherUserHeaders = { ...headers, 'x-axiom-user-id': 'user-schedule-other' };
   try {
     const createdResponse = await request(api, '/schedules', {
       method: 'POST', headers, body: JSON.stringify({
@@ -2097,7 +2104,159 @@ test('schedule runs are tenant-isolated, routed per execution, and do not move t
 
     assert.equal((await request(api, `/schedules/${created.id}/runs`, { headers: otherHeaders })).status, 404);
     assert.equal((await request(api, `/schedules/${created.id}/run`, { method: 'POST', headers: otherHeaders, body: '{}' })).status, 404);
+    const otherUserListResponse = await request(api, '/schedules', { headers: otherUserHeaders });
+    assert.deepEqual((await otherUserListResponse.json() as { schedules: unknown[] }).schedules, []);
+    assert.equal((await request(api, `/schedules/${created.id}/runs`, { headers: otherUserHeaders })).status, 404);
+    assert.equal((await request(api, `/schedules/${created.id}/run`, { method: 'POST', headers: otherUserHeaders, body: '{}' })).status, 404);
+    assert.equal((await request(api, `/schedules/${created.id}`, { method: 'DELETE', headers: otherUserHeaders })).status, 404);
   } finally {
     await store.close();
+  }
+});
+
+test('schedule insights detect capacity conflicts and only apply a current confirmed suggestion', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  await store.initialize();
+  const api = createTaskApi({ store, hub: new EventHub(), coordinator: { nudge() {}, abort() {} } as never });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-schedule-health', 'x-axiom-user-id': 'user-schedule-health' };
+  const otherUserHeaders = { ...headers, 'x-axiom-user-id': 'other-schedule-health-user' };
+  try {
+    const createdIds: string[] = [];
+    for (const title of ['研究简报', '代码巡检', '资料归档']) {
+      const response = await request(api, '/schedules', {
+        method: 'POST', headers, body: JSON.stringify({
+          sessionId: `session-${title}`, title, input: `${title}任务`, mode: 'build', enabled: true,
+          cadence: { kind: 'daily', timeOfDay: '23:59', timezone: 'Asia/Shanghai' },
+        }),
+      });
+      assert.equal(response.status, 201);
+      createdIds.push((await response.json() as { schedule: { id: string } }).schedule.id);
+    }
+
+    const insightResponse = await request(api, '/schedules/insights?days=7', { headers });
+    assert.equal(insightResponse.status, 200);
+    const insights = await insightResponse.json() as {
+      capacity: { overloadedWindows: number };
+      conflicts: Array<{ scheduleIds: string[] }>;
+      suggestions: Array<{ id: string; scheduleId: string; recommendedAction: string; proposedCadence?: { kind: string; timeOfDay?: string } }>;
+    };
+    assert.ok(insights.capacity.overloadedWindows >= 1);
+    assert.equal(insights.conflicts[0]?.scheduleIds.length, 3);
+    const recommendation = insights.suggestions.find((item) => item.scheduleId === createdIds[0] && item.recommendedAction === 'reschedule');
+    assert.ok(recommendation?.id);
+
+    const beforeConfirmationResponse = await request(api, '/schedules', { headers });
+    const beforeConfirmation = await beforeConfirmationResponse.json() as { schedules: Array<{ id: string; cadence: { timeOfDay?: string } }> };
+    assert.equal(beforeConfirmation.schedules.find((item) => item.id === createdIds[0])?.cadence.timeOfDay, '23:59');
+
+    const applied = await request(api, `/schedules/${createdIds[0]}/health-action`, {
+      method: 'POST', headers, body: JSON.stringify({ suggestionId: recommendation?.id }),
+    });
+    assert.equal(applied.status, 200);
+    const appliedBody = await applied.json() as { schedule: { cadence: { timeOfDay: string } }; applied: { confirmedBy: string; action: string; before: { cadence: { timeOfDay: string } }; after: { cadence: { timeOfDay: string } } } };
+    assert.equal(appliedBody.schedule.cadence.timeOfDay, '23:29');
+    assert.equal(appliedBody.applied.confirmedBy, 'user-schedule-health');
+    assert.equal(appliedBody.applied.action, 'reschedule');
+    assert.equal(appliedBody.applied.before.cadence.timeOfDay, '23:59');
+    assert.equal(appliedBody.applied.after.cadence.timeOfDay, '23:29');
+
+    const auditResponse = await request(api, '/schedules/health-actions', { headers });
+    assert.equal(auditResponse.status, 200);
+    const audits = await auditResponse.json() as { actions: Array<{ scheduleId: string; suggestionId: string; confirmedBy: string }> };
+    assert.equal(audits.actions.length, 1);
+    assert.equal(audits.actions[0]?.scheduleId, createdIds[0]);
+    assert.equal(audits.actions[0]?.suggestionId, recommendation?.id);
+    assert.equal(audits.actions[0]?.confirmedBy, 'user-schedule-health');
+    const otherUserAudits = await request(api, '/schedules/health-actions', { headers: otherUserHeaders });
+    assert.deepEqual((await otherUserAudits.json() as { actions: unknown[] }).actions, []);
+
+    const schedulesAfterAction = await request(api, '/schedules', { headers });
+    const schedulesAfterActionBody = await schedulesAfterAction.json() as { healthActions: Array<{ suggestionId: string }> };
+    assert.equal(schedulesAfterActionBody.healthActions[0]?.suggestionId, recommendation?.id);
+
+    const stale = await request(api, `/schedules/${createdIds[0]}/health-action`, {
+      method: 'POST', headers, body: JSON.stringify({ suggestionId: recommendation?.id }),
+    });
+    assert.equal(stale.status, 409);
+  } finally {
+    await store.close();
+  }
+});
+
+test('schedule Artifact inputs require verified ownership and remain version-pinned after source deletion', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'axiom-schedule-artifact-'));
+  const store = new SqliteTaskStore(':memory:');
+  const artifactCatalog = new SqliteArtifactCatalog(':memory:');
+  const artifactStore = new FileArtifactStore(join(root, 'artifacts'));
+  await store.initialize();
+  await artifactCatalog.initialize();
+  const api = createTaskApi({ store, artifactCatalog, artifactStore, hub: new EventHub(), coordinator: { nudge() {}, abort() {} } as never });
+  const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': 'tenant-schedule-link', 'x-axiom-user-id': 'user-schedule-link' };
+  const otherUserHeaders = { ...headers, 'x-axiom-user-id': 'other-user' };
+  try {
+    const source = await store.createTask({
+      tenantId: 'tenant-schedule-link', userId: 'user-schedule-link', sessionId: 'source-session',
+      title: '已验证周报', input: '生成周报', mode: 'analyze',
+    });
+    const completed = await store.updateTask(source.id, { status: 'completed', result: '# 已验证结果\n\n保留这份内容作为下游输入。' });
+    await store.appendEvent(completed, {
+      type: 'task.completed',
+      payload: {
+        evidenceSummary: {
+          status: 'verified', totalSteps: 1, completedSteps: 1, failedSteps: 0, skippedSteps: 0,
+          acceptanceCriteria: 1, evidenceItems: 1, artifactRefs: 1, toolReceipts: 0,
+          review: 'approved', gaps: [],
+        },
+      },
+    });
+
+    const candidateResponse = await request(api, '/schedules/artifact-inputs', { headers });
+    const candidates = await candidateResponse.json() as { artifacts: Array<{ taskId: string; artifactId: string; revision: number }> };
+    assert.equal(candidates.artifacts[0]?.taskId, source.id);
+    assert.equal(candidates.artifacts[0]?.artifactId, `result:${source.id}`);
+    const otherCandidateResponse = await request(api, '/schedules/artifact-inputs', { headers: otherUserHeaders });
+    assert.deepEqual((await otherCandidateResponse.json() as { artifacts: unknown[] }).artifacts, []);
+
+    const forbidden = await request(api, '/schedules', {
+      method: 'POST', headers: otherUserHeaders, body: JSON.stringify({
+        sessionId: 'forbidden', title: '越权接续', input: '处理结果', mode: 'analyze', enabled: true,
+        inputArtifactTaskId: source.id, cadence: { kind: 'daily', timeOfDay: '23:59', timezone: 'Asia/Shanghai' },
+      }),
+    });
+    assert.equal(forbidden.status, 400);
+
+    const created = await request(api, '/schedules', {
+      method: 'POST', headers, body: JSON.stringify({
+        sessionId: 'linked-schedule', title: '接续分析', input: '基于上一份结果补充变化', mode: 'analyze', enabled: true,
+        inputArtifactTaskId: source.id, cadence: { kind: 'daily', timeOfDay: '23:59', timezone: 'Asia/Shanghai' },
+      }),
+    });
+    assert.equal(created.status, 201);
+    const schedule = (await created.json() as { schedule: { id: string; inputArtifact: { sourceTaskId: string; contentSha256: string } } }).schedule;
+    assert.equal(schedule.inputArtifact.sourceTaskId, source.id);
+    assert.equal(schedule.inputArtifact.contentSha256.length, 64);
+    assert.equal((await artifactCatalog.get('tenant-schedule-link', `result:${source.id}`))?.referenceCount, 2);
+
+    const removedSource = await request(api, `/tasks/${source.id}`, { method: 'DELETE', headers });
+    assert.equal(removedSource.status, 204);
+    assert.equal((await artifactCatalog.get('tenant-schedule-link', `result:${source.id}`))?.referenceCount, 1);
+    assert.match(await artifactStore.get(`result:${source.id}`, 'tenant-schedule-link') ?? '', /保留这份内容/u);
+
+    const runResponse = await request(api, `/schedules/${schedule.id}/run`, {
+      method: 'POST', headers, body: JSON.stringify({ idempotencyKey: 'linked-artifact-run-001' }),
+    });
+    assert.equal(runResponse.status, 202);
+    const run = await runResponse.json() as { task: { id: string; input: string } };
+    assert.match(run.task.input, /\[已验证日程输入\]/u);
+    assert.match(run.task.input, /保留这份内容作为下游输入/u);
+    const createdEvent = (await store.getEvents(run.task.id)).find((event) => event.type === 'task.created');
+    assert.equal((createdEvent?.payload.inputArtifact as { sourceTaskId?: string } | undefined)?.sourceTaskId, source.id);
+
+    assert.equal((await request(api, `/schedules/${schedule.id}`, { method: 'DELETE', headers })).status, 204);
+    assert.equal((await artifactCatalog.get('tenant-schedule-link', `result:${source.id}`))?.referenceCount, 0);
+  } finally {
+    await artifactCatalog.close();
+    await store.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });

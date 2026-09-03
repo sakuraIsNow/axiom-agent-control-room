@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { InMemoryScheduler, MAX_SCHEDULE_FAILURES } from './scheduler.js';
+import { InMemoryScheduler, MAX_SCHEDULE_FAILURES, ScheduleHealthActionConflictError, scheduleHealthState } from './scheduler.js';
 
 const input = (overrides: Partial<Parameters<InMemoryScheduler['upsert']>[0]> = {}) => ({
   tenantId: 'tenant-a',
@@ -82,6 +82,65 @@ test('resume clears dead letter state and only allows the owning tenant', async 
   assert.equal(resumed?.failureCount, 0);
   assert.equal(resumed?.lastRunStatus, undefined);
   assert.equal(resumed?.deadLetteredAt, undefined);
+});
+
+test('pause and reschedule preserve ownership and require explicit calls', async () => {
+  const scheduler = new InMemoryScheduler(async () => undefined);
+  const created = await scheduler.upsert(input({
+    cadence: { kind: 'daily', timeOfDay: '09:00', timezone: 'Asia/Shanghai' },
+    intervalSeconds: undefined,
+    nextRunAt: '2026-09-04T01:00:00.000Z',
+  }));
+  assert.equal(await scheduler.pause(created.id, 'tenant-b'), null);
+  const paused = await scheduler.pause(created.id, 'tenant-a');
+  assert.equal(paused?.enabled, false);
+  assert.equal(paused?.cadence.kind, 'daily');
+
+  assert.equal(await scheduler.reschedule(created.id, 'tenant-b', { kind: 'daily', timeOfDay: '10:00', timezone: 'Asia/Shanghai' }), null);
+  const changed = await scheduler.reschedule(created.id, 'tenant-a', { kind: 'daily', timeOfDay: '10:00', timezone: 'Asia/Shanghai' });
+  assert.deepEqual(changed?.cadence, { kind: 'daily', timeOfDay: '10:00', timezone: 'Asia/Shanghai' });
+  assert.equal(changed?.enabled, false);
+});
+
+test('confirmed health actions are atomic, auditable, replay-safe, and user-isolated', async () => {
+  const scheduler = new InMemoryScheduler(async () => undefined);
+  const created = await scheduler.upsert(input({
+    cadence: { kind: 'daily', timeOfDay: '09:00', timezone: 'Asia/Shanghai' },
+    intervalSeconds: undefined,
+    nextRunAt: '2026-09-04T01:00:00.000Z',
+  }));
+  const proposal = { kind: 'daily', timeOfDay: '09:30', timezone: 'Asia/Shanghai' } as const;
+  const action = {
+    tenantId: created.tenantId,
+    userId: created.userId,
+    scheduleId: created.id,
+    suggestionId: 'schedule-health:test-1',
+    kind: 'capacity_conflict' as const,
+    action: 'reschedule' as const,
+    reason: '同一时间的执行负载过高。',
+    evidence: ['预计负载 6/4'],
+    proposedCadence: proposal,
+    expected: scheduleHealthState(created),
+    confirmedBy: created.userId,
+  };
+
+  const result = await scheduler.applyHealthAction(action);
+  assert.deepEqual(result?.schedule.cadence, proposal);
+  assert.deepEqual(result?.audit.before.cadence, created.cadence);
+  assert.deepEqual(result?.audit.after.cadence, proposal);
+  assert.equal(result?.audit.confirmedBy, created.userId);
+  assert.equal((await scheduler.listHealthActions(created.tenantId, created.userId)).length, 1);
+  assert.deepEqual(await scheduler.listHealthActions(created.tenantId, 'other-user'), []);
+  await assert.rejects(() => scheduler.applyHealthAction(action), ScheduleHealthActionConflictError);
+
+  const current = await scheduler.get(created.id, created.tenantId);
+  assert.ok(current);
+  await assert.rejects(() => scheduler.applyHealthAction({
+    ...action,
+    suggestionId: 'schedule-health:test-stale',
+    expected: scheduleHealthState(created),
+  }), ScheduleHealthActionConflictError);
+  assert.deepEqual((await scheduler.get(created.id, created.tenantId))?.cadence, proposal);
 });
 
 test('deleting an in-flight in-memory schedule does not recreate it', async () => {

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
@@ -14,7 +14,7 @@ import { TencentMemoryClient } from './memoryClient.js';
 import type { RuntimeMetrics } from './metrics.js';
 import { createArtifactStore } from './artifactStore.js';
 import type { ArtifactCatalog } from './artifactCatalog.js';
-import { InMemoryScheduler, PostgresScheduler, type ScheduledTrigger, type Scheduler } from './scheduler.js';
+import { InMemoryScheduler, PostgresScheduler, ScheduleHealthActionConflictError, scheduleHealthState, type ScheduledTrigger, type Scheduler } from './scheduler.js';
 import { verifyPrincipal } from './principal.js';
 import { DockerSandboxExecutor } from './toolExecutor.js';
 import type { ModelClient, OpenAICompatibleModelClient } from './modelClient.js';
@@ -33,6 +33,7 @@ import { checkpointsFromEvents, diffCheckpointToTask, mergeCheckpointBranch } fr
 import { attachPersistedContextMetadata, buildPersistedContextSummary, type DurableContextSourceMessage } from './contextSummary.js';
 import { buildOperationsAlerts } from './operationsAlerts.js';
 import { buildInAppNotifications } from './inAppNotifications.js';
+import { buildScheduleInsights } from './scheduleInsights.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -342,6 +343,7 @@ const scheduleSchema = createTaskSchema.omit({ templateId: true, routing: true, 
   cadence: scheduleCadenceSchema.optional(),
   intervalSeconds: z.number().int().min(15).max(31_536_000).optional(),
   enabled: z.boolean().default(true),
+  inputArtifactTaskId: z.string().uuid().optional(),
 }).strict().refine((value) => value.cadence !== undefined || value.intervalSeconds !== undefined, {
   message: 'cadence or intervalSeconds is required.',
 });
@@ -357,6 +359,10 @@ const scheduleDraftRequestSchema = z.object({
 
 const manualScheduleRunSchema = z.object({
   idempotencyKey: z.string().min(8).max(120).optional(),
+}).strict();
+
+const scheduleHealthActionSchema = z.object({
+  suggestionId: z.string().min(1).max(160),
 }).strict();
 
 const notificationReadSchema = z.object({
@@ -702,11 +708,13 @@ export const createTaskApi = (dependencies: {
         ids.add((artifact as { id: string }).id);
       }
     }
-    // Keep lifecycle state durable before touching the object store. A transient
-    // outage then leaves a retryable queue entry instead of silently leaking data.
-    await Promise.all([...ids].map((id) => artifactCatalog?.markDeletePending(task.tenantId, id, '任务已删除，等待 Artifact 清理。')));
     await artifactCatalog?.removeTaskReferences(task.tenantId, task.id, [...ids]);
     await Promise.all([...ids].map(async (id) => {
+      const catalogRecord = await artifactCatalog?.get(task.tenantId, id);
+      // A schedule or another task still owns this Artifact. Removing the
+      // source task must not break the downstream, version-pinned input.
+      if (catalogRecord && catalogRecord.referenceCount > 0) return;
+      await artifactCatalog?.markDeletePending(task.tenantId, id, '任务已删除，等待 Artifact 清理。');
       try {
         await artifactStore.delete(id, task.tenantId);
         await artifactCatalog?.markDeleted(task.tenantId, id);
@@ -1073,16 +1081,37 @@ export const createTaskApi = (dependencies: {
     return ensureScheduledWorkflow(decision, trigger.input);
   };
 
+  const artifactContentForSchedule = async (trigger: ScheduledTrigger) => {
+    if (!trigger.inputArtifact) return { input: trigger.input };
+    const sourceTask = await store.getTask(trigger.inputArtifact.sourceTaskId, trigger.tenantId);
+    if (sourceTask && (sourceTask.userId !== trigger.userId || sourceTask.status !== 'completed')) {
+      throw new Error('日程接续的已验证结果已不可用。');
+    }
+    const content = await artifactStore?.get(trigger.inputArtifact.artifactId, trigger.tenantId) ?? sourceTask?.result;
+    if (!content) throw new Error('日程接续的 Artifact 内容已不可用。');
+    const contentSha256 = createHash('sha256').update(content, 'utf8').digest('hex');
+    if ((sourceTask && sourceTask.revision !== trigger.inputArtifact.sourceTaskRevision) || contentSha256 !== trigger.inputArtifact.contentSha256) {
+      throw new Error('日程接续的结果版本已经变化，请重新选择并确认。');
+    }
+    const excerpt = content.slice(0, 24_000);
+    return {
+      input: `${trigger.input}\n\n[已验证日程输入]\n来源：${trigger.inputArtifact.title}\nArtifact：${trigger.inputArtifact.artifactId}\n版本：任务 revision ${trigger.inputArtifact.sourceTaskRevision} / sha256 ${trigger.inputArtifact.contentSha256}\n内容：\n${excerpt}${content.length > excerpt.length ? '\n[内容已按上下文预算截断，完整结果保留在 Artifact 中]' : ''}`,
+      artifact: trigger.inputArtifact,
+    };
+  };
+
   const enqueueScheduledTrigger = async (trigger: ScheduledTrigger, manual = false, requestId?: string) => {
-    const routing = chatRouteDecisionSchema.parse(await routeScheduledTrigger(trigger));
+    const linkedInput = await artifactContentForSchedule(trigger);
+    const executionTrigger = { ...trigger, input: linkedInput.input };
+    const routing = chatRouteDecisionSchema.parse(await routeScheduledTrigger(executionTrigger));
     const idempotencyKey = manual
       ? `schedule:${trigger.id}:manual:${requestId ?? randomUUID()}`
       : `schedule:${trigger.id}:${trigger.nextRunAt}`;
     return enqueueTask(
-      { ...trigger, routing },
+      { ...executionTrigger, routing },
       trigger.tenantId,
       trigger.userId,
-      { triggerId: trigger.id, source: 'schedule', manual, routingSource: routing.source },
+      { triggerId: trigger.id, source: 'schedule', manual, routingSource: routing.source, ...(linkedInput.artifact ? { inputArtifact: linkedInput.artifact } : {}) },
       idempotencyKey,
       { userId: trigger.userId, role: 'member' },
     );
@@ -2211,15 +2240,63 @@ export const createTaskApi = (dependencies: {
     }
   });
 
-  const listScheduleRuns = async (scheduleId: string, tenantId: string, limit = 20) => {
+  const listScheduleRuns = async (scheduleId: string, tenantId: string, userId: string, limit = 20) => {
     const candidates = store.listTasksByTrigger
       ? await store.listTasksByTrigger(tenantId, scheduleId, limit)
       : await store.listTasks(tenantId, Math.max(100, limit));
     const eventSummaries = await store.getTaskEventSummaries(candidates.map((task) => task.id), tenantId);
-    const owned = store.listTasksByTrigger
+    const triggerTasks = store.listTasksByTrigger
       ? candidates
       : candidates.filter((task) => eventSummaries.get(task.id)?.triggerId === scheduleId).slice(0, limit);
+    const owned = triggerTasks.filter((task) => task.userId === userId).slice(0, limit);
     return Promise.all(owned.map((task) => summarizeTask(task, eventSummaries.get(task.id))));
+  };
+
+  const scheduleForPrincipal = async (scheduleId: string, principal: ReturnType<typeof identity>) => {
+    const schedule = await scheduler.get(scheduleId, principal.tenantId);
+    return schedule?.userId === principal.userId ? schedule : null;
+  };
+
+  const scheduleArtifactCandidate = async (taskId: string, principal: ReturnType<typeof identity>) => {
+    const task = await store.getTask(taskId, principal.tenantId);
+    if (!task || task.userId !== principal.userId || task.status !== 'completed' || !task.result?.trim()) return null;
+    const summary = (await store.getTaskEventSummaries([task.id], principal.tenantId)).get(task.id);
+    const evidence = summary?.latest?.type === 'task.completed' ? parseCompletionEvidence(summary.latest.payload.evidenceSummary) : undefined;
+    if (evidence?.status !== 'verified') return null;
+    const artifactId = `result:${task.id}`;
+    return {
+      artifactId,
+      taskId: task.id,
+      ...(summary?.triggerId ? { sourceScheduleId: summary.triggerId } : {}),
+      title: task.title,
+      createdAt: task.updatedAt,
+      bytes: Buffer.byteLength(task.result, 'utf8'),
+      revision: task.revision,
+      inputArtifact: {
+        artifactId,
+        sourceTaskId: task.id,
+        ...(summary?.triggerId ? { sourceScheduleId: summary.triggerId } : {}),
+        sourceTaskRevision: task.revision,
+        sourceTaskUpdatedAt: task.updatedAt,
+        contentSha256: createHash('sha256').update(task.result, 'utf8').digest('hex'),
+        title: task.title,
+      },
+      content: task.result,
+    };
+  };
+
+  const scheduleInsightsFor = async (principal: ReturnType<typeof identity>, days = 35) => {
+    const schedules = (await scheduler.list(principal.tenantId)).filter((schedule) => schedule.userId === principal.userId);
+    const runEntries = await Promise.all(schedules.map(async (schedule) => [
+      schedule.id,
+      await listScheduleRuns(schedule.id, principal.tenantId, principal.userId, 6),
+    ] as const));
+    return buildScheduleInsights({
+      schedules,
+      runsBySchedule: Object.fromEntries(runEntries),
+      days,
+      capacityLimit: Number(process.env.AXIOM_SCHEDULE_CAPACITY ?? 4),
+    });
   };
 
   api.post('/schedules/draft', async (c) => {
@@ -2268,10 +2345,14 @@ export const createTaskApi = (dependencies: {
   });
 
   api.get('/schedules', async (c) => {
-    const { tenantId } = identity(c.req.raw.headers);
-    const schedules = await scheduler.list(tenantId);
+    const { tenantId, userId } = identity(c.req.raw.headers);
+    const [allSchedules, healthActions] = await Promise.all([
+      scheduler.list(tenantId),
+      scheduler.listHealthActions(tenantId, userId, 20),
+    ]);
+    const schedules = allSchedules.filter((schedule) => schedule.userId === userId);
     if (schedules.length === 0) {
-      return c.json({ schedules, latestRuns: {}, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' });
+      return c.json({ schedules, latestRuns: {}, healthActions, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' });
     }
     const tasks = await store.listTasks(tenantId, 100);
     const summaries = await store.getTaskEventSummaries(tasks.map((task) => task.id), tenantId);
@@ -2283,7 +2364,33 @@ export const createTaskApi = (dependencies: {
       if (!triggerId || !scheduleIds.has(triggerId) || latestRuns[triggerId]) continue;
       latestRuns[triggerId] = await summarizeTask(task, summary);
     }
-    return c.json({ schedules, latestRuns, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' });
+    return c.json({ schedules, latestRuns, healthActions, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' });
+  });
+
+  api.get('/schedules/health-actions', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const requestedLimit = Number(c.req.query('limit') ?? 20);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 20;
+    return c.json({ actions: await scheduler.listHealthActions(principal.tenantId, principal.userId, limit) });
+  });
+
+  api.get('/schedules/insights', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const requestedDays = Number(c.req.query('days') ?? 35);
+    const days = Number.isFinite(requestedDays) ? Math.min(42, Math.max(1, Math.floor(requestedDays))) : 35;
+    return c.json(await scheduleInsightsFor(principal, days));
+  });
+
+  api.get('/schedules/artifact-inputs', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const requestedLimit = Number(c.req.query('limit') ?? 50);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 50;
+    const tasks = (await store.listTasks(principal.tenantId, Math.max(100, limit * 2)))
+      .filter((task) => task.userId === principal.userId && task.status === 'completed' && Boolean(task.result?.trim()));
+    const candidates = await Promise.all(tasks.map((task) => scheduleArtifactCandidate(task.id, principal)));
+    return c.json({
+      artifacts: candidates.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate)).slice(0, limit).map(({ inputArtifact: _inputArtifact, content: _content, ...candidate }) => candidate),
+    });
   });
 
   api.post('/schedules', async (c) => {
@@ -2298,7 +2405,59 @@ export const createTaskApi = (dependencies: {
           : null;
         if (!credential) return c.json({ error: '文本模型凭据不存在或不属于当前用户。' }, 400);
       }
-      const schedule = await scheduler.upsert({ ...parsed.data, title: parsed.data.title ?? parsed.data.input.slice(0, 80), tenantId, userId });
+      const linked = parsed.data.inputArtifactTaskId
+        ? await scheduleArtifactCandidate(parsed.data.inputArtifactTaskId, { tenantId, userId, role: 'member' })
+        : null;
+      if (parsed.data.inputArtifactTaskId && !linked) {
+        return c.json({ error: '只能接续当前用户已完成且通过验证的任务结果。' }, 400);
+      }
+      if (linked && (!artifactStore || !artifactCatalog)) {
+        return c.json({ error: 'Artifact 持久化服务未就绪，当前不能建立日程结果联动。' }, 503);
+      }
+      const { inputArtifactTaskId: _inputArtifactTaskId, ...scheduleInput } = parsed.data;
+      const schedule = await scheduler.upsert({
+        ...scheduleInput,
+        ...(linked ? { inputArtifact: linked.inputArtifact } : {}),
+        title: parsed.data.title ?? parsed.data.input.slice(0, 80),
+        tenantId,
+        userId,
+      });
+      if (linked && artifactCatalog && artifactStore) {
+        try {
+          const existingRecord = await artifactCatalog.get(tenantId, linked.artifactId);
+          const existingContent = await artifactStore.get(linked.artifactId, tenantId);
+          const stored = existingContent === linked.content
+            ? { key: existingRecord?.storageKey, bytes: linked.bytes }
+            : await artifactStore.put(linked.artifactId, linked.content, tenantId);
+          if (!existingRecord) {
+            await artifactCatalog.register({
+              id: linked.artifactId,
+              tenantId,
+              taskId: linked.taskId,
+              source: 'result',
+              ...(stored.key ? { storageKey: stored.key } : {}),
+              bytes: stored.bytes,
+              mimeType: 'text/markdown',
+              createdAt: linked.createdAt,
+              referenceKey: 'result',
+            });
+          }
+          await artifactCatalog.register({
+            id: linked.artifactId,
+            tenantId,
+            taskId: schedule.id,
+            source: 'result',
+            ...(stored.key ? { storageKey: stored.key } : {}),
+            bytes: stored.bytes,
+            mimeType: 'text/markdown',
+            createdAt: linked.createdAt,
+            referenceKey: `schedule-input:${schedule.id}`,
+          });
+        } catch (error) {
+          await scheduler.remove(schedule.id, tenantId).catch(() => undefined);
+          return c.json({ error: error instanceof Error ? `日程结果引用保存失败：${error.message}` : '日程结果引用保存失败。' }, 503);
+        }
+      }
       return c.json({ schedule, persistence: process.env.DATABASE_URL ? 'postgresql' : 'memory-single-node' }, 201);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : '日程创建失败。' }, 400);
@@ -2306,20 +2465,20 @@ export const createTaskApi = (dependencies: {
   });
 
   api.get('/schedules/:scheduleId/runs', async (c) => {
-    const { tenantId } = identity(c.req.raw.headers);
+    const principal = identity(c.req.raw.headers);
     const scheduleId = c.req.param('scheduleId');
-    if (!await scheduler.get(scheduleId, tenantId)) return c.json({ error: 'Schedule not found.' }, 404);
+    if (!await scheduleForPrincipal(scheduleId, principal)) return c.json({ error: 'Schedule not found.' }, 404);
     const requestedLimit = Number(c.req.query('limit') ?? 20);
     const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 20;
-    return c.json({ runs: await listScheduleRuns(scheduleId, tenantId, limit) });
+    return c.json({ runs: await listScheduleRuns(scheduleId, principal.tenantId, principal.userId, limit) });
   });
 
   api.post('/schedules/:scheduleId/run', async (c) => {
     if (process.env.AXIOM_SCHEDULER_ENABLED === 'false') return c.json({ error: '日程服务当前未启用。' }, 503);
     const parsed = manualScheduleRunSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: '立即运行请求无效。', details: parsed.error.flatten() }, 400);
-    const { tenantId } = identity(c.req.raw.headers);
-    const schedule = await scheduler.get(c.req.param('scheduleId'), tenantId);
+    const principal = identity(c.req.raw.headers);
+    const schedule = await scheduleForPrincipal(c.req.param('scheduleId'), principal);
     if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
     try {
       return c.json(await enqueueScheduledTrigger(schedule, true, parsed.data.idempotencyKey), 202);
@@ -2330,17 +2489,58 @@ export const createTaskApi = (dependencies: {
   });
 
   api.delete('/schedules/:scheduleId', async (c) => {
-    const { tenantId } = identity(c.req.raw.headers);
-    if (!await scheduler.remove(c.req.param('scheduleId'), tenantId)) return c.json({ error: 'Schedule not found.' }, 404);
+    const principal = identity(c.req.raw.headers);
+    const schedule = await scheduleForPrincipal(c.req.param('scheduleId'), principal);
+    if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
+    if (!await scheduler.remove(c.req.param('scheduleId'), principal.tenantId)) return c.json({ error: 'Schedule not found.' }, 404);
+    if (schedule.inputArtifact) {
+      await artifactCatalog?.removeTaskReferences(principal.tenantId, schedule.id, [schedule.inputArtifact.artifactId]);
+    }
     return c.body(null, 204);
   });
 
   api.post('/schedules/:scheduleId/resume', async (c) => {
     if (process.env.AXIOM_SCHEDULER_ENABLED === 'false') return c.json({ error: 'Scheduler is disabled.' }, 503);
-    const { tenantId } = identity(c.req.raw.headers);
-    const schedule = await scheduler.resume(c.req.param('scheduleId'), tenantId);
+    const principal = identity(c.req.raw.headers);
+    if (!await scheduleForPrincipal(c.req.param('scheduleId'), principal)) return c.json({ error: 'Schedule not found.' }, 404);
+    const schedule = await scheduler.resume(c.req.param('scheduleId'), principal.tenantId);
     if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
     return c.json({ schedule }, 200);
+  });
+
+  api.post('/schedules/:scheduleId/health-action', async (c) => {
+    if (process.env.AXIOM_SCHEDULER_ENABLED === 'false') return c.json({ error: '日程服务当前未启用。' }, 503);
+    const parsed = scheduleHealthActionSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '日程调整确认无效。', details: parsed.error.flatten() }, 400);
+    const principal = identity(c.req.raw.headers);
+    const scheduleId = c.req.param('scheduleId');
+    const currentSchedule = await scheduleForPrincipal(scheduleId, principal);
+    if (!currentSchedule) return c.json({ error: 'Schedule not found.' }, 404);
+    const insights = await scheduleInsightsFor(principal, 35);
+    const recommendation = insights.suggestions.find((item) => item.id === parsed.data.suggestionId && item.scheduleId === scheduleId);
+    if (!recommendation) return c.json({ error: '这条建议已过期，日程没有改变。请刷新后重新确认。' }, 409);
+    try {
+      const result = await scheduler.applyHealthAction({
+        tenantId: principal.tenantId,
+        userId: principal.userId,
+        scheduleId,
+        suggestionId: recommendation.id,
+        kind: recommendation.kind,
+        action: recommendation.recommendedAction,
+        reason: recommendation.reason,
+        evidence: recommendation.evidence,
+        ...(recommendation.proposedCadence ? { proposedCadence: recommendation.proposedCadence } : {}),
+        expected: scheduleHealthState(currentSchedule),
+        confirmedBy: principal.userId,
+      });
+      if (!result) return c.json({ error: '日程状态已经改变，本次调整未执行。' }, 409);
+      return c.json({ schedule: result.schedule, applied: result.audit });
+    } catch (error) {
+      if (error instanceof ScheduleHealthActionConflictError) {
+        return c.json({ error: '这条建议已执行或日程状态已经改变，请刷新后查看。' }, 409);
+      }
+      throw error;
+    }
   });
 
   api.get('/notifications', async (c) => {
@@ -2840,14 +3040,17 @@ export const createTaskApi = (dependencies: {
 
   api.delete('/tasks/:taskId', async (c) => {
     const taskId = c.req.param('taskId');
-    const { tenantId } = identity(c.req.raw.headers);
-    const task = await store.getTask(taskId, tenantId);
+    const principal = identity(c.req.raw.headers);
+    const task = await store.getTask(taskId, principal.tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
+    if (principal.role !== 'owner' && principal.role !== 'admin' && task.userId !== principal.userId) {
+      return c.json({ error: 'Task not found.' }, 404);
+    }
     if (!terminalStatuses.has(task.status)) {
       return c.json({ error: 'Only completed, failed, or cancelled tasks can be deleted.' }, 409);
     }
     const events = await store.getEvents(task.id).catch(() => []);
-    if (!await store.deleteTask(taskId, tenantId)) return c.json({ error: 'Task not found.' }, 404);
+    if (!await store.deleteTask(taskId, principal.tenantId)) return c.json({ error: 'Task not found.' }, 404);
     await cleanupTaskArtifacts(task, events);
     return c.body(null, 204);
   });
