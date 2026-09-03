@@ -45,7 +45,7 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - 🔌 **模型可以替换**：默认 DeepSeek，也支持自己的兼容接口；视觉、绘图和视频服务可以单独配置。
 - 🛡️ **高风险操作先确认**：写文件、发布等动作可以停下来等人工批准，避免 Agent 擅自完成危险操作。
 
-## 🆕 v1.1.0 运行时升级
+## 🆕 最新运行时与交付升级
 
 这一版参考 DeepSeek Reasonix、DeepSeek Harness、Codex app-server 和 Agent Nexus 的运行时设计，把“多个 Agent 一起回答”升级为可以恢复、可以验证、可以解释的执行系统。
 
@@ -64,6 +64,7 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - 🧠 **长对话可以可靠恢复**：摘要版本、覆盖消息、Artifact、审批和未完成事项写入数据库；历史消息变化会使旧摘要失效并自动重建，原始对话始终完整保留。
 - 📈 **摘要效果看得见**：运行观测会显示上下文压缩、直接复用、消息覆盖和重建次数，并明确区分“保守估算”与 Provider 精确 Token 计数。
 - 🚪 **第一次打开就能开始工作**：确认没有历史数据后，任务台会直接提供对话、插件和 Agent Nexus 三个入口；不是展示型登录页，点击后进入真实功能。
+- 📣 **任务结果可靠外发**：任务完成、失败、等待确认或日程异常时，可以通过签名 Webhook 推送到自己的系统；投递具有持久队列、幂等、超时重试、死信恢复和脱敏审计，服务重启不会丢失待发送记录。
 - 🧪 **按业务过程评测**：生产门禁不只看最终答案，还验证跨轮路由是否漂移、执行中改需求是否只应用一次、长结果引用边界、恢复一致性与版本冲突。
 
 ### 🔁 一次任务的真实执行链路
@@ -101,7 +102,9 @@ npm run qa:search-agent
 npm run qa:all      24 passed / 0 failed / 4 skipped
 ```
 
-跳过的 4 项只涉及尚未配置的外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar 现场握手。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；这不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
+本轮门禁开始前已经确认 Docker Engine `28.0.1` 正常运行，并且 `ubuntu:22.04` 沙箱镜像可用；24 个可运行项目全部在第一次尝试通过。真实复杂任务产生 798 个连续事件和 704 个 SSE 流式增量，共使用 27,706 Token，Reviewer 评分 92，最终 Artifact 完整交付。
+
+跳过的 4 项只涉及尚未配置的外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar 现场握手。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；跳过不等于通过，也不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
 
 ### 📈 本机性能基线
 
@@ -109,10 +112,10 @@ npm run qa:all      24 passed / 0 failed / 4 skipped
 
 | 接口 | 吞吐 | P95 延迟 |
 | --- | ---: | ---: |
-| 健康检查 | 1,584.58 请求/秒 | 10.49 ms |
-| 就绪检查 | 2,421.89 请求/秒 | 4.91 ms |
-| 任务列表 | 2,474.29 请求/秒 | 6.05 ms |
-| 运行观测 | 813.29 请求/秒 | 31.17 ms |
+| 健康检查 | 1,829.88 请求/秒 | 8.22 ms |
+| 就绪检查 | 2,734.18 请求/秒 | 4.53 ms |
+| 任务列表 | 2,375.65 请求/秒 | 5.37 ms |
+| 运行观测 | 856.02 请求/秒 | 29.16 ms |
 
 这组数据衡量的是 Axiom 自己的 API、调度和数据库访问，不包含 DeepSeek 的网络延迟、排队时间或模型生成速度。可以用下面的命令在自己的机器上重新测试：
 
@@ -214,12 +217,25 @@ npm run perf:smoke
 
 ### 1. 安装依赖
 
-要求 **Node.js 22 或更高版本**。
+要求 **Node.js 22 或更高版本**。基础对话可以直接使用 Node.js；要启用隔离工具执行或运行完整生产门禁，还需要先启动 Docker，并准备沙箱镜像。
 
 ```bash
 git clone https://gitee.com/water-sim/axiom-agent-control-room.git
 cd axiom-agent-control-room
 npm install
+```
+
+完整门禁前可先检查 Docker：
+
+```bash
+docker info
+docker image inspect ubuntu:22.04
+```
+
+如果第二条命令提示镜像不存在，执行：
+
+```bash
+docker pull ubuntu:22.04
 ```
 
 ### 2. 填写自己的模型配置

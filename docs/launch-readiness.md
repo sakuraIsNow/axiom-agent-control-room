@@ -10,7 +10,7 @@
 
 ## 最新本机验证（2026-09-03）
 
-在当前 Windows 单节点、本地测试数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1584.58 RPS / P95 10.49ms`、Readiness `2421.89 RPS / P95 4.91ms`、运行观测 `813.29 RPS / P95 31.17ms`、任务列表 `2474.29 RPS / P95 6.05ms`。标准单元/API 门禁为 `358 passed / 0 failed`；`npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`，24 项均在第一次尝试通过。本次复杂 Runtime 产生 695 个连续事件、597 个可见流式增量和 24,985 Token，通过 Reviewer 95 分门禁并正常交付 785 字符的 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
+本轮门禁开始前已确认 Docker Engine `28.0.1` 正常运行且 `ubuntu:22.04` 沙箱镜像可用。在当前 Windows 单节点、本地测试数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1829.88 RPS / P95 8.22ms`、Readiness `2734.18 RPS / P95 4.53ms`、运行观测 `856.02 RPS / P95 29.16ms`、任务列表 `2375.65 RPS / P95 5.37ms`。标准单元/API 门禁为 `358 passed / 0 failed`；`npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`，24 项均在第一次尝试通过。本次复杂 Runtime 产生 798 个连续事件、704 个可见流式增量和 27,706 Token，通过 Reviewer 92 分门禁并正常交付 1,243 字符的 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务、Docker 沙箱探测和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
 
 ## 当前真实能力
 

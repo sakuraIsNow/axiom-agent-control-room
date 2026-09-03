@@ -766,5 +766,5 @@ npm run qa:search-agent
 - [x] 投递使用 HMAC-SHA256 签名、10 秒超时、PostgreSQL `FOR UPDATE SKIP LOCKED` 或 SQLite 事务租约；可恢复状态码指数退避，最多 5 次后进入死信，普通不可恢复 4xx 直接进入死信。
 - [x] 通知中心增加统一毛玻璃外发渠道面板，支持新增、编辑、暂停、测试、删除、投递审计和死信人工重投；浏览器只显示脱敏地址，不回填密钥或原始查询参数。
 - [x] 删除渠道时擦除密文、地址和签名密钥，但保留脱敏投递审计；默认保留 90 天，可由 `AXIOM_NOTIFICATION_RETENTION_DAYS` 在 1 至 365 天内调整。
-- [x] 单元与 API 回归覆盖加密不泄漏、租户/用户隔离、签名、幂等、测试消息、成功投递、4xx 死信、人工重投、多 Worker 单次认领、SSRF 边界和软删除审计保留；最终 `npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`，24 个可运行项均在第一次尝试通过，标准单元/API 测试为 `358 passed / 0 failed`。
+- [x] 单元与 API 回归覆盖加密不泄漏、租户/用户隔离、签名、幂等、测试消息、成功投递、4xx 死信、人工重投、多 Worker 单次认领、SSRF 边界和软删除审计保留；在 Docker Engine `28.0.1` 与 `ubuntu:22.04` 沙箱镜像从门禁开始前就可用的条件下，最终 `npm run qa:all` 为 `24 passed / 0 failed / 4 skipped`，24 个可运行项均在第一次尝试通过，标准单元/API 测试为 `358 passed / 0 failed`。
 - [ ] 邮件通知和平台运营级告警外发仍未完成；正式公网接收端与真实 PostgreSQL 多 Worker 故障演练也必须在部署环境单独验收。
