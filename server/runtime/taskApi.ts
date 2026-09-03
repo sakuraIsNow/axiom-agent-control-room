@@ -32,6 +32,7 @@ import { fallbackScheduleDraft, parseScheduleDraft, scheduleAgentPrompt } from '
 import { checkpointsFromEvents, diffCheckpointToTask, mergeCheckpointBranch } from './checkpointRuntime.js';
 import { attachPersistedContextMetadata, buildPersistedContextSummary, type DurableContextSourceMessage } from './contextSummary.js';
 import { buildOperationsAlerts } from './operationsAlerts.js';
+import { buildInAppNotifications } from './inAppNotifications.js';
 
 const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'running', 'reviewing']);
 // Agent Nexus owns its runner history. Its internal session IDs must never be
@@ -357,6 +358,13 @@ const scheduleDraftRequestSchema = z.object({
 const manualScheduleRunSchema = z.object({
   idempotencyKey: z.string().min(8).max(120).optional(),
 }).strict();
+
+const notificationReadSchema = z.object({
+  ids: z.array(z.string().min(1).max(512)).max(100).default([]),
+  all: z.boolean().default(false),
+}).strict().refine((value) => value.all || value.ids.length > 0, {
+  message: 'At least one notification id or all=true is required.',
+});
 
 const noteSchema = z.object({
   message: z.string().min(1).max(8_000),
@@ -1088,6 +1096,29 @@ export const createTaskApi = (dependencies: {
       await enqueueScheduledTrigger(trigger);
     }));
   void scheduler.ready().then(() => scheduler.start()).catch(() => undefined);
+
+  const notificationFeed = async (principal: ReturnType<typeof identity>) => {
+    const [tenantTasks, schedules, artifactCleanup] = await Promise.all([
+      store.listTasks(principal.tenantId, 100),
+      scheduler.list(principal.tenantId),
+      artifactCatalog?.listCleanupCandidates(principal.tenantId, 100) ?? Promise.resolve([]),
+    ]);
+    const tasks = tenantTasks.filter((task) => task.userId === principal.userId);
+    const eventSummaries = await store.getTaskEventSummaries(tasks.map((task) => task.id), principal.tenantId);
+    const source = {
+      tasks,
+      eventSummaries,
+      schedules: schedules.filter((schedule) => schedule.userId === principal.userId),
+      artifactCleanup,
+    };
+    const unreadProjection = buildInAppNotifications(source);
+    const readIds = new Set(await store.getReadNotificationIds(
+      principal.tenantId,
+      principal.userId,
+      unreadProjection.map((item) => item.id),
+    ));
+    return buildInAppNotifications({ ...source, readIds });
+  };
 
   const pluginPrompt = (plugin: UserPlugin, rawInput: string, values: Record<string, string | number> | undefined) => {
     const fields = plugin.definition.inputSchema?.fields ?? [];
@@ -2310,6 +2341,37 @@ export const createTaskApi = (dependencies: {
     const schedule = await scheduler.resume(c.req.param('scheduleId'), tenantId);
     if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
     return c.json({ schedule }, 200);
+  });
+
+  api.get('/notifications', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const requestedLimit = Number(c.req.query('limit') ?? 40);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.floor(requestedLimit))) : 40;
+    const unreadOnly = c.req.query('unreadOnly') === 'true';
+    const notifications = await notificationFeed(principal);
+    const visible = unreadOnly ? notifications.filter((item) => !item.read) : notifications;
+    return c.json({
+      generatedAt: new Date().toISOString(),
+      unreadCount: notifications.filter((item) => !item.read).length,
+      notifications: visible.slice(0, limit),
+    });
+  });
+
+  api.post('/notifications/read', async (c) => {
+    const parsed = notificationReadSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '通知已读请求无效。', details: parsed.error.flatten() }, 400);
+    const principal = identity(c.req.raw.headers);
+    const notifications = await notificationFeed(principal);
+    const availableIds = new Set(notifications.map((item) => item.id));
+    const ids = parsed.data.all
+      ? [...availableIds]
+      : [...new Set(parsed.data.ids)].filter((id) => availableIds.has(id));
+    const marked = await store.markNotificationsRead(principal.tenantId, principal.userId, ids);
+    const newlyRead = new Set(ids);
+    return c.json({
+      marked,
+      unreadCount: notifications.filter((item) => !item.read && !newlyRead.has(item.id)).length,
+    });
   });
 
   api.get('/tasks', async (c) => {

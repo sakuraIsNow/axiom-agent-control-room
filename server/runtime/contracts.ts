@@ -924,6 +924,48 @@ export type OperationsAlertsSnapshot = {
   alerts: OperationsAlert[];
 };
 
+export type InAppNotificationKind =
+  | 'approval_required'
+  | 'task_completed'
+  | 'partial_delivery'
+  | 'task_failed'
+  | 'plugin_failed'
+  | 'schedule_dead_letter'
+  | 'artifact_cleanup_failed';
+
+export type InAppNotificationTarget = {
+  view: 'tasks' | 'chat' | 'plugins' | 'schedules' | 'operations';
+  taskId?: string;
+  sessionId?: string;
+  scheduleId?: string;
+  pluginId?: string;
+};
+
+export type InAppNotificationAction = {
+  kind: 'open' | 'retry-task' | 'resume-schedule' | 'retry-artifact-cleanup';
+  label: string;
+  resourceId?: string;
+};
+
+/** A user-facing projection of durable runtime state, never a second task state machine. */
+export type InAppNotification = {
+  id: string;
+  kind: InAppNotificationKind;
+  severity: 'attention' | 'warning' | 'success' | 'info';
+  title: string;
+  message: string;
+  createdAt: string;
+  read: boolean;
+  target: InAppNotificationTarget;
+  action: InAppNotificationAction;
+};
+
+export type InAppNotificationFeed = {
+  generatedAt: string;
+  unreadCount: number;
+  notifications: InAppNotification[];
+};
+
 
 export interface TaskStore {
   initialize(): Promise<void>;
@@ -955,6 +997,8 @@ export interface TaskStore {
   listDeletedSessionIds(tenantId: string, userId: string): Promise<string[]>;
   upsertSession(tenantId: string, userId: string, input: UpsertSessionInput): Promise<PersistedSession>;
   deleteSession(sessionId: string, tenantId: string, userId: string): Promise<boolean>;
+  getReadNotificationIds(tenantId: string, userId: string, notificationIds: string[]): Promise<string[]>;
+  markNotificationsRead(tenantId: string, userId: string, notificationIds: string[], readAt?: string): Promise<number>;
 }
 
 export const terminalStatuses = new Set<TaskStatus>(['completed', 'failed', 'cancelled']);

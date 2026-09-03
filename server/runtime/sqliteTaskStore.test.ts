@@ -13,6 +13,20 @@ const taskInput = (title: string) => ({
 });
 
 describe('SqliteTaskStore', () => {
+  test('persists user-scoped notification read receipts idempotently', async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    try {
+      assert.equal(await store.markNotificationsRead('tenant-a', 'user-a', ['notice-1', 'notice-1', 'notice-2']), 2);
+      assert.deepEqual((await store.getReadNotificationIds('tenant-a', 'user-a', ['notice-2', 'notice-3', 'notice-1'])).sort(), ['notice-1', 'notice-2']);
+      assert.deepEqual(await store.getReadNotificationIds('tenant-a', 'user-b', ['notice-1']), []);
+      assert.deepEqual(await store.getReadNotificationIds('tenant-b', 'user-a', ['notice-1']), []);
+      assert.equal(await store.markNotificationsRead('tenant-a', 'user-a', []), 0);
+    } finally {
+      await store.close();
+    }
+  });
+
   test('deletes a tenant-owned task and cascades its event history', async () => {
     const store = new SqliteTaskStore(':memory:');
     await store.initialize();

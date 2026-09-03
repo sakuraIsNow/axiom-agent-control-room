@@ -617,6 +617,43 @@ export type OperationsAlertsSnapshot = {
   alerts: OperationsAlert[];
 };
 
+export type InAppNotificationKind =
+  | 'approval_required'
+  | 'task_completed'
+  | 'partial_delivery'
+  | 'task_failed'
+  | 'plugin_failed'
+  | 'schedule_dead_letter'
+  | 'artifact_cleanup_failed';
+
+export type InAppNotification = {
+  id: string;
+  kind: InAppNotificationKind;
+  severity: 'attention' | 'warning' | 'success' | 'info';
+  title: string;
+  message: string;
+  createdAt: string;
+  read: boolean;
+  target: {
+    view: 'tasks' | 'chat' | 'plugins' | 'schedules' | 'operations';
+    taskId?: string;
+    sessionId?: string;
+    scheduleId?: string;
+    pluginId?: string;
+  };
+  action: {
+    kind: 'open' | 'retry-task' | 'resume-schedule' | 'retry-artifact-cleanup';
+    label: string;
+    resourceId?: string;
+  };
+};
+
+export type InAppNotificationFeed = {
+  generatedAt: string;
+  unreadCount: number;
+  notifications: InAppNotification[];
+};
+
 export type ScheduleCadence =
   | { kind: 'once'; runAt: string; timezone: string }
   | { kind: 'interval'; intervalSeconds: number; timezone: string }

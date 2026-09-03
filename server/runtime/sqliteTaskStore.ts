@@ -225,6 +225,17 @@ export class SqliteTaskStore implements TaskStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_sessions_user_updated ON sessions(tenant_id, user_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS notification_receipts (
+        tenant_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        notification_id TEXT NOT NULL,
+        read_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, user_id, notification_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_notification_receipts_user_read
+        ON notification_receipts(tenant_id, user_id, read_at DESC);
     `);
     const eventColumns = this.db.prepare('PRAGMA table_info(task_events)').all() as Array<{ name: string }>;
     if (!eventColumns.some((column) => column.name === 'runtime_context_json')) {
@@ -707,5 +718,35 @@ export class SqliteTaskStore implements TaskStore {
       WHERE sessions.user_id = excluded.user_id
     `).run(sessionId, tenantId, userId, now, now);
     return result.changes > 0;
+  }
+
+  async getReadNotificationIds(tenantId: string, userId: string, notificationIds: string[]) {
+    const ids = [...new Set(notificationIds.map((id) => id.trim()).filter(Boolean))].slice(0, 500);
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db.prepare(`
+      SELECT notification_id FROM notification_receipts
+      WHERE tenant_id = ? AND user_id = ? AND notification_id IN (${placeholders})
+    `).all(tenantId, userId, ...ids) as Array<{ notification_id: string }>;
+    return rows.map((row) => row.notification_id);
+  }
+
+  async markNotificationsRead(tenantId: string, userId: string, notificationIds: string[], readAt = new Date().toISOString()) {
+    const ids = [...new Set(notificationIds.map((id) => id.trim()).filter((id) => id.length > 0 && id.length <= 512))].slice(0, 500);
+    if (ids.length === 0) return 0;
+    const statement = this.db.prepare(`
+      INSERT INTO notification_receipts (tenant_id, user_id, notification_id, read_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (tenant_id, user_id, notification_id) DO UPDATE SET read_at = excluded.read_at
+    `);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of ids) statement.run(tenantId, userId, id, readAt);
+      this.db.exec('COMMIT');
+      return ids.length;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 }

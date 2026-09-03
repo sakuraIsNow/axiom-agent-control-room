@@ -18,6 +18,7 @@ import { WorkflowStudio } from './WorkflowStudio';
 import { OperationsConsole } from './OperationsConsole';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { ReviewConfirmDialog } from './ReviewConfirmDialog';
+import { NotificationCenter } from './NotificationCenter';
 import { groupTaskRuns } from '../../lib/taskGrouping';
 import type { DashboardProps } from './dashboardTypes';
 import { ThemePicker } from '../ThemePicker';
@@ -134,6 +135,9 @@ export function AxiomDashboard(props: DashboardProps) {
     })
     : [];
   const sessionTopic = focusedTask ? taskCatalog.filter((task) => task.sessionId === focusedTask.sessionId).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())[0]?.title ?? focusedTask.title : null;
+  const notificationRefreshKey = taskCatalog.length > 0
+    ? `${taskCatalog.length}:${taskCatalog[0]?.id}:${taskCatalog[0]?.status}:${taskCatalog[0]?.updatedAt}`
+    : 'empty';
   const openNewConversation = () => {
     onNewTask();
     setNav('chat');
@@ -174,6 +178,15 @@ export function AxiomDashboard(props: DashboardProps) {
       <button type="button" className="dash-brand" onClick={openNewConversation}><span className="dash-brand-mark"><Sparkles size={15} /></span><span><strong>AXIOM</strong><small>任务台</small></span></button>
       <div className="dash-header-state"><i className={`shell-state-dot ${phase}`} /><span><small>当前模型</small><strong>{provider}</strong></span></div>
       <div className="dash-header-actions">
+        <NotificationCenter
+          refreshKey={notificationRefreshKey}
+          onNavigate={setNav}
+          onOpenTask={(taskId) => {
+            useDashboardStore.getState().selectTask(taskId);
+            onOpenTask(taskId);
+          }}
+          onRefreshTasks={onRefreshTasks}
+        />
         <button type="button" onClick={onOpenReadiness} title="生产就绪"><Wrench size={15} /></button>
         <button type="button" onClick={onOpenSettings} title="运行设置"><Settings2 size={15} /></button>
         <ThemePicker value={theme} onChange={onThemeChange} />

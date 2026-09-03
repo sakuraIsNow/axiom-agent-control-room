@@ -1,4 +1,4 @@
-import type { AgentMode, ChatRouteDecision, OperationsAlertsSnapshot, OperationsSnapshot, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
+import type { AgentMode, ChatRouteDecision, InAppNotificationFeed, OperationsAlertsSnapshot, OperationsSnapshot, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
 import type { ExecutionPolicy } from '../types';
 import { consumeSseBlocks } from './sse';
 
@@ -77,6 +77,29 @@ export async function getOperationsAlerts(hours = 24, signal?: AbortSignal): Pro
     throw new Error(body?.error ?? `Runtime alerts returned ${response.status}.`);
   }
   return body;
+}
+
+export async function getInAppNotifications(limit = 40, signal?: AbortSignal): Promise<InAppNotificationFeed> {
+  const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
+  const response = await fetch(`/api/notifications?limit=${safeLimit}`, { signal });
+  const body = await response.json().catch(() => null) as (InAppNotificationFeed & { error?: string }) | null;
+  if (!response.ok || !body?.generatedAt || !Array.isArray(body.notifications) || typeof body.unreadCount !== 'number') {
+    throw new Error(body?.error ?? `通知列表读取失败 (${response.status})。`);
+  }
+  return body;
+}
+
+export async function markInAppNotificationsRead(input: { ids?: string[]; all?: boolean }) {
+  const response = await fetch('/api/notifications/read', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: input.ids ?? [], all: input.all ?? false }),
+  });
+  const body = await response.json().catch(() => null) as { marked?: number; unreadCount?: number; error?: string } | null;
+  if (!response.ok || typeof body?.marked !== 'number' || typeof body.unreadCount !== 'number') {
+    throw new Error(body?.error ?? `通知状态更新失败 (${response.status})。`);
+  }
+  return { marked: body.marked, unreadCount: body.unreadCount };
 }
 
 export async function cleanupArtifacts(limit = 50, signal?: AbortSignal) {

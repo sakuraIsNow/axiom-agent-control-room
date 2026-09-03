@@ -197,6 +197,17 @@ export class PostgresTaskStore implements TaskStore {
 
       CREATE INDEX IF NOT EXISTS idx_sessions_user_updated ON sessions(tenant_id, user_id, updated_at DESC);
 
+      CREATE TABLE IF NOT EXISTS notification_receipts (
+        tenant_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        notification_id TEXT NOT NULL,
+        read_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tenant_id, user_id, notification_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_notification_receipts_user_read
+        ON notification_receipts(tenant_id, user_id, read_at DESC);
+
       INSERT INTO schema_migrations (version) VALUES (1) ON CONFLICT (version) DO NOTHING;
 
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS plan_version INTEGER NOT NULL DEFAULT 0;
@@ -686,5 +697,27 @@ export class PostgresTaskStore implements TaskStore {
       WHERE sessions.user_id = EXCLUDED.user_id
     `, [sessionId, tenantId, userId, now]);
     return (result.rowCount ?? 0) > 0;
+  }
+
+  async getReadNotificationIds(tenantId: string, userId: string, notificationIds: string[]) {
+    const ids = [...new Set(notificationIds.map((id) => id.trim()).filter(Boolean))].slice(0, 500);
+    if (ids.length === 0) return [];
+    const result = await this.pool.query<{ notification_id: string }>(`
+      SELECT notification_id FROM notification_receipts
+      WHERE tenant_id = $1 AND user_id = $2 AND notification_id = ANY($3::text[])
+    `, [tenantId, userId, ids]);
+    return result.rows.map((row) => row.notification_id);
+  }
+
+  async markNotificationsRead(tenantId: string, userId: string, notificationIds: string[], readAt = new Date().toISOString()) {
+    const ids = [...new Set(notificationIds.map((id) => id.trim()).filter((id) => id.length > 0 && id.length <= 512))].slice(0, 500);
+    if (ids.length === 0) return 0;
+    await this.pool.query(`
+      INSERT INTO notification_receipts (tenant_id, user_id, notification_id, read_at)
+      SELECT $1, $2, notification_id, $3::timestamptz
+      FROM UNNEST($4::text[]) AS notification_id
+      ON CONFLICT (tenant_id, user_id, notification_id) DO UPDATE SET read_at = EXCLUDED.read_at
+    `, [tenantId, userId, readAt, ids]);
+    return ids.length;
   }
 }

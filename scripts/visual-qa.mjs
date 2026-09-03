@@ -237,7 +237,7 @@ const settingsUseDashboardGlass = await page.locator('.settings-panel').evaluate
 await page.screenshot({ path: resolve(outputDir, 'dashboard-settings.png'), fullPage: false });
 await page.locator('.settings-panel .icon-button').first().click();
 
-await page.locator('.dash-header-actions button').first().click();
+await page.locator('.dash-header-actions button[title="生产就绪"]').click();
 const readinessPanel = page.locator('.readiness-panel');
 await readinessPanel.waitFor({ state: 'visible' });
 const readinessText = await readinessPanel.innerText();
@@ -251,6 +251,20 @@ const readinessUsesDashboardGlass = await readinessPanel.evaluate((element) => {
 const readinessTimeRemoved = await readinessPanel.locator('.readiness-time').count() === 0;
 await page.screenshot({ path: resolve(outputDir, 'readiness-panel.png'), fullPage: false });
 await readinessPanel.locator('.icon-button').first().click();
+
+const notificationTrigger = page.locator('.dash-notification-trigger');
+const notificationTriggerVisible = await notificationTrigger.isVisible();
+await notificationTrigger.click();
+const notificationPopover = page.locator('.dash-notification-popover');
+await notificationPopover.waitFor({ state: 'visible' });
+const notificationUsesDashboardGlass = await notificationPopover.evaluate((element) => {
+  const style = getComputedStyle(element);
+  return style.backgroundImage.includes('radial-gradient') && style.backdropFilter.includes('blur') && Number.parseFloat(style.borderRadius) >= 8;
+});
+let notificationHasRealActions = false;
+let notificationHasUnreadCount = false;
+await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications.png'), fullPage: false });
+await notificationPopover.getByRole('button', { name: '关闭', exact: true }).click();
 
 let pluginListRequests = 0;
 const countPluginRequest = (request) => {
@@ -540,7 +554,11 @@ const immediateUserMessage = (await page.locator('.dash-chat-message.user').last
 await page.waitForFunction(() => Boolean(document.querySelector('.dash-chat-message.assistant, .dash-chat-error')), undefined, { timeout: 8_000 });
 const assistantReaction = await page.locator('.dash-chat-message.assistant, .dash-chat-error').count() > 0;
 const activityIndicator = page.locator('.dash-chat-thinking').last();
-const activityText = await activityIndicator.count() > 0 ? (await activityIndicator.innerText()).trim() : '';
+// The activity row can legitimately disappear between the count and text read
+// when a fast provider error or direct response reaches a terminal state.
+const activityText = await activityIndicator.count() > 0
+  ? ((await activityIndicator.textContent().catch(() => '')) ?? '').trim()
+  : '';
 const pendingActivityUsesAgentAction = activityText.length > 0
   && /Agent/u.test(activityText)
   && !/模型生成中|持续生成|模型正在/u.test(activityText);
@@ -690,6 +708,13 @@ if (qaTaskId) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 }
+await notificationTrigger.click();
+await notificationPopover.waitFor({ state: 'visible' });
+await page.waitForTimeout(250);
+notificationHasRealActions = await notificationPopover.locator('.dash-notification-action').count() > 0;
+notificationHasUnreadCount = await notificationTrigger.locator('span').count() === 1;
+await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications-with-runtime-state.png'), fullPage: false });
+await notificationPopover.getByRole('button', { name: '关闭', exact: true }).click();
 await page.getByRole('button', { name: '任务管理', exact: true }).click();
 await page.locator('.dash-task-board').waitFor({ state: 'visible' });
 if (qaTaskId && qaTaskTerminal) {
@@ -768,6 +793,14 @@ if (await page.locator('.dash-task-row').count() > 0) {
 await page.setViewportSize({ width: 390, height: 844 });
 await page.reload({ waitUntil: 'domcontentloaded' });
 await page.locator('.axiom-dashboard').waitFor({ state: 'visible', timeout: 20_000 });
+await page.locator('.dash-notification-trigger').click();
+await page.locator('.dash-notification-popover').waitFor({ state: 'visible' });
+const mobileNotificationFitsViewport = await page.locator('.dash-notification-popover').evaluate((element) => {
+  const rect = element.getBoundingClientRect();
+  return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+});
+await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications-mobile.png'), fullPage: false });
+await page.locator('.dash-notification-popover').getByRole('button', { name: '关闭', exact: true }).click();
 await page.getByRole('button', { name: 'Agent Nexus', exact: true }).click();
 await page.locator('.dash-workflow-studio').waitFor({ state: 'visible', timeout: 8_000 });
 const mobileWorkflowLayout = await layout(page);
@@ -900,6 +933,11 @@ const assertions = {
   workflowConversationRunnerVisible: workflowRunnerVisible,
   leftNavToolsRemoved,
   headerReadinessStillAvailable,
+  notificationTriggerVisible,
+  notificationUsesDashboardGlass,
+  notificationHasRealActions,
+  notificationHasUnreadCount,
+  mobileNotificationFitsViewport,
   readinessUsesChinesePresentation,
   readinessUsesDashboardGlass,
   readinessTimeRemoved,
