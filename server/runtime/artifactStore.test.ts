@@ -48,6 +48,24 @@ test('FileArtifactStore supports cross-worker reads and deletes on a shared dire
   }
 });
 
+test('FileArtifactStore preserves binary bytes separately from legacy text Artifacts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'axiom-artifact-binary-'));
+  try {
+    const workerA = new FileArtifactStore(root);
+    const workerB = new FileArtifactStore(root);
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10]);
+    const written = await workerA.putBinary('nexus:image', bytes, 'tenant-a', 'image/png');
+    assert.match(written.key, /\.bin$/);
+    assert.equal(written.bytes, bytes.byteLength);
+    assert.equal(Buffer.from((await workerB.getBinary('nexus:image', 'tenant-a'))!).equals(Buffer.from(bytes)), true);
+    assert.equal(await workerB.get('nexus:image', 'tenant-a'), null);
+    await workerB.delete('nexus:image', 'tenant-a');
+    assert.equal(await workerA.getBinary('nexus:image', 'tenant-a'), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('tenant-scoped filesystem deletion preserves an unscoped migration artifact', async () => {
   const root = await mkdtemp(join(tmpdir(), 'axiom-artifact-legacy-delete-'));
   try {
@@ -77,18 +95,41 @@ test('S3ArtifactStore uses a tenant-safe encoded key and S3-compatible commands'
   const put = await store.put('result:task/with spaces', 'remote artifact', 'tenant-a');
   assert.equal(put.key, 's3://axiom-test/axiom-artifacts/tenant-a/result%3Atask%2Fwith%20spaces.md');
   assert.equal(await store.get('result:task/with spaces', 'tenant-a'), stored);
+  const binary = Uint8Array.from([0, 1, 2, 255]);
+  const binaryPut = await store.putBinary('nexus:image', binary, 'tenant-a', 'image/png');
+  assert.equal(binaryPut.key, 's3://axiom-test/axiom-artifacts/tenant-a/nexus%3Aimage.bin');
   await store.delete('result:task/with spaces', 'tenant-a');
   const health = await store.health();
   assert.equal(health.reachable, true);
   assert.match(health.detail, /S3 兼容 Artifact/);
-  assert.equal(commands.filter((command) => command instanceof PutObjectCommand).length, 1);
+  assert.equal(commands.filter((command) => command instanceof PutObjectCommand).length, 2);
   assert.equal(commands.filter((command) => command instanceof GetObjectCommand).length, 1);
-  assert.equal(commands.filter((command) => command instanceof DeleteObjectCommand).length, 1);
+  assert.equal(commands.filter((command) => command instanceof DeleteObjectCommand).length, 2);
   assert.equal(commands.filter((command) => command instanceof HeadBucketCommand).length, 1);
   const putCommand = commands.find((command): command is PutObjectCommand => command instanceof PutObjectCommand);
   assert.equal(putCommand?.input.Bucket, 'axiom-test');
   assert.equal(putCommand?.input.ContentType, 'text/markdown; charset=utf-8');
   assert.equal(putCommand?.input.ServerSideEncryption, 'AES256');
+  const binaryCommand = commands.filter((command): command is PutObjectCommand => command instanceof PutObjectCommand)[1];
+  assert.equal(binaryCommand?.input.ContentType, 'image/png');
+  assert.deepEqual(binaryCommand?.input.Body, Buffer.from(binary));
+});
+
+test('S3ArtifactStore reads binary bytes across workers without UTF-8 coercion', async () => {
+  const requestedKeys: string[] = [];
+  const bytes = Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x00, 0xff]);
+  const client = {
+    send: async (command: unknown) => {
+      if (command instanceof GetObjectCommand) {
+        requestedKeys.push(String(command.input.Key));
+        return { Body: { transformToByteArray: async () => bytes } };
+      }
+      return {};
+    },
+  };
+  const store = new S3ArtifactStore({ bucket: 'axiom-test', prefix: 'axiom-artifacts' }, client);
+  assert.deepEqual(await store.getBinary('nexus:pdf', 'tenant-a'), bytes);
+  assert.deepEqual(requestedKeys, ['axiom-artifacts/tenant-a/nexus%3Apdf.bin']);
 });
 
 test('tenant-scoped deletion does not remove an unscoped migration artifact', async () => {
@@ -101,7 +142,10 @@ test('tenant-scoped deletion does not remove an unscoped migration artifact', as
   };
   const store = new S3ArtifactStore({ bucket: 'axiom-test', prefix: 'axiom-artifacts' }, client);
   await store.delete('result:legacy', 'tenant-a');
-  assert.deepEqual(deletedKeys, ['axiom-artifacts/tenant-a/result%3Alegacy.md']);
+  assert.deepEqual(deletedKeys, [
+    'axiom-artifacts/tenant-a/result%3Alegacy.md',
+    'axiom-artifacts/tenant-a/result%3Alegacy.bin',
+  ]);
 });
 
 test('S3 Artifact reads legacy unscoped objects during tenant-key migration', async () => {

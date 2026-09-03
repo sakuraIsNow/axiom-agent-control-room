@@ -26,11 +26,13 @@ Agent 失败、关键证据缺失或用户在执行中改变要求时，系统�
 
 ### 3. Nexus 附件与 Artifact 传递
 
-Agent Nexus 可以上传附件，也可以链接当前租户已有的 Artifact。连线支持四种传递方式：摘要、全文、指定字段和只传引用。发布及恢复时固定工作流版本和附件引用；服务端检查租户归属、MIME、大小和内容是否仍然可用。
+Agent Nexus 可以上传附件，也可以链接当前租户已有的 Artifact。新上传内容使用原始二进制存储；测试与发布固定附件 ID、MIME、字节数、SHA-256 和集合摘要。连线支持四种传递方式：摘要、全文、指定字段和只传引用。运行时检查租户、流程、MIME、单文件和任务总预算以及内容摘要；图片交给视觉 Agent，PDF/Word/文本等交给文档 Agent，其他 Agent 不接收 Base64。附件改变后旧测试失效，必须重测才能发布。
 
 ### 4. 动态 MCP/OpenAPI 工具目录
 
-项目空间可以导入 OpenAPI 3.x 或 HTTP MCP 服务。平台会发现或固定工具目录、校验参数 schema、限制允许使用的 Agent，并把启用的操作注册到主 Tool Registry。模型发起的原生工具调用仍经过 SSRF 防护、风险审批、调用配额、超时、审计事件和 Artifact lineage，不会从业务能力 API 绕过原有安全边界。
+项目空间可以导入 OpenAPI 3.x 或 HTTP MCP 服务。平台会发现或固定工具目录，推导能力分类和关键词，执行轻量健康探测，限制允许使用的 Agent，并记录成功率、延迟和使用次数。Router 不会把全部外部 schema 发给每个 Agent，而是结合任务语义、Agent 权限、健康、认证、风险和历史质量，每个步骤只注入 Top-K 相关工具；默认 6 个，硬上限 12 个。模型发起的原生工具调用仍经过参数校验、SSRF 防护、风险审批、调用配额、超时、审计事件和 Artifact lineage。
+
+当前版本不保存 MCP API Key、OAuth Token 或服务账号 Secret。需要认证的工具源可以先进入目录，但会保持“待授权”和禁用状态，直到下一批加密认证代理完成；这避免把凭据写进 specification 或模型上下文。
 
 ### 5. 证据图和引用质量门禁
 
@@ -46,7 +48,7 @@ Agent Nexus 可以上传附件，也可以链接当前租户已有的 Artifact�
 
 ### 8. Nexus 测试、版本与发布
 
-Nexus 草稿可以保存测试用例并真实运行到任务终态。发布会固定当时的定义、版本和摘要签名；两个发布版本可以比较 Agent、步骤和连线变化，也能恢复为新的草稿。生产运行读取指定发布版本，不会跟随之后的草稿修改。已发布 Nexus 可以生成固定版本的 Workflow Plugin。
+Nexus 草稿可以保存测试用例并真实运行到任务终态。发布会固定当时的定义、版本、二进制附件快照和摘要签名；两个发布版本可以比较 Agent、步骤、连线和附件变化，也能恢复为新的草稿。生产运行读取指定发布版本，不会跟随之后的草稿或附件修改。已发布 Nexus 可以生成固定版本的 Workflow Plugin。
 
 ### 9. 交付后的下一步
 
@@ -80,7 +82,7 @@ Nexus 草稿可以保存测试用例并真实运行到任务终态。发布会�
 
 业务记录在 SQLite 和 PostgreSQL 使用同一份契约。SQLite 适合本地单人使用；PostgreSQL 支持多 Worker 共享状态、revision 并发冲突和跨进程资源解绑。PostgreSQL 首次初始化使用 advisory lock，避免多个 Worker 同时建表时触发系统目录唯一键竞态。
 
-动态外部工具在服务启动时从持久记录恢复，并注册到与 Orchestrator、Task API 共用的 Tool Registry。项目、记忆、Nexus 发布、反馈和后续动作均按租户保存；归档、删除与 Artifact 清理会同步解除关联。
+动态外部工具在服务启动时从持久记录恢复；只有健康、已授权、启用且当前 Agent 有权使用的相关工具，才会按任务 Top-K 注册到模型目录。项目、记忆、Nexus 发布、附件快照、反馈和后续动作均按租户保存；归档、删除与 Artifact 清理会同步解除关联。
 
 ## 验收命令
 
@@ -95,8 +97,12 @@ npm run qa:all
 
 `qa:business-postgres` 只在设置 `AXIOM_TEST_DATABASE_URL` 时执行真实 PostgreSQL 验收。该地址必须指向允许测试清理的独立数据库，不能使用生产库。未配置时测试和生产门禁会明确显示 `skipped`，这不代表 PostgreSQL 已验收。
 
-2026-09-03 最终验收使用本地 Docker PostgreSQL 15 的独立测试库完成：`npm test` 为 `373 passed / 0 failed / 0 skipped`，`npm run qa:all` 为 `25 passed / 0 failed / 4 skipped`。Nexus 回归会先真实运行测试、发布固定版本，再验证 Loop、历史恢复和会话隔离；发布测试任务不会进入用户的 Nexus 对话历史。4 个跳过项仍是未配置的 MemoryCore、外部对象存储与 Harness/Codex sidecar，不计作外部生产通过。
+2026-09-03 v2.1.0 最终验收：`npm test` 为 `379 passed / 0 failed / 1 skipped`，唯一跳过的 PostgreSQL 业务契约随后在独立临时数据库中补跑为 `1 passed / 0 failed / 0 skipped`；`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped`，所有可运行项目均在第一次尝试通过。Nexus 回归真实运行测试、发布固定版本，再验证二进制附件、Loop、历史恢复和会话隔离；发布测试任务不会进入用户的 Nexus 对话历史。扣除已补跑的 PostgreSQL，4 个未现场验收项仍是 MemoryCore、外部对象存储与 Harness/Codex sidecar，不计作外部生产通过。
 
 ## 当前边界
+
+- 单节点可以使用本地文件 Artifact；多 Worker 必须配置 MinIO/S3/COS，并在目标环境验证二进制跨进程读取、租户隔离、超时、删除和失败恢复。
+- MCP/OpenAPI 目录已支持无认证服务。API Key、OAuth 2 和服务账号目前只会标记为“待授权”，加密 Secret 代理与 Token 刷新尚未交付。
+- Top-K 路由控制每轮上下文中的外部工具数量，但不替代租户配额、能力包审核、定时健康巡检和真实业务准确率评测。
 
 完成这 15 项后，项目仍定位为本地或受控环境的生产候选，而不是可直接暴露到公网的完整企业 SaaS。MemoryCore、MinIO/S3/COS 和 Harness/Codex sidecar 没有配置时会使用本地能力或明确降级；真实多 Worker 容量、外部身份系统、Secret Manager、外部可观测平台、备份恢复和灾难演练仍需要在目标部署环境完成。

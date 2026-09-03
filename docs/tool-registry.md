@@ -23,13 +23,25 @@ P1.2 adds a bounded Tool Registry to the runtime. Builder agents can request onl
 
 Workspace paths are relative to `AXIOM_AGENT_WORKSPACE_ROOT`. Absolute paths, `..` traversal, and paths outside the root are rejected. Write operations use a temporary file and rename, so a partial file is not exposed.
 
-## Dynamic MCP and OpenAPI sources
+## MCP 与 OpenAPI 能力目录
 
-The project workspace can persist OpenAPI 3.x documents and HTTP MCP endpoints as tenant-scoped tool sources. MCP sources either import a pinned `tools` catalog or perform `initialize` and `tools/list` discovery before saving. Executable shell-based MCP configuration is intentionally rejected.
+项目空间可以按租户保存 OpenAPI 3.x 文档和 HTTP MCP endpoint。MCP 可以导入固定 `tools` 目录，也可以在保存前执行 `initialize` 与 `tools/list` 发现；可执行 shell 配置会被拒绝。每份 specification 都保存 SHA-256 和固定版本，服务重启会在任务接收前恢复仍然可用的工具源。
 
-Every saved specification is hashed and version-pinned. Enabling a source registers its operations in the same `ToolRegistry` instance used by the Orchestrator and Task API; disabling or updating it removes the old registration. A service restart restores enabled sources before tasks are accepted.
+导入时会根据名称、说明和 operation 推导办公、研究、开发、业务、内容、运维、数据或自定义分类与能力关键词，并执行轻量健康探测。OpenAPI 使用 HEAD 连通性检查，MCP 使用真实 `initialize` 和 `tools/list`。页面可以手动重新检查；异常状态会保存在工具源记录中并阻止注册。为兼容 v2.0.0，旧记录在首次手动探测前按可用处理。
 
-Dynamic operations do not call external endpoints directly from the UI. Native model tool calls still enter `ToolRegistry.execute()`, so Agent allowlists, JSON schema validation, SSRF controls, quotas, timeouts, task-bound approval, durable audit events and Artifact lineage remain in force. Local endpoints require an explicit `location=local` source and are still constrained by endpoint validation.
+外部工具不会全量注入每个模型请求。Orchestrator 调用 `catalogForTask()`，按下面顺序筛选：
+
+1. 当前租户中的工具必须启用、健康且不处于待授权状态。
+2. 当前 Agent 必须在工具源 allowlist 中；显式指定也不能绕过权限。
+3. 工具名、说明、分类和关键词必须与本轮输入及 Agent 目标相关。
+4. 候选按相关度、历史成功率、探测延迟和来源风险排序。
+5. 每个步骤只注入 Top-K 外部工具，默认 `AXIOM_EXTERNAL_TOOL_TOP_K=6`，运行时硬上限为 12。
+
+因此平台适合接入多元 MCP，但不应给所有用户“一键全开大量 MCP”。正确产品形态是审核后的办公、研究、开发、业务、内容、运维和数据能力包，运行时再按任务挑选少量操作。这可以控制工具 schema Token、路由误选、第三方故障和权限风险。
+
+动态操作不会由 UI 直接调用外部地址。模型原生工具调用仍进入 `ToolRegistry.execute()`，继续经过 Agent allowlist、JSON schema、SSRF、配额、超时、任务审批、持久审计和 Artifact lineage。本地 endpoint 必须显式使用 `location=local`，仍受地址校验约束。
+
+当前版本不会把 API Key、OAuth Token 或服务账号 Secret 写入 specification。认证类型不是 `none` 的来源会保存为“待授权”和禁用；下一批需要通过加密 Secret 引用、OAuth 回调与 Token 刷新代理完成正式调用。当前状态不能描述为已经支持认证型 MCP。
 
 `workspace.patch` deliberately uses exact text replacement rather than a shell patch command. The caller must provide `expectedMatches` (default `1`); a mismatch fails the tool without changing the file.
 
@@ -51,6 +63,7 @@ Approved writes resume from the persisted checkpoint. A rejected write leaves th
 ## Limits and audit
 
 - `AXIOM_TOOL_MAX_CALLS_PER_TASK` limits calls per task in a rolling one-hour window; the default is `8`.
+- `AXIOM_EXTERNAL_TOOL_TOP_K` limits task-relevant external MCP/OpenAPI operations exposed to one Agent step; the default is `6` and the hard maximum is `12`.
 - `AXIOM_TOOL_TIMEOUT_MS` can lower the per-tool timeout; each tool also has a local upper bound.
 - `AXIOM_TOOL_ALLOWED_NPM_SCRIPTS` controls `workspace.test`; the default allowlist is `test,check,build,qa:routing,qa:business,qa:runtime`.
 - Tool output is capped before it is included in model context.

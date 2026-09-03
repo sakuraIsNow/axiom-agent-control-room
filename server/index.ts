@@ -2,9 +2,6 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import dotenv from 'dotenv';
 import { Hono } from 'hono';
-import mammoth from 'mammoth';
-import { PDFParse } from 'pdf-parse';
-import WordExtractor from 'word-extractor';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -20,6 +17,7 @@ import { RuntimeMetrics } from './runtime/metrics.js';
 import { verifyPrincipal } from './runtime/principal.js';
 import { createArtifactStore } from './runtime/artifactStore.js';
 import { createArtifactCatalog } from './runtime/artifactCatalog.js';
+import { attachmentPdfVisualPages, extractAttachmentText } from './runtime/attachmentContent.js';
 import { ToolRegistry } from './runtime/toolRegistry.js';
 import { createTemplateStore } from './runtime/templateStore.js';
 import { createPluginStore } from './runtime/pluginStore.js';
@@ -326,76 +324,6 @@ Use the same language as the user. Be direct and technically rigorous. Do not cl
 const encodeEvent = (event: string, data: unknown) =>
   new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-const attachmentText = async (attachment: ClientAttachment) => {
-  if (typeof attachment.text === 'string' && attachment.text.trim()) return attachment.text.trim().slice(0, 120_000);
-  if (!attachment.dataUrl || !attachment.name) return '';
-  const encoded = attachment.dataUrl.match(/^data:[^;]+;base64,(.+)$/s)?.[1];
-  if (!encoded) return '';
-  const bytes = Buffer.from(encoded, 'base64');
-  if (/\.pdf$/i.test(attachment.name) || attachment.mimeType === 'application/pdf') {
-    let parser: PDFParse | undefined;
-    try {
-      parser = new PDFParse({ data: bytes });
-      const result = await parser.getText({
-        parseHyperlinks: true,
-        cellSeparator: ' | ',
-        pageJoiner: '\n\n--- 第 page_number 页 / total_number 页 ---\n\n',
-      });
-      let text = result.text.trim();
-      try {
-        const tables = await parser.getTable({ first: Math.min(result.total, 12) });
-        const tableContext = tables.pages.flatMap((page) => page.tables.map((table, index) => [
-          `\n[第 ${page.num} 页表格 ${index + 1}]`,
-          table.map((row) => `| ${row.map((cell) => cell.replaceAll('|', '\\|').replace(/\s+/g, ' ').trim()).join(' | ')} |`).join('\n'),
-        ].join('\n'))).join('\n');
-        if (tableContext) text = `${text}\n\n${tableContext}`;
-      } catch {
-        // Some PDFs do not contain vector table lines; text extraction remains valid.
-      }
-      return text.slice(0, 120_000);
-    } catch {
-      const source = bytes.toString('latin1');
-      const literals = [...source.matchAll(/\(([^()]{2,240})\)/g)].map((match) => match[1]);
-      return literals.join(' ').replace(/\\[nrt]/g, ' ').replace(/\s+/g, ' ').slice(0, 120_000);
-    } finally {
-      await parser?.destroy().catch(() => undefined);
-    }
-  }
-  if (/\.(txt|md|markdown|csv|json|log)$/i.test(attachment.name)) return bytes.toString('utf8').slice(0, 120_000);
-  if (/\.(doc|docx)$/i.test(attachment.name)) {
-    try {
-      if (/\.doc$/i.test(attachment.name)) {
-        const document = await new WordExtractor().extract(bytes);
-        return document.getBody().trim().slice(0, 120_000);
-      }
-      const result = await mammoth.extractRawText({ buffer: bytes });
-      return result.value.trim().slice(0, 120_000);
-    } catch {
-      return '';
-    }
-  }
-  return '';
-};
-
-const attachmentPdfVisualPages = async (attachment: ClientAttachment, extractedText: string) => {
-  if (!attachment.dataUrl || !attachment.name || !/\.pdf$/i.test(attachment.name) || extractedText.replace(/--- 第 .*?页 \/ .*?页 ---/g, '').trim().length >= 120) return [];
-  const encoded = attachment.dataUrl.match(/^data:[^;]+;base64,(.+)$/s)?.[1];
-  if (!encoded) return [];
-  const bytes = Buffer.from(encoded, 'base64');
-  let parser: PDFParse | undefined;
-  try {
-    parser = new PDFParse({ data: bytes });
-    const screenshots = await parser.getScreenshot({ first: 2, desiredWidth: 1200, imageDataUrl: true, imageBuffer: false });
-    return screenshots.pages.flatMap((page) => page.dataUrl
-      ? [{ type: 'text' as const, text: `[附件第 ${page.pageNumber} 页已转为图片，交给视觉模型分析]` }, { type: 'image_url' as const, image_url: { url: page.dataUrl } }]
-      : []);
-  } catch {
-    return [];
-  } finally {
-    await parser?.destroy().catch(() => undefined);
-  }
-};
-
 type CleanMessagesResult = {
   messages: ClientMessage[];
   summaryApplied: boolean;
@@ -435,7 +363,7 @@ const cleanMessages = async (messages: unknown, persistedSummary?: PersistedCont
       if (rawContent) parts.push({ type: 'text', text: rawContent });
       for (const attachment of attachments) {
         if (attachment.url?.startsWith('data:image/')) parts.push({ type: 'image_url', image_url: { url: attachment.url.slice(0, 12 * 1024 * 1024) } });
-        const extracted = await attachmentText(attachment);
+        const extracted = await extractAttachmentText(attachment);
         if (extracted) parts.push({ type: 'text', text: `[附件：${attachment.name ?? '未命名文件'}]\n${extracted}` });
         if (/\.pdf$/i.test(attachment.name ?? '')) parts.push(...await attachmentPdfVisualPages(attachment, extracted));
       }

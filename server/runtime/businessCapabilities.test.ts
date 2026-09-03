@@ -349,9 +349,13 @@ test('OpenAPI and MCP tools validate, pin, authorize, approve, audit, and preser
       }),
     });
     assert.equal(openApiResponse.status, 201);
-    const source = (await json<{ source: { id: string; data: { registeredToolNames: string[]; operationRisks: Record<string, string> } } }>(openApiResponse)).source;
+    const source = (await json<{ source: { id: string; data: { registeredToolNames: string[]; operationRisks: Record<string, string>; healthStatus: string; categories: string[]; capabilityTags: string[]; riskLevel: string; authorizationStatus: string } } }>(openApiResponse)).source;
     assert.equal(source.data.registeredToolNames.length, 2);
     assert.equal(source.data.operationRisks['create.item'], 'high');
+    assert.equal(source.data.healthStatus, 'healthy');
+    assert.equal(source.data.authorizationStatus, 'not-required');
+    assert.equal(source.data.riskLevel, 'high');
+    assert.ok(source.data.categories.includes('custom'));
     assert.ok(source.data.registeredToolNames.every((name) => tools.catalog().some((tool) => tool.name === name)));
 
     const badArgs = await harness.request(`/tool-sources/${source.id}/call`, {
@@ -455,6 +459,25 @@ test('OpenAPI and MCP tools validate, pin, authorize, approve, audit, and preser
     });
     assert.equal(mcpCall.status, 200);
     assert.ok(calls.filter((call) => call.url === '/mcp').length >= 4);
+    const sourceList = await harness.request('/tool-sources', { headers: ownerHeaders });
+    const listedSources = (await json<{ sources: Array<{ id: string; data: { usageCount: number; successRate: number } }> }>(sourceList)).sources;
+    const usedSource = listedSources.find((item) => item.id === source.id);
+    assert.ok((usedSource?.data.usageCount ?? 0) >= 2);
+    assert.ok((usedSource?.data.successRate ?? 0) > 0.5 && (usedSource?.data.successRate ?? 1) < 1);
+
+    const pendingAuthResponse = await harness.request('/tool-sources', {
+      method: 'POST', headers: ownerHeaders,
+      body: JSON.stringify({
+        name: '待授权天气 MCP', protocol: 'mcp', location: 'local', version: '2025-03-26', enabled: true,
+        authType: 'api-key', description: '查询天气', categories: ['research'], capabilityTags: ['天气'], visibility: 'private', riskLevel: 'low', allowedAgentIds: [],
+        specification: { endpoint: `${endpoint}/mcp`, tools: [{ name: 'lookup.weather', description: '查询天气', inputSchema: { type: 'object' } }] },
+      }),
+    });
+    assert.equal(pendingAuthResponse.status, 201);
+    const pendingAuth = await json<{ source: { status: string; data: { authorizationStatus: string; registeredToolNames: string[] } } }>(pendingAuthResponse);
+    assert.equal(pendingAuth.source.status, 'disabled');
+    assert.equal(pendingAuth.source.data.authorizationStatus, 'pending');
+    assert.equal(pendingAuth.source.data.registeredToolNames.length, 1);
   } finally {
     if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR;
     else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor;

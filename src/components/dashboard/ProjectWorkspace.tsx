@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import type { AgentMode } from '../../types';
 import {
-  archiveProject, assignProjectReviewer, createMemory, createProject, createProjectComment, createProjectDecision,
+  archiveProject, assignProjectReviewer, checkToolSourceHealth, createMemory, createProject, createProjectComment, createProjectDecision,
   createProjectTask, createToolSource, decideProjectReview, decideToolApproval, deleteMemory, estimateTask,
   getModelSelection, linkProjectResource, listMemories, listProjectComments, listProjectDecisions,
   listProjectNotifications, listProjectReviews, listProjects, listSolutions, listToolApprovals, listToolSources,
@@ -37,6 +37,8 @@ const memoryScopeLabel = { user: '当前用户', project: '项目', session: '�
 const memorySyncLabel = { syncing: '正在同步', synced: '已同步', 'pending-extraction': '等待提取', 'local-policy': '本地策略', failed: '同步失败' } as const;
 const projectRoleLabel = { editor: '可编辑', reviewer: '审核人', viewer: '只读' } as const;
 const projectDecisionLabel = { proposed: '待确认', accepted: '已采纳', rejected: '已驳回', superseded: '已替代' } as const;
+const toolHealthLabel = { healthy: '可用', unhealthy: '异常', pending: '检查中', unknown: '待检查' } as const;
+const toolCategoryLabel: Record<string, string> = { office: '办公', research: '研究', development: '开发', business: '业务', content: '内容', operations: '运维', data: '数据', custom: '自定义' };
 
 export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: string, mode: AgentMode) => void }) {
   const [tab, setTab] = useState<WorkspaceTab>('projects');
@@ -58,7 +60,7 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
   const [projectDraft, setProjectDraft] = useState({ name: '', goal: '', acceptance: '', strategy: '' });
   const [memoryDraft, setMemoryDraft] = useState({ content: '', source: '用户创建', layer: 'L1' as MemoryRecord['data']['layer'], confidence: .9, scope: 'user' as MemoryRecord['data']['scope'], scopeId: '', expiresAt: '' });
   const [editingMemory, setEditingMemory] = useState<MemoryRecord | null>(null);
-  const [toolDraft, setToolDraft] = useState({ name: '', protocol: 'openapi' as 'openapi' | 'mcp', location: 'internet' as 'internet' | 'local', version: '1.0.0', allowedAgents: '', specification: '' });
+  const [toolDraft, setToolDraft] = useState({ name: '', description: '', protocol: 'openapi' as 'openapi' | 'mcp', location: 'internet' as 'internet' | 'local', version: '1.0.0', categories: '', capabilityTags: '', riskLevel: 'low' as 'low' | 'medium' | 'high', authType: 'none' as 'none' | 'api-key' | 'oauth2' | 'service-account', visibility: 'private' as 'private' | 'tenant', allowedAgents: '', specification: '' });
   const [commentDraft, setCommentDraft] = useState('');
   const [memberDraft, setMemberDraft] = useState({ userId: '', role: 'viewer' as 'editor' | 'reviewer' | 'viewer' });
   const [resourceDraft, setResourceDraft] = useState({ type: 'task' as 'task' | 'session' | 'nexus' | 'schedule' | 'artifact' | 'decision', id: '' });
@@ -273,15 +275,24 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
     catch { throw new Error('工具定义必须是有效 JSON。'); }
     const source = await createToolSource({
       name: toolDraft.name.trim(), protocol: toolDraft.protocol, location: toolDraft.location, version: toolDraft.version.trim(), enabled: false,
+      description: toolDraft.description.trim(),
+      categories: toolDraft.categories.split(',').map((item) => item.trim()).filter(Boolean),
+      capabilityTags: toolDraft.capabilityTags.split(',').map((item) => item.trim()).filter(Boolean),
+      riskLevel: toolDraft.riskLevel, authType: toolDraft.authType, visibility: toolDraft.visibility,
       allowedAgentIds: toolDraft.allowedAgents.split(',').map((item) => item.trim()).filter(Boolean), specification,
     });
     setToolSources((current) => [source, ...current]);
-    setToolDraft({ name: '', protocol: 'openapi', location: 'internet', version: '1.0.0', allowedAgents: '', specification: '' });
+    setToolDraft({ name: '', description: '', protocol: 'openapi', location: 'internet', version: '1.0.0', categories: '', capabilityTags: '', riskLevel: 'low', authType: 'none', visibility: 'private', allowedAgents: '', specification: '' });
     setOpenComposer(null);
   });
 
   const toggleTool = (source: ToolSourceRecord) => void run(async () => {
     const updated = await updateToolSource(source.id, { revision: source.revision, enabled: source.status !== 'enabled' });
+    setToolSources((current) => current.map((item) => item.id === updated.id ? updated : item));
+  });
+
+  const checkTool = (source: ToolSourceRecord) => void run(async () => {
+    const updated = await checkToolSourceHealth(source.id);
     setToolSources((current) => current.map((item) => item.id === updated.id ? updated : item));
   });
 
@@ -334,8 +345,23 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
     </section>}
 
     {tab === 'tools' && <section className="business-section glass-panel">
-      <div className="business-section-head"><div><span>MCP / OpenAPI 工具目录</span><p>版本固定、Agent 授权、调用留痕。</p></div><em>{toolSources.filter((item) => item.status === 'enabled').length} 个已启用</em></div>
-      <div className="business-tool-list">{toolSources.map((source) => { const approvals = (toolApprovals[source.id] ?? []).filter((approval) => approval.status === 'awaiting_approval'); return <article key={source.id}><header><div><strong>{source.data.name}</strong><small>{source.data.protocol.toUpperCase()} · v{source.data.version} · {source.data.location === 'local' ? '本地' : '互联网'}</small></div><button type="button" className={source.status === 'enabled' ? 'toggle active' : 'toggle'} onClick={() => toggleTool(source)} aria-label={source.status === 'enabled' ? '停用工具' : '启用工具'}><i /></button></header><p>{source.data.endpoint}</p><div className="business-tool-capabilities">{(source.data.registeredToolNames ?? []).map((name) => <span key={name}>{name}</span>)}{(source.data.registeredToolNames ?? []).length === 0 && <span>启用后注册到 Agent 工具目录</span>}</div><footer><span>授权：{source.data.allowedAgentIds.length ? source.data.allowedAgentIds.join('、') : '全部 Agent'}</span><em>{source.data.pinnedDigest?.slice(0, 12)}</em></footer>{approvals.map((approval) => <div className="business-tool-approval" key={approval.id}><span><strong>高风险调用待确认</strong><small>{approval.data.operationId} · {approval.data.agentId}</small></span><button type="button" onClick={() => decideApproval(source.id, approval, false)}>拒绝</button><button type="button" className="approve" onClick={() => decideApproval(source.id, approval, true)}>允许本次</button></div>)}</article>; })}{!loading && toolSources.length === 0 && <div className="business-empty"><Wrench size={24} /><span>尚未导入外部工具</span></div>}</div>
+      <div className="business-section-head"><div><span>MCP / OpenAPI 能力目录</span><p>Agent 会按任务自动选择少量可用工具。</p></div><em>{toolSources.filter((item) => item.status === 'enabled' && item.data.healthStatus === 'healthy' && item.data.authorizationStatus !== 'pending').length} 个可用</em></div>
+      <div className="business-tool-list">{toolSources.map((source) => {
+        const approvals = (toolApprovals[source.id] ?? []).filter((approval) => approval.status === 'awaiting_approval');
+        const health = source.data.healthStatus ?? 'unknown';
+        const pendingAuthorization = source.data.authorizationStatus === 'pending';
+        const available = source.status === 'enabled' && health === 'healthy' && !pendingAuthorization;
+        return <article key={source.id} className={`tool-health-${health}${pendingAuthorization ? ' tool-auth-pending' : ''}`}>
+          <header><div><strong>{source.data.name}</strong><small>{source.data.protocol.toUpperCase()} · v{source.data.version} · {source.data.location === 'local' ? '本地' : '互联网'}</small></div><div className="business-tool-actions"><button type="button" className="icon-action" onClick={() => checkTool(source)} title="重新检查"><RefreshCw size={13} /></button><button type="button" className={available ? 'toggle active' : 'toggle'} onClick={() => toggleTool(source)} aria-label={source.status === 'enabled' ? '停用工具' : '启用工具'}><i /></button></div></header>
+          <div className="business-tool-state"><span className={pendingAuthorization ? 'pending' : health}>{pendingAuthorization ? '待授权' : toolHealthLabel[health]}</span>{(source.data.categories ?? []).slice(0, 3).map((category) => <em key={category}>{toolCategoryLabel[category] ?? category}</em>)}</div>
+          <p>{source.data.description || source.data.endpoint}</p>
+          <div className="business-tool-capabilities">{(source.data.capabilityTags ?? []).slice(0, 6).map((name) => <span key={name}>{name}</span>)}{(source.data.capabilityTags ?? []).length === 0 && <span>系统会根据工具说明自动识别能力</span>}</div>
+          <div className="business-tool-metrics"><span><small>成功率</small><strong>{source.data.successRate == null ? '等待调用' : `${Math.round(source.data.successRate * 100)}%`}</strong></span><span><small>探测延迟</small><strong>{source.data.latencyMs == null ? '-' : `${source.data.latencyMs} ms`}</strong></span><span><small>使用次数</small><strong>{source.data.usageCount ?? 0}</strong></span></div>
+          <footer><span>可使用：{source.data.allowedAgentIds.length ? source.data.allowedAgentIds.join('、') : '全部 Agent'}</span><em>{source.data.riskLevel === 'high' ? '高风险需确认' : source.data.riskLevel === 'low' ? '低风险' : '中风险'}</em></footer>
+          {source.data.healthMessage && health === 'unhealthy' && <small className="business-tool-warning">{source.data.healthMessage}</small>}
+          {approvals.map((approval) => <div className="business-tool-approval" key={approval.id}><span><strong>高风险调用待确认</strong><small>{approval.data.operationId} · {approval.data.agentId}</small></span><button type="button" onClick={() => decideApproval(source.id, approval, false)}>拒绝</button><button type="button" className="approve" onClick={() => decideApproval(source.id, approval, true)}>允许本次</button></div>)}
+        </article>;
+      })}{!loading && toolSources.length === 0 && <div className="business-empty"><Wrench size={24} /><span>尚未导入外部工具</span></div>}</div>
     </section>}
 
     {tab === 'solutions' && <section className="business-section glass-panel solutions">
@@ -351,7 +377,15 @@ export function ProjectWorkspace({ onUseSolution }: { onUseSolution: (input: str
     {openComposer && <div className="business-modal" role="dialog" aria-modal="true" onPointerDown={(event) => { if (event.target === event.currentTarget) setOpenComposer(null); }}><form className="business-modal-panel glass-panel" onSubmit={(event) => { event.preventDefault(); if (openComposer === 'project') submitProject(); else if (openComposer === 'memory') submitMemory(); else submitTool(); }}><header><div><small>{openComposer === 'project' ? '新的协作空间' : openComposer === 'memory' ? '可控长期记忆' : '外部能力目录'}</small><h2>{openComposer === 'project' ? '创建项目' : openComposer === 'memory' ? editingMemory ? '编辑记忆' : '添加记忆' : '导入工具'}</h2></div><button type="button" aria-label="关闭" onClick={() => setOpenComposer(null)}><X size={16} /></button></header>
       {openComposer === 'project' && <div className="business-form"><label><span>项目名称</span><input required maxLength={120} value={projectDraft.name} onChange={(event) => setProjectDraft((current) => ({ ...current, name: event.target.value }))} /></label><label><span>目标</span><textarea required rows={4} value={projectDraft.goal} onChange={(event) => setProjectDraft((current) => ({ ...current, goal: event.target.value }))} /></label><label><span>验收标准</span><textarea rows={4} placeholder="每行一条" value={projectDraft.acceptance} onChange={(event) => setProjectDraft((current) => ({ ...current, acceptance: event.target.value }))} /></label><label><span>项目策略</span><textarea rows={3} value={projectDraft.strategy} onChange={(event) => setProjectDraft((current) => ({ ...current, strategy: event.target.value }))} /></label></div>}
       {openComposer === 'memory' && <div className="business-form"><label><span>记忆内容</span><textarea required rows={6} value={memoryDraft.content} onChange={(event) => setMemoryDraft((current) => ({ ...current, content: event.target.value }))} /></label><div className="business-form-row"><label><span>层级</span><select value={memoryDraft.layer} onChange={(event) => setMemoryDraft((current) => ({ ...current, layer: event.target.value as typeof current.layer }))}>{Object.entries(memoryLayerLabel).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label><span>作用域</span><select value={memoryDraft.scope} onChange={(event) => setMemoryDraft((current) => ({ ...current, scope: event.target.value as typeof current.scope }))}><option value="user">用户</option><option value="project">项目</option><option value="session">会话</option><option value="agent">Agent</option></select></label></div>{memoryDraft.scope !== 'user' && <label><span>{memoryDraft.scope === 'project' ? '项目 ID' : memoryDraft.scope === 'session' ? '会话 ID' : 'Agent ID'}</span><input required value={memoryDraft.scopeId} onChange={(event) => setMemoryDraft((current) => ({ ...current, scopeId: event.target.value }))} /></label>}<div className="business-form-row"><label><span>置信度</span><input type="number" min="0" max="1" step="0.05" value={memoryDraft.confidence} onChange={(event) => setMemoryDraft((current) => ({ ...current, confidence: Number(event.target.value) }))} /></label><label><span>过期时间（可选）</span><input type="datetime-local" value={memoryDraft.expiresAt} onChange={(event) => setMemoryDraft((current) => ({ ...current, expiresAt: event.target.value }))} /></label></div><label><span>来源</span><input required value={memoryDraft.source} onChange={(event) => setMemoryDraft((current) => ({ ...current, source: event.target.value }))} /></label></div>}
-      {openComposer === 'tool' && <div className="business-form"><div className="business-form-row"><label><span>名称</span><input required value={toolDraft.name} onChange={(event) => setToolDraft((current) => ({ ...current, name: event.target.value }))} /></label><label><span>版本</span><input required value={toolDraft.version} onChange={(event) => setToolDraft((current) => ({ ...current, version: event.target.value }))} /></label></div><div className="business-form-row"><label><span>协议</span><select value={toolDraft.protocol} onChange={(event) => setToolDraft((current) => ({ ...current, protocol: event.target.value as typeof current.protocol }))}><option value="openapi">OpenAPI 3.x</option><option value="mcp">MCP HTTP</option></select></label><label><span>位置</span><select value={toolDraft.location} onChange={(event) => setToolDraft((current) => ({ ...current, location: event.target.value as typeof current.location }))}><option value="internet">互联网</option><option value="local">本地网络</option></select></label></div><label><span>允许使用的 Agent</span><input value={toolDraft.allowedAgents} onChange={(event) => setToolDraft((current) => ({ ...current, allowedAgents: event.target.value }))} placeholder="逗号分隔；留空表示全部" /></label><label><span>{toolDraft.protocol === 'openapi' ? 'OpenAPI JSON' : 'MCP 配置 JSON'}</span><textarea required rows={9} spellCheck={false} value={toolDraft.specification} onChange={(event) => setToolDraft((current) => ({ ...current, specification: event.target.value }))} placeholder={toolDraft.protocol === 'mcp' ? '{"endpoint":"https://.../mcp"}' : '{"openapi":"3.1.0","servers":[...],"paths":{...}}'} /></label></div>}
+      {openComposer === 'tool' && <div className="business-form">
+        <div className="business-form-row"><label><span>名称</span><input required value={toolDraft.name} onChange={(event) => setToolDraft((current) => ({ ...current, name: event.target.value }))} /></label><label><span>版本</span><input required value={toolDraft.version} onChange={(event) => setToolDraft((current) => ({ ...current, version: event.target.value }))} /></label></div>
+        <label><span>这个工具能做什么</span><input value={toolDraft.description} onChange={(event) => setToolDraft((current) => ({ ...current, description: event.target.value }))} placeholder="例如：查询天气和未来七天预报" /></label>
+        <div className="business-form-row"><label><span>协议</span><select value={toolDraft.protocol} onChange={(event) => setToolDraft((current) => ({ ...current, protocol: event.target.value as typeof current.protocol }))}><option value="openapi">OpenAPI 3.x</option><option value="mcp">MCP HTTP</option></select></label><label><span>服务位置</span><select value={toolDraft.location} onChange={(event) => setToolDraft((current) => ({ ...current, location: event.target.value as typeof current.location }))}><option value="internet">互联网</option><option value="local">本地网络</option></select></label></div>
+        <div className="business-form-row"><label><span>能力分类</span><input value={toolDraft.categories} onChange={(event) => setToolDraft((current) => ({ ...current, categories: event.target.value }))} placeholder="研究, 办公；留空自动识别" /></label><label><span>能力关键词</span><input value={toolDraft.capabilityTags} onChange={(event) => setToolDraft((current) => ({ ...current, capabilityTags: event.target.value }))} placeholder="天气, 预报；留空自动识别" /></label></div>
+        <div className="business-form-row"><label><span>认证方式</span><select value={toolDraft.authType} onChange={(event) => setToolDraft((current) => ({ ...current, authType: event.target.value as typeof current.authType }))}><option value="none">无需认证</option><option value="api-key">API Key（导入后待授权）</option><option value="oauth2">OAuth 2（导入后待授权）</option><option value="service-account">服务账号（导入后待授权）</option></select></label><label><span>可见范围</span><select value={toolDraft.visibility} onChange={(event) => setToolDraft((current) => ({ ...current, visibility: event.target.value as typeof current.visibility }))}><option value="private">仅自己</option><option value="tenant">当前团队</option></select></label></div>
+        <label><span>允许使用的 Agent</span><input value={toolDraft.allowedAgents} onChange={(event) => setToolDraft((current) => ({ ...current, allowedAgents: event.target.value }))} placeholder="逗号分隔；留空表示全部" /></label>
+        <label><span>{toolDraft.protocol === 'openapi' ? 'OpenAPI JSON' : 'MCP 配置 JSON'}</span><textarea required rows={9} spellCheck={false} value={toolDraft.specification} onChange={(event) => setToolDraft((current) => ({ ...current, specification: event.target.value }))} placeholder={toolDraft.protocol === 'mcp' ? '{"endpoint":"https://.../mcp"}' : '{"openapi":"3.1.0","servers":[...],"paths":{...}}'} /></label>
+      </div>}
       <footer><button type="button" onClick={() => setOpenComposer(null)}>取消</button><button type="submit" className="primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}确认</button></footer>
     </form></div>}
   </div>;

@@ -52,6 +52,18 @@ export type RegisteredTool = {
   command?: string;
   buildArgs?: (input: Record<string, unknown>) => string[];
   handler?: (input: Record<string, unknown>, context: ToolContext) => Promise<SandboxResult>;
+  routing?: {
+    sourceId: string;
+    categories: string[];
+    capabilityTags: string[];
+    healthStatus: 'healthy' | 'unhealthy' | 'pending' | 'unknown';
+    authorizationStatus: 'ready' | 'pending' | 'not-required';
+    allowedAgentIds: string[];
+    sourceRisk: 'low' | 'medium' | 'high';
+    latencyMs?: number;
+    successRate?: number;
+    usageCount?: number;
+  };
 };
 
 export type ToolAuditRecord = {
@@ -480,7 +492,39 @@ export class ToolRegistry {
   }
 
   catalog() {
-    return [...this.tools.values()].map(({ name, description, risk, parameters, timeoutMs, executionBoundary = 'sandbox' }) => ({ name, description, risk, parameters, timeoutMs, executionBoundary, approvalRequired: risk === 'high' || risk === 'critical' }));
+    return [...this.tools.values()].map(({ name, description, risk, parameters, timeoutMs, executionBoundary = 'sandbox', routing }) => ({ name, description, risk, parameters, timeoutMs, executionBoundary, approvalRequired: risk === 'high' || risk === 'critical', ...(routing ? { routing: { ...routing, categories: [...routing.categories], capabilityTags: [...routing.capabilityTags], allowedAgentIds: [...routing.allowedAgentIds] } } : {}) }));
+  }
+
+  catalogForTask(input: { query: string; agentIds: string[]; explicitNames?: string[]; externalLimit?: number }) {
+    const explicit = new Set(input.explicitNames ?? []);
+    const normalizedQuery = input.query.toLowerCase();
+    const terms = [...new Set(normalizedQuery.match(/[a-z0-9_.-]{2,}|[\u4e00-\u9fff]{2,}/gu) ?? [])].slice(0, 80);
+    const identities = new Set(input.agentIds);
+    const catalog = this.catalog();
+    const builtins = catalog.filter((tool) => !tool.routing && (!explicit.size || explicit.has(tool.name)));
+    const candidates = catalog.flatMap((tool) => {
+      const routing = tool.routing;
+      if (!routing) return [];
+      if (explicit.size && !explicit.has(tool.name)) return [];
+      if (routing.healthStatus !== 'healthy' || !['ready', 'not-required'].includes(routing.authorizationStatus)) return [];
+      if (routing.allowedAgentIds.length && !routing.allowedAgentIds.some((agentId) => identities.has(agentId))) return [];
+      const haystack = `${tool.name} ${tool.description} ${routing.categories.join(' ')} ${routing.capabilityTags.join(' ')}`.toLowerCase();
+      let score = explicit.has(tool.name) ? 10_000 : 0;
+      for (const term of terms) if (haystack.includes(term) || normalizedQuery.includes(term) && routing.capabilityTags.some((tag) => tag.toLowerCase().includes(term))) score += term.length >= 4 ? 8 : 4;
+      for (const tag of routing.capabilityTags) if (tag.length >= 2 && normalizedQuery.includes(tag.toLowerCase())) score += 18;
+      for (const category of routing.categories) if (category.length >= 2 && normalizedQuery.includes(category.toLowerCase())) score += 12;
+      if (score <= 0) return [];
+      score += Math.max(0, Math.min(10, Number(routing.successRate ?? 0.5) * 10));
+      score -= Math.min(8, Math.max(0, Number(routing.latencyMs ?? 0)) / 1_000);
+      score -= routing.sourceRisk === 'high' ? 4 : routing.sourceRisk === 'medium' ? 1 : 0;
+      return score > 0 ? [{ tool, score }] : [];
+    });
+    const configuredLimit = Number(process.env.AXIOM_EXTERNAL_TOOL_TOP_K ?? input.externalLimit ?? 6);
+    const externalLimit = Math.min(12, Math.max(1, Number.isFinite(configuredLimit) ? Math.floor(configuredLimit) : 6));
+    const external = candidates.sort((left, right) => right.score - left.score || left.tool.name.localeCompare(right.tool.name))
+      .slice(0, externalLimit)
+      .map((candidate) => candidate.tool);
+    return [...builtins, ...external];
   }
 
   audits(taskId?: string) {

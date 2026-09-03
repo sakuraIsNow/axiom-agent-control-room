@@ -22,6 +22,7 @@ assert(health.reachable, health.detail);
 const runId = `${Date.now()}-${randomUUID()}`;
 const artifactId = `qa-object-${runId}`;
 const largeArtifactId = `qa-object-large-${runId}`;
+const binaryArtifactId = `qa-object-binary-${runId}`;
 const tenantA = `qa-tenant-a-${runId}`;
 const tenantB = `qa-tenant-b-${runId}`;
 const contentA = `worker-a ${runId}`;
@@ -30,6 +31,7 @@ const contentB = `worker-b ${runId}`;
 // providers that transparently stream larger objects, while staying small
 // enough for a local MinIO smoke run.
 const largeContent = `large ${runId}\n${'x'.repeat(1024 * 1024 + 17)}`;
+const binaryContent = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, ...Buffer.from(runId)]);
 
 try {
   const [putA, putB] = await Promise.all([
@@ -50,6 +52,11 @@ try {
   const largeRead = await workerB.get(largeArtifactId, tenantA);
   assert(largeRead === largeContent, 'large Artifact round-trip failed.');
 
+  const binaryPut = await workerA.putBinary(binaryArtifactId, binaryContent, tenantA, 'image/png');
+  const binaryRead = await workerB.getBinary(binaryArtifactId, tenantA);
+  assert(binaryPut.bytes === binaryContent.byteLength, 'binary Artifact byte count mismatch.');
+  assert(binaryRead && Buffer.from(binaryRead).equals(Buffer.from(binaryContent)), 'binary Artifact cross-worker round-trip failed.');
+
   await workerA.delete(artifactId, tenantA);
   const [deletedTenant, retainedTenant] = await Promise.all([
     workerB.get(artifactId, tenantA),
@@ -59,6 +66,7 @@ try {
   assert(retainedTenant === contentB, 'tenant-scoped delete crossed into another tenant.');
   await workerB.delete(artifactId, tenantB);
   await workerA.delete(largeArtifactId, tenantA);
+  await workerA.delete(binaryArtifactId, tenantA);
 
   console.log(JSON.stringify({
     ok: true,
@@ -68,6 +76,7 @@ try {
     tenantIsolation: true,
     scopedDelete: true,
     largeArtifactBytes: Buffer.byteLength(largeContent, 'utf8'),
+    binaryArtifactBytes: binaryContent.byteLength,
   }));
 } finally {
   // Cleanup is idempotent and also runs when an assertion fails, so repeated
@@ -76,5 +85,6 @@ try {
     workerA.delete(artifactId, tenantA).catch(() => undefined),
     workerA.delete(artifactId, tenantB).catch(() => undefined),
     workerA.delete(largeArtifactId, tenantA).catch(() => undefined),
+    workerA.delete(binaryArtifactId, tenantA).catch(() => undefined),
   ]);
 }

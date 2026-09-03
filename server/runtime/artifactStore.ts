@@ -21,6 +21,8 @@ export interface ArtifactStore {
   readonly kind: 'filesystem' | 's3';
   put(id: string, content: string, tenantId?: string): Promise<{ key: string; bytes: number }>;
   get(id: string, tenantId?: string): Promise<string | null>;
+  putBinary?(id: string, content: Uint8Array, tenantId?: string, mimeType?: string): Promise<{ key: string; bytes: number }>;
+  getBinary?(id: string, tenantId?: string): Promise<Uint8Array | null>;
   delete(id: string, tenantId?: string): Promise<void>;
   health(signal?: AbortSignal): Promise<ArtifactStoreHealth>;
 }
@@ -50,14 +52,14 @@ export class FileArtifactStore implements ArtifactStore {
     this.root = resolve(root);
   }
 
-  private key(id: string, tenantId?: string) {
+  private key(id: string, tenantId?: string, extension: 'md' | 'bin' = 'md') {
     const value = validateArtifactId(id);
     // A sanitized filename alone is ambiguous (`a:b` and `a_b` collide).
     // Keep a short readable prefix, then append a digest of the original id.
     const readable = value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'artifact';
     const digest = createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 24);
     const tenant = normalizedTenant(tenantId);
-    return join(this.root, ...(tenant ? [tenant] : []), `${readable}--${digest}.md`);
+    return join(this.root, ...(tenant ? [tenant] : []), `${readable}--${digest}.${extension}`);
   }
 
   private legacyKey(id: string) {
@@ -101,13 +103,39 @@ export class FileArtifactStore implements ArtifactStore {
     }
   }
 
+  async putBinary(id: string, content: Uint8Array, tenantId?: string, _mimeType?: string) {
+    const key = this.key(id, tenantId, 'bin');
+    const bytes = Buffer.from(content);
+    await mkdir(dirname(key), { recursive: true });
+    const temporary = `${key}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, bytes);
+      await rename(temporary, key);
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+    return { key, bytes: bytes.byteLength };
+  }
+
+  async getBinary(id: string, tenantId?: string) {
+    const keys = tenantId ? [this.key(id, tenantId, 'bin'), this.key(id, undefined, 'bin')] : [this.key(id, undefined, 'bin')];
+    for (const key of keys) {
+      try {
+        return await readFile(key);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    return null;
+  }
+
   async delete(id: string, tenantId?: string) {
     // Never remove an unscoped migration object from a tenant-scoped request:
     // another tenant may still be reading that legacy object during migration.
     // An unscoped delete is reserved for explicit maintenance/cleanup calls.
     const keys = tenantId
-      ? [this.key(id, tenantId)]
-      : [this.key(id), this.legacyKey(id)];
+      ? [this.key(id, tenantId), this.key(id, tenantId, 'bin')]
+      : [this.key(id), this.key(id, undefined, 'bin'), this.legacyKey(id)];
     await Promise.all(keys.map((key) => rm(key, { force: true })));
   }
 
@@ -188,10 +216,10 @@ export class S3ArtifactStore implements ArtifactStore {
     this.client = new S3Client(clientConfig);
   }
 
-  private key(id: string, tenantId?: string) {
+  private key(id: string, tenantId?: string, extension: 'md' | 'bin' = 'md') {
     const encodedId = encodeURIComponent(validateArtifactId(id));
     const tenant = normalizedTenant(tenantId);
-    return [this.prefix, ...(tenant ? [tenant] : []), `${encodedId}.md`].filter(Boolean).join('/');
+    return [this.prefix, ...(tenant ? [tenant] : []), `${encodedId}.${extension}`].filter(Boolean).join('/');
   }
 
   async put(id: string, content: string, tenantId?: string) {
@@ -226,10 +254,49 @@ export class S3ArtifactStore implements ArtifactStore {
     return null;
   }
 
+  async putBinary(id: string, content: Uint8Array, tenantId?: string, mimeType = 'application/octet-stream') {
+    const key = this.key(id, tenantId, 'bin');
+    const body = Buffer.from(content);
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      Body: body,
+      ContentLength: body.byteLength,
+      ContentType: mimeType,
+      ...(this.serverSideEncryption ? { ServerSideEncryption: this.serverSideEncryption } : {}),
+      Metadata: { 'axiom-artifact-id': encodeURIComponent(id).slice(0, 1_024), 'axiom-storage-encoding': 'binary' },
+    }), { abortSignal: storageTimeoutSignal() });
+    return { key: `s3://${this.bucket}/${key}`, bytes: body.byteLength };
+  }
+
+  async getBinary(id: string, tenantId?: string) {
+    const keys = tenantId
+      ? [this.key(id, tenantId, 'bin'), this.key(id, undefined, 'bin')]
+      : [this.key(id, undefined, 'bin')];
+    for (const key of keys) {
+      try {
+        const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: storageTimeoutSignal() });
+        if (!response.Body) return null;
+        if (typeof response.Body.transformToByteArray === 'function') return await response.Body.transformToByteArray();
+        const chunks: Uint8Array[] = [];
+        for await (const chunk of response.Body as AsyncIterable<Uint8Array>) chunks.push(Buffer.from(chunk));
+        return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+      } catch (error) {
+        const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+        const name = (error as { name?: string }).name;
+        if (status === 404 || name === 'NoSuchKey' || name === 'NotFound') continue;
+        throw error;
+      }
+    }
+    return null;
+  }
+
   async delete(id: string, tenantId?: string) {
     // Keep tenant-scoped deletion strictly tenant-scoped. In particular, do
     // not delete the unscoped legacy key as a side effect of a user request.
-    const keys = tenantId ? [this.key(id, tenantId)] : [this.key(id)];
+    const keys = tenantId
+      ? [this.key(id, tenantId), this.key(id, tenantId, 'bin')]
+      : [this.key(id), this.key(id, undefined, 'bin')];
     await Promise.all(keys.map((key) => this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: storageTimeoutSignal() })));
   }
 

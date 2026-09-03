@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { consumeSseBlocks } from './sse.js';
+import { attachmentDataUrl, attachmentPdfVisualPages, extractAttachmentText } from './attachmentContent.js';
+import { OpenAICompatibleModelClient, type ModelClient } from './modelClient.js';
+import type { NexusArtifactSnapshot } from './nexusArtifacts.js';
 
 export type WorkflowSpecialistAgent = {
   id: 'search-agent' | 'academic-search-agent' | 'github-research-agent' | 'drawing-agent' | 'video-agent';
@@ -18,6 +21,8 @@ export type WorkflowSpecialistResult = {
   confidence: number;
   model: string;
 };
+
+export type WorkflowSpecialistAttachment = NexusArtifactSnapshot & { content: Uint8Array };
 
 const endpoint = (baseUrl: string, suffix: string) => {
   const base = baseUrl.replace(/\/$/, '');
@@ -47,6 +52,12 @@ const videoProvider = () => ({
   apiKey: process.env.VIDEO_API_KEY?.trim() ?? '',
   baseUrl: process.env.VIDEO_API_BASE?.trim() ?? '',
   model: process.env.VIDEO_MODEL?.trim() ?? '',
+});
+
+const visionProvider = () => ({
+  apiKey: process.env.DEEPSEEK_VISION_API_KEY?.trim() || process.env.DEEPSEEK_API_KEY?.trim() || '',
+  baseUrl: process.env.DEEPSEEK_VISION_API_BASE?.trim() || process.env.DEEPSEEK_API_BASE?.trim() || 'https://api.deepseek.com',
+  model: process.env.DEEPSEEK_VISION_MODEL?.trim() || 'deepseek-v4-flash-vision-exp',
 });
 
 export const workflowSpecialistCatalog = (): WorkflowSpecialistAgent[] => {
@@ -93,7 +104,9 @@ export const workflowSpecialistCatalog = (): WorkflowSpecialistAgent[] => {
   ];
 };
 
-export const isWorkflowSpecialist = (agentId: string) => workflowSpecialistCatalog().some((agent) => agent.id === agentId);
+export const isWorkflowSpecialist = (agentId: string) => agentId === 'vision-agent'
+  || agentId === 'document-agent'
+  || workflowSpecialistCatalog().some((agent) => agent.id === agentId);
 
 const outputText = (payload: unknown) => {
   if (!payload || typeof payload !== 'object') return '';
@@ -224,9 +237,94 @@ const executeVideo = async (prompt: string, signal: AbortSignal): Promise<Workfl
   return { output: `[下载或播放工作流生成视频](${url})`, evidence: [`视频模型：${provider.model}`], confidence: 0.88, model: provider.model };
 };
 
-export const executeWorkflowSpecialist = async (agentId: string, prompt: string, signal: AbortSignal) => {
+const executeVision = async (
+  prompt: string,
+  signal: AbortSignal,
+  attachments: WorkflowSpecialistAttachment[],
+): Promise<WorkflowSpecialistResult> => {
+  const provider = visionProvider();
+  if (!provider.apiKey) throw new Error('视觉模型尚未配置。');
+  const visualParts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [
+    { type: 'text', text: prompt.slice(0, 24_000) },
+  ];
+  for (const attachment of attachments.slice(0, 6)) {
+    const dataUrl = attachmentDataUrl(attachment.content, attachment.mimeType);
+    if (attachment.mimeType.startsWith('image/')) {
+      visualParts.push({ type: 'text', text: `[图片附件：${attachment.name}]` });
+      visualParts.push({ type: 'image_url', image_url: { url: dataUrl } });
+      continue;
+    }
+    if (attachment.mimeType === 'application/pdf' || /\.pdf$/iu.test(attachment.name)) {
+      const text = await extractAttachmentText({ dataUrl, name: attachment.name, mimeType: attachment.mimeType });
+      visualParts.push(...await attachmentPdfVisualPages({ dataUrl, name: attachment.name, mimeType: attachment.mimeType }, text));
+    }
+  }
+  if (!visualParts.some((part) => part.type === 'image_url')) throw new Error('视觉 Agent 没有收到可分析的图片或扫描 PDF 页面。');
+  const model = new OpenAICompatibleModelClient({
+    apiKey: provider.apiKey,
+    apiBase: provider.baseUrl,
+    model: provider.model,
+    maxAttempts: 2,
+  });
+  const completion = await model.complete({
+    signal,
+    system: '你是 Agent Nexus 中的视觉分析 Agent。只根据可见内容回答；明确区分观察、推断和无法辨认的信息，不得虚构图中文字或细节。',
+    user: prompt,
+    userContent: visualParts,
+    maxTokens: 6_144,
+    temperature: 0.1,
+  });
+  return {
+    output: completion.content,
+    evidence: attachments.filter((attachment) => attachment.mimeType.startsWith('image/') || attachment.mimeType === 'application/pdf').map((attachment) => `视觉附件：${attachment.name}`),
+    confidence: 0.86,
+    model: provider.model,
+  };
+};
+
+const executeDocument = async (
+  prompt: string,
+  signal: AbortSignal,
+  attachments: WorkflowSpecialistAttachment[],
+  model?: ModelClient,
+): Promise<WorkflowSpecialistResult> => {
+  const sections: string[] = [];
+  for (const attachment of attachments.slice(0, 12)) {
+    const text = await extractAttachmentText({
+      dataUrl: attachmentDataUrl(attachment.content, attachment.mimeType),
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+    });
+    if (text.trim()) sections.push(`## ${attachment.name}\n${text}`);
+  }
+  if (!sections.length) throw new Error('文档 Agent 没有收到可解析的 PDF、Word 或文本附件。');
+  const selectedModel = model ?? new OpenAICompatibleModelClient();
+  const completion = await selectedModel.complete({
+    signal,
+    system: '你是 Agent Nexus 中的文档分析 Agent。基于附件原文提取事实、结构、表格与结论，引用附件名称；区分原文事实和你的推断，信息缺失时明确说明。',
+    user: `${prompt.slice(0, 24_000)}\n\n${sections.join('\n\n').slice(0, 120_000)}`,
+    maxTokens: 8_192,
+    temperature: 0.1,
+  });
+  return {
+    output: completion.content,
+    evidence: sections.map((section) => `文档附件：${section.match(/^## (.+)$/m)?.[1] ?? '未命名文档'}`),
+    confidence: 0.88,
+    model: selectedModel.model,
+  };
+};
+
+export const executeWorkflowSpecialist = async (
+  agentId: string,
+  prompt: string,
+  signal: AbortSignal,
+  attachments: WorkflowSpecialistAttachment[] = [],
+  model?: ModelClient,
+) => {
   if (agentId === 'drawing-agent') return executeDrawing(prompt, signal);
   if (agentId === 'video-agent') return executeVideo(prompt, signal);
+  if (agentId === 'vision-agent') return executeVision(prompt, signal, attachments);
+  if (agentId === 'document-agent') return executeDocument(prompt, signal, attachments, model);
   if (agentId === 'search-agent' || agentId === 'academic-search-agent' || agentId === 'github-research-agent') return executeSearch(agentId, prompt, signal);
   throw new Error(`不支持的工作流服务 Agent：${agentId}`);
 };

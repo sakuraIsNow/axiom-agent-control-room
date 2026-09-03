@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -1325,10 +1325,13 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
   let nudges = 0;
   const deletedArtifacts: string[] = [];
   const storedArtifacts = new Map<string, string>();
+  const storedBinaryArtifacts = new Map<string, Uint8Array>();
   const artifactStore = {
     kind: 'filesystem' as const,
     async put(id: string, content: string, tenantId?: string) { storedArtifacts.set(`${tenantId ?? ''}:${id}`, content); return { key: id, bytes: Buffer.byteLength(content, 'utf8') }; },
     async get(id: string, tenantId?: string) { return storedArtifacts.get(`${tenantId ?? ''}:${id}`) ?? null; },
+    async putBinary(id: string, content: Uint8Array, tenantId?: string) { storedBinaryArtifacts.set(`${tenantId ?? ''}:${id}`, Uint8Array.from(content)); return { key: `${id}.bin`, bytes: content.byteLength }; },
+    async getBinary(id: string, tenantId?: string) { return storedBinaryArtifacts.get(`${tenantId ?? ''}:${id}`) ?? null; },
     async delete(id: string, tenantId?: string) { storedArtifacts.delete(`${tenantId ?? ''}:${id}`); deletedArtifacts.push(id); },
     async health() { return { configured: true, reachable: true, detail: 'test' }; },
   };
@@ -1382,11 +1385,27 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     assert.equal(created.workflow.definition.plan.steps[0]?.agentContract?.source, 'workflow');
     assert.match(created.workflow.definition.plan.steps[0]?.agentContract?.systemPromptTemplate ?? '', /专业绘图提示/);
 
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    const uploadedResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ name: '参考图.png', mimeType: 'image/png', dataBase64: png.toString('base64') }),
+    });
+    assert.equal(uploadedResponse.status, 201);
+    const uploaded = (await uploadedResponse.json() as { artifact: { id: string; data: { artifactId: string; storageEncoding: string; digest: string } } }).artifact;
+    assert.equal(uploaded.data.storageEncoding, 'binary');
+    assert.equal(uploaded.data.digest, createHash('sha256').update(png).digest('hex'));
+    assert.ok(storedBinaryArtifacts.has(`tenant-workflow:${uploaded.data.artifactId}`));
+    const downloadedResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts/${uploaded.id}`, { headers });
+    assert.equal(downloadedResponse.status, 200);
+    assert.equal((await downloadedResponse.json() as { dataUrl: string }).dataUrl, `data:image/png;base64,${png.toString('base64')}`);
+
     await artifactStore.put('result:existing', '# 已有交付', 'tenant-workflow');
     await artifactCatalog.register({ id: 'result:existing', tenantId: 'tenant-workflow', taskId: 'existing-task', source: 'result', bytes: 16, mimeType: 'text/markdown', referenceKey: 'result' });
     const reusableResponse = await request(api, '/runtime/artifacts?limit=10', { headers });
     assert.equal(reusableResponse.status, 200);
-    assert.deepEqual((await reusableResponse.json() as { artifacts: Array<{ id: string }> }).artifacts.map((artifact) => artifact.id), ['result:existing']);
+    const reusableArtifactIds = (await reusableResponse.json() as { artifacts: Array<{ id: string }> }).artifacts.map((artifact) => artifact.id);
+    assert.ok(reusableArtifactIds.includes('result:existing'));
+    assert.ok(reusableArtifactIds.includes(uploaded.data.artifactId));
     const linkedResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts/link`, {
       method: 'POST', headers, body: JSON.stringify({ artifactId: 'result:existing', name: '已有交付' }),
     });
@@ -1397,7 +1416,7 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     assert.equal(duplicateLink.status, 200);
     assert.equal((await duplicateLink.json() as { idempotent: boolean }).idempotent, true);
     const linkedArtifacts = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts`, { headers });
-    assert.equal((await linkedArtifacts.json() as { artifacts: unknown[] }).artifacts.length, 1);
+    assert.equal((await linkedArtifacts.json() as { artifacts: unknown[] }).artifacts.length, 2);
     const crossTenantLink = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts/link`, {
       method: 'POST', headers: { ...headers, 'x-axiom-tenant-id': 'other-tenant' }, body: JSON.stringify({ artifactId: 'result:existing' }),
     });
@@ -1421,8 +1440,9 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     assert.equal(testCaseResponse.status, 201);
     const testRunResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/test-run`, { method: 'POST', headers });
     assert.equal(testRunResponse.status, 202);
-    const testRunBody = await testRunResponse.json() as { runs: Array<{ taskId: string }> };
+    const testRunBody = await testRunResponse.json() as { runs: Array<{ taskId: string; artifactSetDigest: string }> };
     assert.equal(testRunBody.runs.length, 1);
+    assert.match(testRunBody.runs[0]!.artifactSetDigest, /^[a-f0-9]{64}$/u);
     await store.updateTask(testRunBody.runs[0]!.taskId, { status: 'completed', result: '绘图测试通过' });
     const testRunsResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/test-runs`, { headers });
     assert.equal(testRunsResponse.status, 200);
@@ -1431,7 +1451,28 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
       method: 'POST', headers, body: JSON.stringify({ note: '首个稳定版本' }),
     });
     assert.equal(releaseResponse.status, 201);
-    const firstRelease = (await releaseResponse.json() as { release: { id: string } }).release;
+    const firstRelease = (await releaseResponse.json() as { release: { id: string; data: { artifacts: Array<{ artifactId: string }>; artifactSetDigest: string } } }).release;
+    assert.equal(firstRelease.data.artifacts.length, 2);
+    assert.equal(firstRelease.data.artifactSetDigest, testRunBody.runs[0]!.artifactSetDigest);
+
+    const changedAttachment = await request(api, `/capabilities/nexus/${created.workflow.id}/artifacts`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ name: '新增约束.txt', mimeType: 'text/plain', dataBase64: Buffer.from('新的附件内容').toString('base64') }),
+    });
+    assert.equal(changedAttachment.status, 201);
+    const staleRelease = await request(api, `/capabilities/nexus/${created.workflow.id}/releases`, {
+      method: 'POST', headers, body: JSON.stringify({ note: '不应复用旧测试' }),
+    });
+    assert.equal(staleRelease.status, 409);
+    assert.match((await staleRelease.json() as { error: string }).error, /未通过.*测试/u);
+    const retestResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/test-run`, { method: 'POST', headers });
+    const retestRuns = (await retestResponse.json() as { runs: Array<{ taskId: string }> }).runs;
+    for (const retest of retestRuns) await store.updateTask(retest.taskId, { status: 'completed', result: '绘图测试通过' });
+    await request(api, `/capabilities/nexus/${created.workflow.id}/test-runs`, { headers });
+    const attachmentRelease = await request(api, `/capabilities/nexus/${created.workflow.id}/releases`, {
+      method: 'POST', headers, body: JSON.stringify({ note: '附件已重新验证' }),
+    });
+    assert.equal(attachmentRelease.status, 201);
 
     const runResponse = await request(api, `/workflows/${created.workflow.id}/run`, {
       method: 'POST', headers,
@@ -1442,7 +1483,7 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     assert.equal(run.task.templateId, created.workflow.id);
     assert.equal(run.task.plan?.profile?.route, 'full-workflow');
     assert.equal(run.task.plan?.steps.length, 2);
-    assert.equal(nudges, 2);
+    assert.equal(nudges, 3);
     assert.ok((await store.getEvents(run.task.id)).some((event) => event.type === 'task.queued' && event.payload.source === 'agent-workflow'));
     const taskList = await request(api, '/tasks', { headers });
     const summary = (await taskList.json() as { tasks: Array<{ id: string; source?: string }> }).tasks.find((task) => task.id === run.task.id);
@@ -1479,11 +1520,13 @@ test('visual Agent workflows stay separate from templates and enqueue their comp
     const secondRelease = (await secondReleaseResponse.json() as { release: { id: string } }).release;
     const diffResponse = await request(api, `/capabilities/nexus/${created.workflow.id}/releases/${firstRelease.id}/diff/${secondRelease.id}`, { headers });
     assert.equal(diffResponse.status, 200);
-    const diff = await diffResponse.json() as { changed: boolean; stepCount: { left: number; right: number }; nodeCount: { left: number; right: number }; changes: { steps: { changed: string[] } } };
+    const diff = await diffResponse.json() as { changed: boolean; stepCount: { left: number; right: number }; nodeCount: { left: number; right: number }; artifactCount: { left: number; right: number }; changes: { steps: { changed: string[] }; artifacts: { added: string[] } } };
     assert.equal(diff.changed, true);
     assert.deepEqual(diff.stepCount, { left: 2, right: 2 });
     assert.deepEqual(diff.nodeCount, { left: 4, right: 4 });
+    assert.deepEqual(diff.artifactCount, { left: 2, right: 3 });
     assert.ok(diff.changes.steps.changed.length > 0);
+    assert.equal(diff.changes.artifacts.added.length, 1);
 
     // The task board is intentionally capped at 100 rows. Workflow deletion
     // must still clean every terminal run and its Artifact lineage beyond

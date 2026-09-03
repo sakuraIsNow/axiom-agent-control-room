@@ -315,3 +315,32 @@ test('aborts a provider stream that stalls after headers instead of hanging fore
     globalThis.fetch = originalFetch;
   }
 });
+
+test('sends bounded multimodal user content without changing string-only requests', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: { messages?: Array<{ role: string; content: unknown }> } | undefined;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: '图片分析完成' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  try {
+    const client = new OpenAICompatibleModelClient({ apiKey: 'test-key', apiBase: 'https://vision.example/v1', model: 'vision-model', maxAttempts: 1 });
+    const image = 'data:image/png;base64,iVBORw0KGgo=';
+    const result = await client.complete({
+      system: '视觉分析',
+      user: '兼容文本',
+      userContent: [{ type: 'text', text: '分析附件' }, { type: 'image_url', image_url: { url: image } }],
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.content, '图片分析完成');
+    assert.deepEqual(requestBody?.messages?.[1]?.content, [
+      { type: 'text', text: '分析附件' },
+      { type: 'image_url', image_url: { url: image } },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

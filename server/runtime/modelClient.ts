@@ -1,10 +1,16 @@
 import { consumeSseBlocks } from './sse.js';
+import { prepareDeepSeekImageFiles, type DeepSeekImagePart } from './deepseekFiles.js';
 
 export type ModelCompletionRequest = {
   model?: string;
   maxTokens?: number;
   system: string;
   user: string;
+  /** Optional multimodal user content. The string field remains the compatible fallback. */
+  userContent?: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image_url'; image_url: { url: string } }
+  >;
   temperature?: number;
   responseFormat?: 'text' | 'json';
   tools?: ModelToolDefinition[];
@@ -130,6 +136,19 @@ export class OpenAICompatibleModelClient implements ModelClient {
         }, requestTimeoutMs);
         const requestSignal = AbortSignal.any([request.signal, timeoutController.signal]);
         try {
+          let userContent: string | DeepSeekImagePart[] = request.user.slice(0, 80_000);
+          if (request.userContent?.length) {
+            const boundedContent = request.userContent.slice(0, 12).map((part) => part.type === 'text'
+              ? { type: 'text' as const, text: part.text.slice(0, 80_000) }
+              : { type: 'image_url' as const, image_url: { url: part.image_url.url.slice(0, 96 * 1024 * 1024) } });
+            const prepared = await prepareDeepSeekImageFiles(
+              [{ role: 'user', content: boundedContent }],
+              { apiKey: this.apiKey, baseUrl: this.apiBase, model: requestedModel },
+              requestSignal,
+              process.env.DEEPSEEK_FILES_API !== 'false',
+            );
+            userContent = prepared.messages[0]?.content ?? boundedContent;
+          }
           const response = await fetch(endpoint(this.apiBase), {
             method: 'POST',
             headers: {
@@ -140,7 +159,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
               model: requestedModel,
               messages: [
                 { role: 'system', content: request.system.slice(0, 30_000) },
-                { role: 'user', content: request.user.slice(0, 80_000) },
+                { role: 'user', content: userContent },
               ],
               stream: true,
               ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),

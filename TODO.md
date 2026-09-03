@@ -281,7 +281,8 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 - [x] 3D 节点悬停、Graph 双向联动和低性能降级：生产入口采用独立于 WebGL 的 CSS 3D 渲染，按设备能力、节能模式、减少动态偏好、页面可见性和视口交叉状态自动降级或暂停。
 - [x] 场景生产分包已按真实依赖修正：当前 `AxiomDashboard` 未挂载旧 R3F/WebGL 场景，生产产物不再生成或预加载 Three.js、R3F、postprocessing chunk；`react-dom/client` 归入 React framework chunk，删除了误导性的约 1 MB 旧结论。
 - [x] 移动端 Graph 全屏、节点详情抽屉和长事件虚拟滚动：节点支持鼠标、触摸、键盘选择，桌面/移动端均可全屏；运行事件上限为 500 条并按固定行高窗口化渲染。
-- [ ] MCP / OpenAPI 工具市场；Agent Studio 阶段一和 Planner 动态角色接入已在 P1.10 完成，本节剩余工具授权打磨、用量统计与市场，详见 `docs/dashboard-agentstudio-roadmap.md` Part B.2-B.4。
+- [x] MCP / OpenAPI 受控能力目录：已完成分类标签、版本固定、真实健康探测、Agent 权限、调用统计和按任务 Top-K 路由，外部工具不会全量注入所有 Agent。
+- [ ] MCP 加密认证代理与能力包市场：API Key/OAuth/服务账号只登记认证类型并保持“待授权”，下一批补 Secret 引用、OAuth 回调、Token 刷新、审核发布、撤回和租户配额。
 - [ ] 多租户计费、配额、审计查询和行业工作流。
 
 ## 本轮交付记录
@@ -484,7 +485,7 @@ npm run qa:search-agent
 - [x] 浏览器会话回归覆盖“复杂任务 → 普通寒暄 → Agent 注册表查询”：寒暄不改变原 Graph，专用 Agent 查询会追加 Graph 节点；`npm run qa:session-routing` 通过。
 - [x] 自定义文本 Provider 的可恢复工作流绑定：任务只持久化租户/用户隔离的 `modelCredentialId` 引用，不写入明文 API Key；多 Worker 恢复时由服务端重新解密并创建 ModelClient，一次性明文 Key 仍保留直连 Gateway 兼容路径。
 - [x] 直达专用 Agent 追加的 Graph 节点已纳入 Session Store：SQLite/PostgreSQL 使用受限 `graph_json` 快照持久化，跨刷新/跨会话恢复，状态更新以 ref 为单一时序来源；任务 Graph 仍独立留在 TaskStore，避免把任务快照混入普通会话；API 回归覆盖结构校验、租户隔离和删除墓碑。
-- [ ] 工作流附件输入与视觉/文档 Agent 节点尚未接入；需要先定义节点间二进制 Artifact 引用、大小限制和跨 Worker 对象存储协议，不能复用浏览器内存附件冒充持久化能力。
+- [x] 工作流附件输入与视觉/文档 Agent：Nexus 上传使用真实二进制 Artifact，测试与 Release 固定附件集合及 SHA-256；运行时按租户、流程、MIME、单文件/总预算和摘要 fail closed，并通过任务级缓存将真实图片或解析后的文档交给专用 Agent。单节点文件存储已回归，外部对象存储现场验收仍属于 P2。
 - [x] 高级控制流支持条件分支、多个独立 Loop 与嵌套 Loop；编译器使用稳定 `loopPath` 展开为最多 256 个无环步骤，并在运行时持久化 branch/loop 事件。
 
 ### 2026-08-28 Agent 工作流易用性与稳定性修复
@@ -792,3 +793,22 @@ npm run qa:search-agent
 验收：新增业务能力必须加入 `npm test`、针对性 API/浏览器回归和 `npm run qa:all`；未配置外部依赖只能标记降级或跳过，不能用模拟结果冒充生产通过。
 
 - [x] 最终验收：独立 PostgreSQL 测试库下 `npm test` 为 `373 passed / 0 failed / 0 skipped`；`npm run qa:all` 为 `25 passed / 0 failed / 4 skipped`。真实复杂任务产生 874 个连续事件、761 个 SSE 增量和 58,899 Token，经过 Reviewer 与一次人工确认后完成；路由评测 4/4、业务过程评测 6/6、Nexus 测试/发布/固定版本运行、用户历史隔离、浏览器视觉回归和 PostgreSQL 多 Worker 一致性均通过。4 个跳过项只对应未配置的 MemoryCore、外部对象存储和 Harness/Codex sidecar 现场验收。
+
+### 2026-09-03 v2.1.0 二进制附件与 MCP 能力路由
+
+- [x] Artifact Store 增加真实二进制 Put/Get，文件与 S3 存储保留原始字节、MIME 和租户作用域；PNG/PDF 不再经过 UTF-8 转换。
+- [x] Nexus 测试与 Release 固定附件快照及集合摘要；新增、替换或删除附件后旧测试变为过期，同定义不同附件不会复用 Release，版本差异包含附件变化。
+- [x] 视觉/文档 Agent 读取真实附件：多模态模型接收图片 part，文档模型只接收解析文本；运行时校验租户、流程、MIME、大小、SHA-256，并用任务级缓存避免 Loop 重复下载。
+- [x] MCP/OpenAPI 目录增加分类、标签、真实健康探测、认证状态、Agent 权限、风险、成功率、延迟和使用次数；异常、待授权或无权限操作不会进入模型目录。
+- [x] Orchestrator 按任务语义与 Agent 使用 `catalogForTask()` 选择 Top-K 外部工具，默认 6、硬上限 12；显式指定不能绕过健康、认证或权限过滤。
+- [x] 前端能力目录展示真实状态、指标和重新检查入口，并通过毛玻璃主题、桌面/移动端和浏览器零错误视觉回归。
+- [x] 发布门禁：`npm test` 为 `379 passed / 0 failed / 1 skipped`，PostgreSQL 专项补跑 `1 passed / 0 failed / 0 skipped`；`npm run build`、`npm run qa:visual` 通过，`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped` 且可运行项全部首轮通过。剩余 4 个外部服务现场验收未冒充通过。
+
+### v2.2 下一批：受控 MCP 规模化
+
+1. [ ] MCP 加密认证代理：API Key、OAuth 2、服务账号只保存加密 Secret 引用；完成 OAuth 回调、Token 刷新、撤销和审计，Secret 不进入 specification、日志或模型上下文。
+2. [ ] 审核能力包与租户市场：提供办公、研究、开发、业务、内容、运维、数据能力包；固定版本、签名、权限声明、发布审核、撤回和兼容性检查，不提供无审核“一键全开”。
+3. [ ] 后台健康巡检与熔断：定时探测、连续失败熔断、半开恢复、延迟/成功率趋势和告警；模型请求不现场执行健康探测。
+4. [ ] 租户工具配额：限制来源数量、每小时调用、并发、schema/Token 预算和高风险写操作策略；配额拒绝进入持久审计和运营指标。
+5. [ ] 外部对象存储现场验收：PostgreSQL + MinIO/S3/COS 双 Worker 验证二进制跨进程读取、租户隔离、超时、删除和失败补偿。
+6. [ ] MCP 业务评测：为办公、研究、开发等能力包建立成功率、误选率、延迟、Token、费用和人工接管基线，Router 只根据可验证数据调整排序。

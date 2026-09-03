@@ -2,7 +2,7 @@
 
 > 把一句话交给一组真正会分工的 Agent。Axiom 会判断任务难度、安排合适的 Agent、展示实时进度，并在交付前帮你检查结果。
 
-当前发布版本：**v2.0.0**（受控环境生产候选；`v1.1.0` 为升级前稳定基线）
+当前发布版本：**v2.1.0**（受控环境生产候选；`v2.0.0` 为本次升级前稳定基线）
 
 ![Axiom 任务台](docs/images/overview.png)
 
@@ -66,12 +66,18 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - 🚪 **第一次打开就能开始工作**：确认没有历史数据后，任务台会直接提供对话、插件和 Agent Nexus 三个入口；不是展示型登录页，点击后进入真实功能。
 - 📣 **任务结果可靠外发**：任务完成、失败、等待确认或日程异常时，可以通过签名 Webhook 推送到自己的系统；投递具有持久队列、幂等、超时重试、死信恢复和脱敏审计，服务重启不会丢失待发送记录。
 - 🧪 **按业务过程评测**：生产门禁不只看最终答案，还验证跨轮路由是否漂移、执行中改需求是否只应用一次、长结果引用边界、恢复一致性与版本冲突。
+- 📎 **Nexus 文件真正进入流程**：图片、PDF、Word 和文本附件按原始二进制保存；测试和发布会固定同一组文件，文件变化后必须重新测试，避免正式运行偷偷读到另一版资料。
+- 👁️ **视觉与文档 Agent 使用真实内容**：视觉 Agent 读取图片，文档 Agent 读取解析后的文件正文；其他 Agent 不会收到大段 Base64，附件被替换或跨用户引用时会直接拒绝。
+- 🧰 **外部工具按需加入**：MCP/OpenAPI 工具按办公、研究、开发、业务、内容、运维和数据分类。系统结合任务、Agent 权限、健康状态和历史成功率，每一步默认只选择最相关的 6 个，而不是把全部工具塞给模型。
+- 🩺 **工具状态可见**：能力目录会显示健康、待授权、异常、成功率、延迟和使用次数；异常或未授权工具不会进入 Agent 的可用目录。
 
 ### 🧭 从任务到业务交付
 
 最新的业务能力 V2 把复杂任务的前后步骤连成了一个可执行闭环：失败或需求变化时只重排受影响部分；Agent 之间用结构化摘要、证据和 Artifact 交接；Reviewer 会阻止证据缺失或互相矛盾的结论进入已验证交付。
 
-项目空间可以集中管理任务、会话、Agent Nexus、日程、决策、成员和审核。任务结束后可以继续分析、局部重跑、换模型复核、导出报告，或保存为 Nexus、插件和日程。平台还提供十种常用业务方案、可控长期记忆、动态 MCP/OpenAPI 工具目录、真实反馈聚合，以及随运行事件更新的成本和时间预估。
+项目空间可以集中管理任务、会话、Agent Nexus、日程、决策、成员和审核。任务结束后可以继续分析、局部重跑、换模型复核、导出报告，或保存为 Nexus、插件和日程。平台还提供十种常用业务方案、可控长期记忆、按需选择的 MCP/OpenAPI 能力目录、真实反馈聚合，以及随运行事件更新的成本和时间预估。
+
+平台可以接入很多种 MCP，但不会让每个 Agent 同时看到所有工具。大量工具会增加 Token、延迟和误选概率，也会扩大第三方服务故障与权限风险。更合适的方式是按用户需要组合“办公、研究、开发、业务、内容、运维、数据”等能力包，再由路由每轮挑选少量相关工具。需要 API Key、OAuth 或服务账号的 MCP 当前可以先登记，但会保持“待授权”，等下一批加密认证代理完成后才允许调用。
 
 这些能力都有 SQLite/PostgreSQL 持久化、服务端权限和 API 回归，不是只在页面上展示。完整说明、使用边界和验收方法见 [业务能力 V2](docs/business-capabilities-v2.md)。
 
@@ -103,16 +109,18 @@ Synthesizer：只汇总已验证的结果
 
 ```text
 npm run check       通过
-npm test            373 passed / 0 failed / 0 skipped（使用独立 PostgreSQL 测试库）
+npm test            379 passed / 0 failed / 1 skipped
+npm run qa:business-postgres
+                    1 passed / 0 failed / 0 skipped（独立 PostgreSQL 测试库）
 npm run build       通过
 npm run qa:search-agent
                     通过
-npm run qa:all      25 passed / 0 failed / 4 skipped
+npm run qa:all      24 passed / 0 failed / 5 skipped
 ```
 
-本轮门禁开始前已经确认 Docker 与 PostgreSQL 测试容器正常运行；25 个可运行项目全部在第一次尝试通过。真实复杂任务产生 560 个连续事件和 468 个 SSE 流式增量，共使用 24,774 Token；Reviewer 评分 45 后触发一次真实人工确认，最终正常完成并保存 625 字符 Artifact。4 个跳过项仅对应未配置的 MemoryCore、外部对象存储和 Harness/Codex sidecar 现场验收，跳过不等于通过。
+本轮门禁开始前已经确认 Docker 与 PostgreSQL 容器正常运行；24 个总门禁项目全部在第一次尝试通过。真实复杂任务产生 732 个连续事件和 624 个 SSE 流式增量，共使用 46,523 Token；Reviewer 评分 45 后触发一次真实人工确认，最终正常完成并保存 568 字符 Artifact。总门禁中的 PostgreSQL 专项最初因为未设置隔离测试库地址而跳过，随后在独立临时数据库中补跑为 `1 passed / 0 failed`，测试库已删除，未触碰业务数据库。
 
-跳过的 4 项只涉及尚未配置的外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar 现场握手。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；跳过不等于通过，也不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
+扣除已补跑的 PostgreSQL 后，仍未现场验收的是 4 项外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；跳过不等于通过，也不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
 
 ### 📈 本机性能基线
 
@@ -120,10 +128,10 @@ npm run qa:all      25 passed / 0 failed / 4 skipped
 
 | 接口 | 吞吐 | P95 延迟 |
 | --- | ---: | ---: |
-| 健康检查 | 1,687.55 请求/秒 | 10.21 ms |
-| 就绪检查 | 2,255.98 请求/秒 | 5.53 ms |
-| 任务列表 | 2,071.95 请求/秒 | 6.22 ms |
-| 运行观测 | 1,061.45 请求/秒 | 10.25 ms |
+| 健康检查 | 1,722.04 请求/秒 | 8.86 ms |
+| 就绪检查 | 2,460.17 请求/秒 | 5.12 ms |
+| 任务列表 | 2,074.96 请求/秒 | 5.77 ms |
+| 运行观测 | 929.22 请求/秒 | 11.57 ms |
 
 这组数据衡量的是 Axiom 自己的 API、调度和数据库访问，不包含 DeepSeek 的网络延迟、排队时间或模型生成速度。可以用下面的命令在自己的机器上重新测试：
 
@@ -357,6 +365,8 @@ npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 | 视频 | `VIDEO_API_BASE`、`VIDEO_API_KEY`、`VIDEO_MODEL` | 连接本地视频生成服务 |
 | 长期记忆 | `TDAI_MEMORY_ENDPOINT`、`TDAI_MEMORY_API_KEY` | 可选的 MemoryCore L0-L3 记忆 |
 | 外部 Agent | `DEEPSEEK_HARNESS_*`、`CODEX_APP_SERVER_*` | 接入 Harness 或 Codex sidecar |
+| Nexus 附件 | `AXIOM_NEXUS_ARTIFACT_BUDGET_BYTES` | 单任务可加载的附件总预算，默认 20 MB |
+| 外部工具路由 | `AXIOM_EXTERNAL_TOOL_TOP_K` | 每个 Agent 步骤最多注入的相关 MCP/OpenAPI 工具，默认 6 |
 | 外发通知 | `AXIOM_NOTIFICATION_SECRET`、`AXIOM_NOTIFICATION_RETENTION_DAYS` | 签名 Webhook、失败重试与投递审计 |
 
 `qa:harness-live` 只有在 sidecar 命令已配置时才执行真实握手；未配置时生产门禁会明确标为跳过。协议模拟测试不能替代目标服务器上的真实任务、断流和跨 Worker 演练。
@@ -384,7 +394,7 @@ npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 - [升级路线图](docs/upgrade-roadmap.md)：为什么这样设计前后端。
 - [Agent Nexus 控制流](docs/agent-nexus-control-flow.md)：分支、Loop、DAG 和局部重跑。
 - [执行闭环](docs/execution-loop.md)：任务如何从输入走到交付。
-- [工具目录](docs/tool-registry.md)：工具权限、审批和执行边界。
+- [工具目录](docs/tool-registry.md)：MCP/OpenAPI 按需路由、健康、权限、审批和执行边界。
 - [MemoryCore 接入](docs/memorycore-integration.md)：长期记忆配置与验收。
 - [业务能力 V2](docs/business-capabilities-v2.md)：15 项业务闭环、数据边界与验收方法。
 - [Harness 适配器](docs/harness-adapters.md)：DeepSeek Harness/Codex 的可选接入方式。
@@ -392,7 +402,8 @@ npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 - [业务闭环评测](docs/runtime-business-evaluation.md)：分段评测维度和失败定位方式。
 - [Reasonix 运行时采纳说明](docs/reasonix-runtime-adoption.md)：DAG、统一运行上下文、写入冲突调度和交付证据的设计边界。
 - [上线就绪度](docs/launch-readiness.md)：当前能力、风险和生产前置条件。
-- [v2.0.0 迁移指南](docs/migration-v2.md)：从 v1.1.0 备份、升级、验证和回滚。
+- [v2.1.0 迁移指南](docs/migration-v2.1.md)：从 v2.0.0 升级二进制附件与 MCP 路由。
+- [v2.0.0 迁移指南](docs/migration-v2.md)：从 v1.1.0 升级到 v2 的基础步骤。
 - [版本变更记录](CHANGELOG.md)：每个正式版本的新增能力、行为变化和外部依赖。
 
 ## 📄 开源许可

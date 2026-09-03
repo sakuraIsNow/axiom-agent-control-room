@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import pino from 'pino';
 import { compileAgentWorkflow } from './workflowCompiler.js';
-import { executeWorkflowSpecialist, workflowSpecialistCatalog } from './workflowSpecialists.js';
+import { executeWorkflowSpecialist, isWorkflowSpecialist, workflowSpecialistCatalog } from './workflowSpecialists.js';
 import { SqliteTaskStore } from './sqliteTaskStore.js';
 import { WorkflowOrchestrator } from './orchestrator.js';
 import { EventHub } from './eventHub.js';
 import type { AgentMemory } from './memoryClient.js';
 import type { ModelClient } from './modelClient.js';
+import { SqliteBusinessCapabilityStore } from './businessCapabilityStore.js';
+import type { ArtifactStore } from './artifactStore.js';
+import { nexusArtifactSetDigest, type NexusArtifactSnapshot } from './nexusArtifacts.js';
 
-const envKeys = ['DMX_API_KEY', 'DMX_BASE_URL', 'DMX_MODEL', 'DEEPSEEK_API_KEY', 'DEEPSEEK_API_BASE', 'DEEPSEEK_NATIVE_SEARCH_MODEL', 'DEEPSEEK_NATIVE_SEARCH', 'VIDEO_API_BASE', 'VIDEO_API_KEY', 'VIDEO_MODEL'] as const;
+const envKeys = ['DMX_API_KEY', 'DMX_BASE_URL', 'DMX_MODEL', 'DEEPSEEK_API_KEY', 'DEEPSEEK_API_BASE', 'DEEPSEEK_NATIVE_SEARCH_MODEL', 'DEEPSEEK_NATIVE_SEARCH', 'DEEPSEEK_VISION_API_KEY', 'DEEPSEEK_VISION_API_BASE', 'DEEPSEEK_VISION_MODEL', 'VIDEO_API_BASE', 'VIDEO_API_KEY', 'VIDEO_MODEL'] as const;
 
 const withEnvironment = async (values: Partial<Record<(typeof envKeys)[number], string>>, action: () => Promise<void>) => {
   const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
@@ -40,6 +44,53 @@ test('workflow specialist catalog reports configured capability instead of overc
     assert.equal(catalog.find((agent) => agent.id === 'search-agent')?.available, true);
     assert.equal(catalog.find((agent) => agent.id === 'video-agent')?.available, true);
   });
+  assert.equal(isWorkflowSpecialist('vision-agent'), true);
+  assert.equal(isWorkflowSpecialist('document-agent'), true);
+  assert.equal(workflowSpecialistCatalog().some((agent) => agent.id === ('vision-agent' as never)), false);
+});
+
+test('vision specialist sends real image bytes as a multimodal model part', async () => {
+  const originalFetch = globalThis.fetch;
+  let userContent: unknown;
+  await withEnvironment({ DEEPSEEK_VISION_API_KEY: 'vision-key', DEEPSEEK_VISION_API_BASE: 'https://vision.example/v1', DEEPSEEK_VISION_MODEL: 'vision-model' }, async () => {
+    globalThis.fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: unknown }> };
+      userContent = body.messages[1]?.content;
+      return new Response(JSON.stringify({ choices: [{ message: { content: '图中包含绿色圆形。' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+      const result = await executeWorkflowSpecialist('vision-agent', '分析图片', new AbortController().signal, [{
+        artifactRecordId: 'record-image', artifactId: 'image', name: '参考图.png', mimeType: 'image/png', bytes: bytes.byteLength,
+        digest: 'a'.repeat(64), storageEncoding: 'binary', content: bytes,
+      }]);
+      assert.equal(result.model, 'vision-model');
+      assert.match(result.output, /绿色圆形/u);
+      assert.ok(Array.isArray(userContent));
+      assert.ok((userContent as Array<{ type?: string; image_url?: { url?: string } }>).some((part) => part.type === 'image_url' && part.image_url?.url?.startsWith('data:image/png;base64,')));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+test('document specialist extracts text bytes and never injects base64 into the text model', async () => {
+  let user = '';
+  const model: ModelClient = {
+    model: 'document-model',
+    async complete(request) {
+      user = request.user;
+      return { content: '文档结论已提取。', attempts: 1, durationMs: 1 };
+    },
+  };
+  const content = Buffer.from('# 采购报告\n预算为 120 万元。', 'utf8');
+  const result = await executeWorkflowSpecialist('document-agent', '提取预算', new AbortController().signal, [{
+    artifactRecordId: 'record-document', artifactId: 'document', name: '报告.md', mimeType: 'text/markdown', bytes: content.byteLength,
+    digest: 'b'.repeat(64), storageEncoding: 'binary', content,
+  }], model);
+  assert.equal(result.model, 'document-model');
+  assert.match(user, /预算为 120 万元/u);
+  assert.doesNotMatch(user, /base64/u);
 });
 
 test('drawing specialist returns a renderable Markdown image from the configured provider', async () => {
@@ -168,4 +219,82 @@ test('orchestrator executes a snapshotted drawing Agent as a real workflow step'
       globalThis.fetch = originalFetch;
     }
   });
+});
+
+test('orchestrator loads only digest-verified Nexus attachments for a document Agent', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  const business = new SqliteBusinessCapabilityStore(':memory:');
+  await store.initialize();
+  await business.initialize();
+  const memory: AgentMemory = {
+    async recall() { return { context: '', itemCount: 0, available: false, items: [], quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } } }; },
+    async capture(task) { return { capturedCount: 0, skipped: true, reason: 'disabled', cursor: task.updatedAt, contentDigest: '' }; },
+  };
+  let documentInput = '';
+  const model: ModelClient = {
+    model: 'document-model',
+    async complete(request) {
+      if (request.system.includes('文档分析 Agent')) {
+        documentInput = request.user;
+        return { content: '附件预算为 120 万元。', attempts: 1, durationMs: 1 };
+      }
+      const content = request.system.includes('synthesizer') ? '文档工作流完成。' : JSON.stringify({ approved: true, score: 95, summary: '通过', gaps: [], requiredCorrections: [] });
+      await request.onDelta?.({ content });
+      return { content, attempts: 1, durationMs: 1 };
+    },
+  };
+  const binaries = new Map<string, Uint8Array>();
+  const artifactStore: ArtifactStore = {
+    kind: 'filesystem',
+    async put(id, content, tenantId) { return { key: `${tenantId}:${id}.md`, bytes: Buffer.byteLength(content) }; },
+    async get() { return null; },
+    async putBinary(id, content, tenantId) { binaries.set(`${tenantId}:${id}`, Uint8Array.from(content)); return { key: `${id}.bin`, bytes: content.byteLength }; },
+    async getBinary(id, tenantId) { return binaries.get(`${tenantId}:${id}`) ?? null; },
+    async delete() {},
+    async health() { return { configured: true, reachable: true, detail: 'test' }; },
+  };
+  const tenantId = 'tenant-document';
+  const workflowId = randomUUID();
+  const bytes = Buffer.from('# 财务报告\n预算为 120 万元。', 'utf8');
+  const artifactId = `nexus:${workflowId}:report`;
+  binaries.set(`${tenantId}:${artifactId}`, bytes);
+  const artifactRecord = await business.create({
+    tenantId, userId: 'owner', ownerId: 'owner', kind: 'nexus-artifact', status: 'active',
+    data: { workflowId, workflowVersion: 1, artifactId, name: '财务报告.md', mimeType: 'text/markdown', bytes: bytes.byteLength, digest: createHash('sha256').update(bytes).digest('hex'), storageKey: `${artifactId}.bin`, storageEncoding: 'binary' },
+  });
+  const snapshot: NexusArtifactSnapshot = {
+    artifactRecordId: artifactRecord.id, artifactId, name: '财务报告.md', mimeType: 'text/markdown', bytes: bytes.byteLength,
+    digest: createHash('sha256').update(bytes).digest('hex'), storageKey: `${artifactId}.bin`, storageEncoding: 'binary',
+  };
+  try {
+    const task = await store.createTask({
+      tenantId, userId: 'owner', sessionId: `agent-nexus-test-${workflowId}`, templateId: workflowId,
+      title: '文档分析', input: '提取预算', mode: 'analyze',
+      plan: {
+        summary: '分析附件', routingReason: '手动 Nexus', version: 1, approvalStatus: 'approved',
+        profile: { kind: 'research', difficulty: 'moderate', route: 'full-workflow', score: 50, reasons: ['manual'], maxSteps: 1, requiresReview: false },
+        steps: [{ id: 'document', title: '文档分析 Agent', role: 'document-agent', objective: '读取报告', dependsOn: [], acceptanceCriteria: ['提取预算'], failureStrategy: 'retry', agentContract: { source: 'builtin', agentId: 'document-agent', displayName: '文档分析 Agent', toolAllowlist: [] } }],
+      },
+    });
+    await business.create({ tenantId, userId: 'owner', ownerId: 'owner', kind: 'nexus-test-run', status: 'running', data: { workflowId, workflowVersion: 1, taskId: task.id, artifacts: [snapshot], artifactSetDigest: nexusArtifactSetDigest([snapshot]) } });
+    const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }), undefined, undefined, undefined, undefined, artifactStore, null, business)
+      .run(task, new AbortController().signal);
+    assert.equal(result.status, 'completed', result.error);
+    assert.match(documentInput, /预算为 120 万元/u);
+    assert.doesNotMatch(documentInput, /base64/u);
+
+    binaries.set(`${tenantId}:${artifactId}`, Buffer.from('内容已被篡改', 'utf8'));
+    const tamperedTask = await store.createTask({
+      tenantId, userId: 'owner', sessionId: `agent-nexus-test-${workflowId}-tampered`, templateId: workflowId,
+      title: '文档分析篡改检查', input: '提取预算', mode: 'analyze', plan: task.plan,
+    });
+    await business.create({ tenantId, userId: 'owner', ownerId: 'owner', kind: 'nexus-test-run', status: 'running', data: { workflowId, workflowVersion: 1, taskId: tamperedTask.id, artifacts: [snapshot], artifactSetDigest: nexusArtifactSetDigest([snapshot]) } });
+    const tampered = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }), undefined, undefined, undefined, undefined, artifactStore, null, business)
+      .run(tamperedTask, new AbortController().signal);
+    assert.equal(tampered.status, 'failed');
+    assert.match(tampered.error ?? '', /内容摘要校验失败/u);
+  } finally {
+    await business.close();
+    await store.close();
+  }
 });

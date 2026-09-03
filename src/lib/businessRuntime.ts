@@ -52,6 +52,19 @@ export type ToolSourceRecord = BusinessRecord & {
     location: 'internet' | 'local';
     version: string;
     enabled: boolean;
+    description: string;
+    categories: string[];
+    capabilityTags: string[];
+    riskLevel: 'low' | 'medium' | 'high';
+    authType: 'none' | 'api-key' | 'oauth2' | 'service-account';
+    authorizationStatus?: 'ready' | 'pending' | 'not-required';
+    visibility: 'private' | 'tenant';
+    healthStatus?: 'healthy' | 'unhealthy' | 'pending' | 'unknown';
+    healthMessage?: string;
+    lastCheckedAt?: string;
+    latencyMs?: number;
+    usageCount?: number;
+    successRate?: number | null;
     allowedAgentIds: string[];
     operations?: Array<{ operationId: string; method: string; path: string }>;
     registeredToolNames?: string[];
@@ -229,6 +242,9 @@ export const createToolSource = (input: ToolSourceRecord['data']) =>
 
 export const updateToolSource = (sourceId: string, input: Partial<ToolSourceRecord['data']> & { revision: number }) =>
   jsonRequest<{ source: ToolSourceRecord }>(`/api/capabilities/tool-sources/${encodeURIComponent(sourceId)}`, 'PATCH', input).then((body) => body.source);
+
+export const checkToolSourceHealth = (sourceId: string) =>
+  jsonRequest<{ source: ToolSourceRecord }>(`/api/capabilities/tool-sources/${encodeURIComponent(sourceId)}/health`, 'POST').then((body) => body.source);
 
 export const listToolApprovals = (sourceId: string, signal?: AbortSignal) => fetch(`/api/capabilities/tool-sources/${encodeURIComponent(sourceId)}/approvals`, { signal })
   .then((response) => readJson<{ approvals: ToolApprovalRecord[] }>(response, '工具审批读取失败')).then((body) => body.approvals);

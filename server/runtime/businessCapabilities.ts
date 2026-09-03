@@ -15,6 +15,15 @@ import { createPluginRelease, inspectPluginCompatibility } from './pluginCompati
 import type { RegisteredTool, ToolContext, ToolRegistry } from './toolRegistry.js';
 import type { ModelRoutingPolicy } from './modelRouting.js';
 import type { MemoryScope, TencentMemoryClient } from './memoryClient.js';
+import { attachmentDataUrl, decodeAttachmentDataUrl } from './attachmentContent.js';
+import {
+  nexusArtifactSetDigest,
+  nexusArtifactSnapshot,
+  nexusReleaseDigest,
+  snapshotNexusArtifacts,
+  type NexusArtifactSnapshot,
+  type NexusArtifactStorageEncoding,
+} from './nexusArtifacts.js';
 
 type Principal = { tenantId: string; userId: string; role: 'owner' | 'admin' | 'member' | 'viewer' };
 const principal = (headers: Headers): Principal => verifyPrincipal(headers) ?? {
@@ -72,6 +81,12 @@ const memoryPatchSchema = memorySchema.partial().extend({ revision: revisionSche
 const toolSourceSchema = z.object({
   name: z.string().min(1).max(120), protocol: z.enum(['openapi', 'mcp']), location: z.enum(['internet', 'local']),
   version: z.string().min(1).max(120), enabled: z.boolean().default(false),
+  description: z.string().max(1_000).default(''),
+  categories: z.array(z.string().min(1).max(80)).max(12).default([]),
+  capabilityTags: z.array(z.string().min(1).max(80)).max(32).default([]),
+  riskLevel: z.enum(['low', 'medium', 'high']).default('low'),
+  authType: z.enum(['none', 'api-key', 'oauth2', 'service-account']).default('none'),
+  visibility: z.enum(['private', 'tenant']).default('private'),
   allowedAgentIds: z.array(z.string().min(1).max(160)).max(100).default([]),
   specification: z.record(z.string(), z.unknown()),
 }).strict();
@@ -134,6 +149,29 @@ type Operation = {
   risk: 'low' | 'medium' | 'high';
 };
 
+const inferredToolMetadata = (input: z.infer<typeof toolSourceSchema>, operations: Operation[]) => {
+  const source = [input.name, input.description, ...operations.flatMap((operation) => [operation.operationId, operation.description ?? ''])].join(' ').toLowerCase();
+  const tagged: Array<[RegExp, string, string]> = [
+    [/(?:search|research|paper|arxiv|doi|搜索|检索|论文|研究)/iu, 'research', 'search'],
+    [/(?:github|gitlab|repository|repo|issue|commit|代码|仓库)/iu, 'development', 'repository'],
+    [/(?:calendar|schedule|mail|email|document|spreadsheet|日历|日程|邮件|文档|表格)/iu, 'office', 'productivity'],
+    [/(?:weather|天气|气象)/iu, 'research', 'weather'],
+    [/(?:database|sql|postgres|sqlite|数据库|数据查询)/iu, 'data', 'database'],
+    [/(?:image|video|media|图片|绘图|视频|素材)/iu, 'content', 'media'],
+    [/(?:crm|customer|ticket|support|客服|工单|客户)/iu, 'business', 'customer-operations'],
+    [/(?:log|metric|alert|deploy|cloud|日志|指标|告警|部署|云资源)/iu, 'operations', 'operations'],
+  ];
+  const inferredCategories = tagged.filter(([pattern]) => pattern.test(source)).map(([, category]) => category);
+  const inferredTags = tagged.filter(([pattern]) => pattern.test(source)).map(([, , tag]) => tag);
+  const categories = [...new Set([...input.categories, ...inferredCategories, ...(inferredCategories.length ? [] : ['custom'])])].slice(0, 12);
+  const capabilityTags = [...new Set([...input.capabilityTags, ...inferredTags])].slice(0, 32);
+  const operationRisk = operations.some((operation) => operation.risk === 'high') ? 'high'
+    : operations.some((operation) => operation.risk === 'medium') ? 'medium' : 'low';
+  const riskLevel = input.riskLevel === 'high' || operationRisk === 'high' ? 'high'
+    : input.riskLevel === 'medium' || operationRisk === 'medium' ? 'medium' : 'low';
+  return { categories, capabilityTags, riskLevel };
+};
+
 const schemaError = (path: string, message: string) => `${path || '参数'}${message}`;
 const validateJsonValue = (schema: JsonSchema, value: unknown, path = ''): string[] => {
   const errors: string[] = [];
@@ -182,9 +220,9 @@ const parseMcpPayload = (contentType: string, source: string) => {
   return JSON.parse(payloads.at(-1)!) as Record<string, unknown>;
 };
 
-const mcpRequest = async (endpoint: URL, method: string, params: Record<string, unknown>, sessionId?: string) => {
+const mcpRequest = async (endpoint: URL, method: string, params: Record<string, unknown>, sessionId?: string, timeoutMs = 30_000) => {
   const response = await fetch(endpoint, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000),
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
     headers: {
       Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json',
       ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
@@ -196,6 +234,29 @@ const mcpRequest = async (endpoint: URL, method: string, params: Record<string, 
   const envelope = parseMcpPayload(response.headers.get('content-type') ?? '', source);
   if (envelope.error) throw new Error(`MCP 调用失败：${JSON.stringify(envelope.error).slice(0, 2_000)}`);
   return { result: object(envelope.result), sessionId: response.headers.get('mcp-session-id') ?? sessionId };
+};
+
+const probeToolEndpoint = async (protocol: 'openapi' | 'mcp', endpoint: URL) => {
+  const startedAt = Date.now();
+  try {
+    if (protocol === 'mcp') {
+      const initialized = await mcpRequest(endpoint, 'initialize', {
+        protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'axiom-health-probe', version: '2.1.0' },
+      }, undefined, 5_000);
+      await mcpRequest(endpoint, 'tools/list', {}, initialized.sessionId, 5_000);
+    } else {
+      const response = await fetch(endpoint, { method: 'HEAD', redirect: 'error', signal: AbortSignal.timeout(5_000) });
+      if (response.status >= 500) throw new Error(`HTTP ${response.status}`);
+    }
+    return { healthStatus: 'healthy' as const, lastCheckedAt: new Date().toISOString(), latencyMs: Date.now() - startedAt };
+  } catch (error) {
+    return {
+      healthStatus: 'unhealthy' as const,
+      lastCheckedAt: new Date().toISOString(),
+      latencyMs: Date.now() - startedAt,
+      healthMessage: (error instanceof Error ? error.message : '连接失败').slice(0, 500),
+    };
+  }
 };
 
 const validateToolSpecification = (protocol: 'openapi' | 'mcp', specification: Record<string, unknown>) => {
@@ -315,9 +376,49 @@ const invokeExternalOperation = async (
 const externalToolPrefix = (sourceId: string) => `external_${sourceId.replace(/-/g, '').slice(0, 12)}_`;
 const externalToolName = (sourceId: string, operationId: string) => `${externalToolPrefix(sourceId)}${operationId.replace(/[^a-zA-Z0-9_-]/g, '_')}`.slice(0, 80);
 
+const sourceHealthStatus = (source: BusinessRecord) => source.data.healthStatus === 'unhealthy' || source.data.healthStatus === 'pending'
+  ? source.data.healthStatus
+  : source.data.healthStatus === 'healthy' ? 'healthy' : 'healthy'; // Legacy pinned sources remain compatible until their first explicit probe.
+const sourceAuthorizationStatus = (source: BusinessRecord) => source.data.authorizationStatus === 'pending'
+  ? 'pending'
+  : source.data.authType && source.data.authType !== 'none' ? 'pending' : 'not-required';
+
+const recordExternalToolOutcome = async (
+  records: BusinessCapabilityStore,
+  sourceId: string,
+  tenantId: string,
+  succeeded: boolean,
+  latencyMs: number,
+) => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await records.get(sourceId, tenantId);
+    if (!current || current.kind !== 'tool-source') return;
+    const usageCount = Math.max(0, Number(current.data.usageCount ?? 0)) + 1;
+    const successCount = Math.max(0, Number(current.data.successCount ?? 0)) + (succeeded ? 1 : 0);
+    try {
+      await records.update(current.id, tenantId, {
+        data: {
+          ...current.data,
+          usageCount,
+          successCount,
+          successRate: successCount / usageCount,
+          lastUsedAt: new Date().toISOString(),
+          lastCallStatus: succeeded ? 'succeeded' : 'failed',
+          lastCallLatencyMs: Math.max(0, Math.floor(latencyMs)),
+        },
+      }, current.revision);
+      return;
+    } catch (error) {
+      if (!(error instanceof BusinessRecordRevisionConflictError) || attempt === 2) return;
+    }
+  }
+};
+
 const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolRegistry, source: BusinessRecord) => {
   tools.unregisterPrefix(externalToolPrefix(source.id));
-  if (source.kind !== 'tool-source' || source.status !== 'enabled') return;
+  if (source.kind !== 'tool-source' || source.status !== 'enabled'
+    || sourceHealthStatus(source) !== 'healthy'
+    || !['ready', 'not-required'].includes(sourceAuthorizationStatus(source))) return;
   const operations = Array.isArray(source.data.operations) ? source.data.operations as Operation[] : [];
   for (const operation of operations) {
     const registered: RegisteredTool = {
@@ -328,6 +429,18 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
       parameters: operationInputSchema(operation) as RegisteredTool['parameters'],
       schema: z.record(z.string(), z.unknown()),
       timeoutMs: 30_000,
+      routing: {
+        sourceId: source.id,
+        categories: stringArray(source.data.categories, 12),
+        capabilityTags: stringArray(source.data.capabilityTags, 32),
+        healthStatus: sourceHealthStatus(source),
+        authorizationStatus: sourceAuthorizationStatus(source),
+        allowedAgentIds: stringArray(source.data.allowedAgentIds, 100),
+        sourceRisk: source.data.riskLevel === 'high' ? 'high' : source.data.riskLevel === 'low' ? 'low' : 'medium',
+        latencyMs: Number(source.data.latencyMs ?? 0),
+        successRate: Number(source.data.successRate ?? 0.5),
+        usageCount: Number(source.data.usageCount ?? 0),
+      },
       handler: async (input, context: ToolContext) => {
         const current = await records.get(source.id, context.task.tenantId);
         if (!current || current.kind !== 'tool-source' || current.status !== 'enabled') throw new Error('外部工具已停用或不属于当前租户。');
@@ -339,8 +452,15 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
           .find((candidate) => candidate.operationId === operation.operationId && candidate.method === operation.method);
         if (!currentOperation) throw new Error('固定工具版本中已不存在该操作。');
         const startedAt = Date.now();
-        const result = await invokeExternalOperation(current, currentOperation, input);
-        return { stdout: result.content, stderr: result.ok ? '' : `外部工具返回 HTTP ${result.responseStatus}。`, exitCode: result.ok ? 0 : result.responseStatus, durationMs: Date.now() - startedAt, auditId: context.auditId };
+        try {
+          const result = await invokeExternalOperation(current, currentOperation, input);
+          const durationMs = Date.now() - startedAt;
+          await recordExternalToolOutcome(records, current.id, context.task.tenantId, result.ok, durationMs);
+          return { stdout: result.content, stderr: result.ok ? '' : `外部工具返回 HTTP ${result.responseStatus}。`, exitCode: result.ok ? 0 : result.responseStatus, durationMs, auditId: context.auditId };
+        } catch (error) {
+          await recordExternalToolOutcome(records, current.id, context.task.tenantId, false, Date.now() - startedAt);
+          throw error;
+        }
       },
     };
     tools.upsert(registered);
@@ -350,7 +470,10 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
 export const registerPersistedExternalTools = async (records: BusinessCapabilityStore, tools: ToolRegistry) => {
   const sources = await records.listAll('tool-source', 10_000);
   for (const source of sources) syncExternalToolSource(records, tools, source);
-  return sources.filter((source) => source.status === 'enabled').reduce((count, source) => count + (Array.isArray(source.data.operations) ? source.data.operations.length : 0), 0);
+  return sources.filter((source) => source.status === 'enabled'
+    && sourceHealthStatus(source) === 'healthy'
+    && ['ready', 'not-required'].includes(sourceAuthorizationStatus(source)))
+    .reduce((count, source) => count + (Array.isArray(source.data.operations) ? source.data.operations.length : 0), 0);
 };
 
 const quantile = (values: number[], fraction: number) => {
@@ -427,7 +550,48 @@ export const createBusinessCapabilityApi = (dependencies: {
       },
     };
   };
+  const nexusArtifactsForWorkflow = async (workflowId: string, value: Principal): Promise<NexusArtifactSnapshot[]> => {
+    const active = (await records.list(value.tenantId, 'nexus-artifact', { limit: 500 }))
+      .filter((record) => record.status === 'active' && record.data.workflowId === workflowId);
+    const normalized: BusinessRecord[] = [];
+    for (const record of active) {
+      if (nexusArtifactSnapshot(record)) {
+        normalized.push(record);
+        continue;
+      }
+      if (!artifacts) throw new Error('Artifact 存储未配置，无法迁移旧版 Nexus 附件。');
+      const artifactId = String(record.data.artifactId ?? '');
+      if (!artifactId) throw new Error(`Nexus 附件 ${record.id} 缺少 Artifact 标识。`);
+      let bytes: Uint8Array | null = null;
+      let storageEncoding: NexusArtifactStorageEncoding = 'text';
+      if (String(record.data.storageKey ?? '').endsWith('.bin') && artifacts.getBinary) {
+        bytes = await artifacts.getBinary(artifactId, value.tenantId);
+        storageEncoding = 'binary';
+      } else {
+        const content = await artifacts.get(artifactId, value.tenantId);
+        if (content !== null) {
+          const decoded = decodeAttachmentDataUrl(content);
+          bytes = decoded?.bytes ?? Buffer.from(content, 'utf8');
+          storageEncoding = decoded ? 'legacy-data-url' : 'text';
+        }
+      }
+      if (!bytes) throw new Error(`Nexus 附件 ${record.data.name ?? record.id} 的内容不可用。`);
+      normalized.push(await records.update(record.id, value.tenantId, {
+        data: {
+          ...record.data,
+          bytes: bytes.byteLength,
+          digest: createHash('sha256').update(bytes).digest('hex'),
+          storageEncoding,
+        },
+      }, record.revision));
+    }
+    const snapshots = snapshotNexusArtifacts(normalized, workflowId);
+    if (snapshots.length !== active.length) throw new Error('Nexus 附件元数据不完整，无法形成可验证快照。');
+    return snapshots;
+  };
   const reconcileNexusTestRuns = async (workflowId: string, value: Principal) => {
+    const currentArtifacts = await nexusArtifactsForWorkflow(workflowId, value);
+    const currentArtifactSetDigest = nexusArtifactSetDigest(currentArtifacts);
     const recordsForWorkflow = (await records.list(value.tenantId, 'nexus-test-run', { limit: 500 }))
       .filter((record) => record.data.workflowId === workflowId);
     const reconciled: BusinessRecord[] = [];
@@ -439,14 +603,23 @@ export const createBusinessCapabilityApi = (dependencies: {
       const missing = terminal && task?.status === 'completed'
         ? expectedIncludes.filter((expected) => !String(task.result ?? '').includes(expected))
         : expectedIncludes;
-      const status = !task ? 'missing'
+      const attachmentSetChanged = typeof record.data.artifactSetDigest === 'string'
+        && record.data.artifactSetDigest !== currentArtifactSetDigest;
+      const status = attachmentSetChanged ? 'stale'
+        : !task ? 'missing'
         : !terminal ? 'running'
           : task.status === 'completed' && missing.length === 0 ? 'passed' : 'failed';
       if (record.status !== status || JSON.stringify(record.data.missingExpected ?? []) !== JSON.stringify(missing)) {
         try {
           reconciled.push(await records.update(record.id, value.tenantId, {
             status,
-            data: { ...record.data, taskStatus: task?.status ?? 'missing', missingExpected: missing, checkedAt: new Date().toISOString() },
+            data: {
+              ...record.data,
+              taskStatus: task?.status ?? 'missing',
+              missingExpected: missing,
+              checkedAt: new Date().toISOString(),
+              ...(attachmentSetChanged ? { staleReason: 'Nexus 附件集合已变化，请重新运行测试。' } : { staleReason: undefined }),
+            },
           }, record.revision));
           continue;
         } catch {
@@ -778,8 +951,11 @@ export const createBusinessCapabilityApi = (dependencies: {
         specification = await discoverMcpSpecification(specification, endpoint);
       }
       const inspected = validateToolSpecification(parsed.data.protocol, specification);
-      await safeEndpoint(inspected.endpoint, parsed.data.location);
-      const source = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'tool-source', status: parsed.data.enabled ? 'enabled' : 'disabled', data: { ...parsed.data, specification, allowedAgentIds: stringArray(parsed.data.allowedAgentIds), operations: inspected.operations, endpoint: inspected.endpoint, pinnedDigest: createHash('sha256').update(JSON.stringify(specification)).digest('hex') } });
+      const endpoint = await safeEndpoint(inspected.endpoint, parsed.data.location);
+      const health = await probeToolEndpoint(parsed.data.protocol, endpoint);
+      const metadata = inferredToolMetadata(parsed.data, inspected.operations);
+      const authorizationStatus = parsed.data.authType === 'none' ? 'not-required' : 'pending';
+      const source = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'tool-source', status: parsed.data.enabled && authorizationStatus !== 'pending' ? 'enabled' : 'disabled', data: { ...parsed.data, ...metadata, specification, allowedAgentIds: stringArray(parsed.data.allowedAgentIds), operations: inspected.operations, endpoint: inspected.endpoint, pinnedDigest: createHash('sha256').update(JSON.stringify(specification)).digest('hex'), ...health, authorizationStatus, usageCount: 0, successCount: 0, successRate: null } });
       if (tools) syncExternalToolSource(records, tools, source);
       return c.json({ source: presentToolSource(source) }, 201);
     } catch (error) { return c.json({ error: error instanceof Error ? error.message : '工具源校验失败。' }, 400); }
@@ -799,11 +975,35 @@ export const createBusinessCapabilityApi = (dependencies: {
         specification = await discoverMcpSpecification(specification, endpoint);
       }
       const inspected = validateToolSpecification(protocol, specification);
-      await safeEndpoint(inspected.endpoint, merged.location === 'local' ? 'local' : 'internet');
-      const updated = await records.update(source.id, value.tenantId, { status: merged.enabled ? 'enabled' : 'disabled', data: { ...merged, specification, operations: inspected.operations, endpoint: inspected.endpoint, pinnedDigest: createHash('sha256').update(JSON.stringify(specification)).digest('hex') } }, revision);
+      const location = merged.location === 'local' ? 'local' : 'internet';
+      const endpoint = await safeEndpoint(inspected.endpoint, location);
+      const health = await probeToolEndpoint(protocol, endpoint);
+      const normalizedInput = {
+        name: String(merged.name), protocol: protocol as 'openapi' | 'mcp', location: location as 'local' | 'internet', version: String(merged.version), enabled: merged.enabled === true,
+        description: typeof merged.description === 'string' ? merged.description : '',
+        categories: stringArray(merged.categories, 12), capabilityTags: stringArray(merged.capabilityTags, 32),
+        riskLevel: merged.riskLevel === 'high' ? 'high' as const : merged.riskLevel === 'medium' ? 'medium' as const : 'low' as const,
+        authType: ['api-key', 'oauth2', 'service-account'].includes(String(merged.authType)) ? merged.authType as 'api-key' | 'oauth2' | 'service-account' : 'none' as const,
+        visibility: merged.visibility === 'tenant' ? 'tenant' as const : 'private' as const,
+        allowedAgentIds: stringArray(merged.allowedAgentIds), specification,
+      };
+      const metadata = inferredToolMetadata(normalizedInput, inspected.operations);
+      const authorizationStatus = normalizedInput.authType === 'none' ? 'not-required' : 'pending';
+      const updated = await records.update(source.id, value.tenantId, { status: normalizedInput.enabled && authorizationStatus !== 'pending' ? 'enabled' : 'disabled', data: { ...merged, ...normalizedInput, ...metadata, specification, operations: inspected.operations, endpoint: inspected.endpoint, pinnedDigest: createHash('sha256').update(JSON.stringify(specification)).digest('hex'), ...health, authorizationStatus } }, revision);
       if (tools) syncExternalToolSource(records, tools, updated);
       return c.json({ source: presentToolSource(updated) });
     } catch (error) { const result = conflict(error); return c.json(result.body, result.status); }
+  });
+  api.post('/tool-sources/:sourceId/health', async (c) => {
+    const value = principal(c.req.raw.headers); const source = await records.get(c.req.param('sourceId'), value.tenantId);
+    if (!source || source.kind !== 'tool-source' || !canManage(source, value)) return c.json({ error: '工具源不存在或无权检查。' }, 404);
+    try {
+      const endpoint = await safeEndpoint(String(source.data.endpoint ?? ''), source.data.location === 'local' ? 'local' : 'internet');
+      const health = await probeToolEndpoint(source.data.protocol === 'mcp' ? 'mcp' : 'openapi', endpoint);
+      const updated = await records.update(source.id, value.tenantId, { data: { ...source.data, ...health } }, source.revision);
+      if (tools) syncExternalToolSource(records, tools, updated);
+      return c.json({ source: presentToolSource(updated) });
+    } catch (error) { return c.json({ error: error instanceof Error ? error.message : '工具健康检查失败。' }, 400); }
   });
   api.post('/tool-sources/:sourceId/approvals/:approvalId', async (c) => {
     const value = principal(c.req.raw.headers);
@@ -833,6 +1033,8 @@ export const createBusinessCapabilityApi = (dependencies: {
   api.post('/tool-sources/:sourceId/call', async (c) => {
     const value = principal(c.req.raw.headers); const source = await records.get(c.req.param('sourceId'), value.tenantId);
     if (!source || source.kind !== 'tool-source' || source.status !== 'enabled') return c.json({ error: '工具源不存在或未启用。' }, 404);
+    if (sourceHealthStatus(source) !== 'healthy') return c.json({ error: '工具源健康检查未通过。' }, 503);
+    if (!['ready', 'not-required'].includes(sourceAuthorizationStatus(source))) return c.json({ error: '工具源仍待完成授权。' }, 409);
     const body = z.object({ operationId: z.string().min(1).max(200), agentId: z.string().min(1).max(160), args: z.record(z.string(), z.unknown()).default({}), taskId: z.string().uuid().optional(), approvalId: z.string().uuid().optional() }).strict().safeParse(await c.req.json().catch(() => null));
     if (!body.success) return c.json({ error: '工具调用参数无效。' }, 400);
     if (body.data.taskId && !await tasks.getTask(body.data.taskId, value.tenantId)) return c.json({ error: '关联任务不存在或不属于当前租户。' }, 404);
@@ -854,15 +1056,18 @@ export const createBusinessCapabilityApi = (dependencies: {
     const hourlyQuota = Math.min(1_000, Math.max(1, Number(process.env.AXIOM_EXTERNAL_TOOL_CALLS_PER_HOUR ?? 60)));
     if (recent.length >= hourlyQuota) return c.json({ error: `该工具源每小时最多调用 ${hourlyQuota} 次。` }, 429);
     try {
+      const startedAt = Date.now();
       const response = await invokeExternalOperation(source, operation, body.data.args);
       const content = response.content;
       const artifactId = `tool:${source.id}:${randomUUID()}`;
       const stored = artifacts ? await artifacts.put(artifactId, content, value.tenantId) : null;
       const receipt = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'task-action', status: response.ok ? 'completed' : 'failed', data: { action: 'tool-call', sourceId: source.id, sourceVersion: source.data.version, pinnedDigest: source.data.pinnedDigest, operationId: operation.operationId, agentId: body.data.agentId, taskId: body.data.taskId, responseStatus: response.responseStatus, artifactId, storageKey: stored?.key, bytes: Buffer.byteLength(content), signature } });
+      await recordExternalToolOutcome(records, source.id, value.tenantId, response.ok, Date.now() - startedAt);
       if (stored && artifactCatalog) await artifactCatalog.register({ id: artifactId, tenantId: value.tenantId, taskId: body.data.taskId ?? receipt.id, source: 'tool', storageKey: stored.key, bytes: stored.bytes, mimeType: 'application/json', referenceKey: `external:${source.id}:${receipt.id}` }).catch(() => undefined);
       return c.json({ ok: response.ok, responseStatus: response.responseStatus, artifactId, receiptId: receipt.id }, response.ok ? 200 : 502);
     } catch (error) {
       const message = error instanceof Error ? error.message : '工具调用失败。';
+      await recordExternalToolOutcome(records, source.id, value.tenantId, false, 0);
       await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'task-action', status: 'failed', data: { action: 'tool-call', sourceId: source.id, sourceVersion: source.data.version, pinnedDigest: source.data.pinnedDigest, operationId: operation.operationId, agentId: body.data.agentId, taskId: body.data.taskId, signature, error: message.slice(0, 2_000) } }).catch(() => undefined);
       return c.json({ error: message }, 502);
     }
@@ -871,7 +1076,7 @@ export const createBusinessCapabilityApi = (dependencies: {
   api.post('/nexus/:workflowId/artifacts', async (c) => {
     const value = principal(c.req.raw.headers); const item = await ownedWorkflow(c.req.param('workflowId'), value);
     if (!item) return c.json({ error: 'Nexus 不存在或无权修改。' }, 404);
-    if (!artifacts) return c.json({ error: 'Artifact 存储未配置。' }, 503);
+    if (!artifacts?.putBinary) return c.json({ error: '当前 Artifact 存储不支持二进制附件，请配置文件或 S3 兼容存储。' }, 503);
     const parsed = nexusArtifactSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: '附件内容无效。' }, 400);
     if (parsed.data.dataBase64.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(parsed.data.dataBase64)) return c.json({ error: '附件 Base64 内容无效。' }, 400);
@@ -879,9 +1084,8 @@ export const createBusinessCapabilityApi = (dependencies: {
     const allowedMimes = /^(?:text\/|image\/|application\/(?:pdf|json|xml|vnd\.openxmlformats-officedocument\.|msword))/i;
     if (!allowedMimes.test(parsed.data.mimeType) || bytes.byteLength > 10 * 1024 * 1024) return c.json({ error: '附件类型不支持或超过 10 MB。' }, 413);
     const artifactId = `nexus:${item.id}:${randomUUID()}`;
-    const content = `data:${parsed.data.mimeType};base64,${bytes.toString('base64')}`;
-    const stored = await artifacts.put(artifactId, content, value.tenantId);
-    const artifact = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'nexus-artifact', status: 'active', data: { workflowId: item.id, workflowVersion: item.version, artifactId, name: parsed.data.name, mimeType: parsed.data.mimeType, bytes: bytes.byteLength, digest: createHash('sha256').update(bytes).digest('hex'), storageKey: stored.key } });
+    const stored = await artifacts.putBinary(artifactId, bytes, value.tenantId, parsed.data.mimeType);
+    const artifact = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'nexus-artifact', status: 'active', data: { workflowId: item.id, workflowVersion: item.version, artifactId, name: parsed.data.name, mimeType: parsed.data.mimeType, bytes: bytes.byteLength, digest: createHash('sha256').update(bytes).digest('hex'), storageKey: stored.key, storageEncoding: 'binary' } });
     await artifactCatalog?.register({ id: artifactId, tenantId: value.tenantId, taskId: item.id, source: 'upload', storageKey: stored.key, bytes: stored.bytes, mimeType: parsed.data.mimeType, referenceKey: `nexus:${item.id}:${artifact.id}` });
     return c.json({ artifact }, 201);
   });
@@ -893,14 +1097,19 @@ export const createBusinessCapabilityApi = (dependencies: {
     const catalogRecord = await artifactCatalog.get(value.tenantId, parsed.data.artifactId);
     if (!catalogRecord || catalogRecord.status !== 'active' || catalogRecord.bytes > 10 * 1024 * 1024) return c.json({ error: 'Artifact 不存在、不属于当前租户或超过 10 MB。' }, 404);
     if (!/^(?:text\/|image\/|application\/(?:pdf|json|xml|vnd\.openxmlformats-officedocument\.|msword))/i.test(catalogRecord.mimeType ?? 'application/octet-stream')) return c.json({ error: 'Artifact MIME 类型不支持。' }, 415);
-    const content = await artifacts.get(parsed.data.artifactId, value.tenantId);
-    if (content === null) return c.json({ error: 'Artifact 内容不可用。' }, 404);
+    const binaryStorage = catalogRecord.storageKey?.endsWith('.bin') === true;
+    const binary = binaryStorage && artifacts.getBinary ? await artifacts.getBinary(parsed.data.artifactId, value.tenantId) : null;
+    const content = binary ? null : await artifacts.get(parsed.data.artifactId, value.tenantId);
+    if (!binary && content === null) return c.json({ error: 'Artifact 内容不可用。' }, 404);
+    const decoded = content ? decodeAttachmentDataUrl(content) : null;
+    const contentBytes = binary ?? decoded?.bytes ?? Buffer.from(content ?? '', 'utf8');
+    const storageEncoding: NexusArtifactStorageEncoding = binary ? 'binary' : decoded ? 'legacy-data-url' : 'text';
     const existing = (await records.list(value.tenantId, 'nexus-artifact', { limit: 500 }))
       .find((record) => record.status === 'active'
         && record.data.workflowId === item.id
         && record.data.artifactId === parsed.data.artifactId);
     if (existing) return c.json({ artifact: existing, idempotent: true });
-    const linked = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'nexus-artifact', status: 'active', data: { workflowId: item.id, workflowVersion: item.version, artifactId: parsed.data.artifactId, name: parsed.data.name ?? parsed.data.artifactId, mimeType: catalogRecord.mimeType, bytes: catalogRecord.bytes, storageKey: catalogRecord.storageKey, linked: true } });
+    const linked = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'nexus-artifact', status: 'active', data: { workflowId: item.id, workflowVersion: item.version, artifactId: parsed.data.artifactId, name: parsed.data.name ?? parsed.data.artifactId, mimeType: catalogRecord.mimeType, bytes: contentBytes.byteLength, digest: createHash('sha256').update(contentBytes).digest('hex'), storageKey: catalogRecord.storageKey, storageEncoding, linked: true } });
     await artifactCatalog.register({ id: parsed.data.artifactId, tenantId: value.tenantId, taskId: item.id, source: catalogRecord.source, storageKey: catalogRecord.storageKey, bytes: catalogRecord.bytes, mimeType: catalogRecord.mimeType, referenceKey: `nexus:${item.id}:${linked.id}` });
     return c.json({ artifact: linked }, 201);
   });
@@ -915,8 +1124,16 @@ export const createBusinessCapabilityApi = (dependencies: {
     if (!item || !artifacts) return c.json({ error: '附件不可用。' }, 404);
     const record = await records.get(c.req.param('artifactId'), value.tenantId);
     if (!record || record.kind !== 'nexus-artifact' || record.data.workflowId !== item.id) return c.json({ error: '附件不存在或不属于当前 Nexus。' }, 404);
-    const content = await artifacts.get(String(record.data.artifactId), value.tenantId);
-    return content ? c.json({ artifact: record, dataUrl: content }) : c.json({ error: '附件内容不可用。' }, 404);
+    const artifactId = String(record.data.artifactId);
+    if (record.data.storageEncoding === 'binary') {
+      if (!artifacts.getBinary) return c.json({ error: '当前 Artifact 存储不支持二进制附件读取。' }, 503);
+      const content = await artifacts.getBinary(artifactId, value.tenantId);
+      return content ? c.json({ artifact: record, dataUrl: attachmentDataUrl(content, String(record.data.mimeType ?? 'application/octet-stream')) }) : c.json({ error: '附件内容不可用。' }, 404);
+    }
+    const content = await artifacts.get(artifactId, value.tenantId);
+    if (!content) return c.json({ error: '附件内容不可用。' }, 404);
+    const decoded = decodeAttachmentDataUrl(content);
+    return c.json({ artifact: record, dataUrl: decoded ? content : attachmentDataUrl(Buffer.from(content, 'utf8'), String(record.data.mimeType ?? 'text/plain')) });
   });
 
   api.get('/nexus/:workflowId/tests', async (c) => {
@@ -942,15 +1159,19 @@ export const createBusinessCapabilityApi = (dependencies: {
     if (!executablePlan) return c.json({ error: 'Nexus 没有可执行计划。' }, 409);
     const cases = (await records.list(value.tenantId, 'nexus-test-case', { limit: 500 })).filter((record) => record.data.workflowId === item.id);
     if (!cases.length) return c.json({ error: '请先添加至少一个测试用例。' }, 409);
+    let artifactSnapshots: NexusArtifactSnapshot[];
+    try { artifactSnapshots = await nexusArtifactsForWorkflow(item.id, value); }
+    catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Nexus 附件快照创建失败。' }, 409); }
+    const artifactSetDigest = nexusArtifactSetDigest(artifactSnapshots);
     const runs = [];
     for (const testCase of cases.slice(0, 20)) {
       const task = await tasks.createTask({ tenantId: value.tenantId, userId: value.userId, sessionId: `agent-nexus-test-${item.id}`, templateId: item.id, title: `${item.name} · 测试`, input: String(testCase.data.input), mode: item.definition.mode, plan: { ...executablePlan, version: item.version }, policy: item.definition.policy });
       const run = await records.create({
         tenantId: value.tenantId, userId: value.userId, ownerId: value.userId,
         kind: 'nexus-test-run', status: 'running',
-        data: { workflowId: item.id, workflowVersion: item.version, testCaseId: testCase.id, taskId: task.id, expectedIncludes: testCase.data.expectedIncludes },
+        data: { workflowId: item.id, workflowVersion: item.version, testCaseId: testCase.id, taskId: task.id, expectedIncludes: testCase.data.expectedIncludes, artifactSetDigest, artifacts: artifactSnapshots },
       });
-      runs.push({ id: run.id, testCaseId: testCase.id, taskId: task.id, expectedIncludes: testCase.data.expectedIncludes });
+      runs.push({ id: run.id, testCaseId: testCase.id, taskId: task.id, expectedIncludes: testCase.data.expectedIncludes, artifactSetDigest });
     }
     coordinator.nudge();
     return c.json({ workflowId: item.id, workflowVersion: item.version, runs }, 202);
@@ -973,6 +1194,10 @@ export const createBusinessCapabilityApi = (dependencies: {
     if (!parsed.success) return c.json({ error: '发布说明无效。' }, 400);
     const compiled = await compile(item, value);
     if (compiled.issues.length) return c.json({ error: 'Nexus 未通过发布校验。', issues: compiled.issues }, 409);
+    let artifactSnapshots: NexusArtifactSnapshot[];
+    try { artifactSnapshots = await nexusArtifactsForWorkflow(item.id, value); }
+    catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Nexus 附件快照创建失败。' }, 409); }
+    const artifactSetDigest = nexusArtifactSetDigest(artifactSnapshots);
     const testCases = (await records.list(value.tenantId, 'nexus-test-case', { limit: 500 }))
       .filter((record) => record.data.workflowId === item.id && Number(record.data.workflowVersion) === item.version);
     if (!testCases.length) return c.json({ error: '发布前至少需要一个当前版本的测试用例。' }, 409);
@@ -983,13 +1208,16 @@ export const createBusinessCapabilityApi = (dependencies: {
       const testCaseId = String(run.data.testCaseId ?? '');
       if (testCaseId && !latestByCase.has(testCaseId)) latestByCase.set(testCaseId, run);
     }
-    const notPassing = testCases.filter((testCase) => latestByCase.get(testCase.id)?.status !== 'passed');
+    const notPassing = testCases.filter((testCase) => {
+      const latest = latestByCase.get(testCase.id);
+      return latest?.status !== 'passed' || latest.data.artifactSetDigest !== artifactSetDigest;
+    });
     if (notPassing.length) return c.json({ error: '当前版本仍有未通过的 Nexus 测试。', testCaseIds: notPassing.map((record) => record.id) }, 409);
     const published = item.status === 'published' ? item : await templates.updateTemplate(item.id, value.tenantId, { status: 'published', updatedBy: value.userId });
-    const digest = createHash('sha256').update(JSON.stringify(published.definition)).digest('hex');
+    const digest = nexusReleaseDigest(published.definition, artifactSnapshots);
     const existing = (await records.list(value.tenantId, 'nexus-release', { limit: 500 })).find((record) => record.data.workflowId === item.id && record.data.digest === digest);
     if (existing) return c.json({ release: existing, workflow: published, idempotent: true });
-    const release = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'nexus-release', status: 'published', data: { workflowId: published.id, workflowVersion: published.version, name: published.name, note: parsed.data.note, digest, definition: published.definition } });
+    const release = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'nexus-release', status: 'published', data: { workflowId: published.id, workflowVersion: published.version, name: published.name, note: parsed.data.note, digest, definition: published.definition, artifactSetDigest, artifacts: artifactSnapshots } });
     return c.json({ release, workflow: published }, 201);
   });
   api.get('/nexus/:workflowId/releases/:leftId/diff/:rightId', async (c) => {
@@ -1002,9 +1230,11 @@ export const createBusinessCapabilityApi = (dependencies: {
     const leftWorkflow = object(leftDefinition.workflow); const rightWorkflow = object(rightDefinition.workflow);
     const leftNodes = Array.isArray(leftWorkflow.nodes) ? leftWorkflow.nodes.map(object) : []; const rightNodes = Array.isArray(rightWorkflow.nodes) ? rightWorkflow.nodes.map(object) : [];
     const leftEdges = Array.isArray(leftWorkflow.edges) ? leftWorkflow.edges.map(object) : []; const rightEdges = Array.isArray(rightWorkflow.edges) ? rightWorkflow.edges.map(object) : [];
+    const leftArtifacts = Array.isArray(left.data.artifacts) ? left.data.artifacts.map(object) : [];
+    const rightArtifacts = Array.isArray(right.data.artifacts) ? right.data.artifacts.map(object) : [];
     const changes = (before: Array<Record<string, unknown>>, after: Array<Record<string, unknown>>) => {
-      const beforeById = new Map(before.map((value) => [String(value.id ?? ''), value]));
-      const afterById = new Map(after.map((value) => [String(value.id ?? ''), value]));
+      const beforeById = new Map(before.map((value) => [String(value.id ?? value.artifactRecordId ?? ''), value]));
+      const afterById = new Map(after.map((value) => [String(value.id ?? value.artifactRecordId ?? ''), value]));
       return {
         added: [...afterById.keys()].filter((id) => id && !beforeById.has(id)),
         removed: [...beforeById.keys()].filter((id) => id && !afterById.has(id)),
@@ -1018,7 +1248,8 @@ export const createBusinessCapabilityApi = (dependencies: {
       stepCount: { left: leftSteps.length, right: rightSteps.length },
       nodeCount: { left: leftNodes.length, right: rightNodes.length },
       edgeCount: { left: leftEdges.length, right: rightEdges.length },
-      changes: { steps: changes(leftSteps, rightSteps), nodes: changes(leftNodes, rightNodes), edges: changes(leftEdges, rightEdges) },
+      artifactCount: { left: leftArtifacts.length, right: rightArtifacts.length },
+      changes: { steps: changes(leftSteps, rightSteps), nodes: changes(leftNodes, rightNodes), edges: changes(leftEdges, rightEdges), artifacts: changes(leftArtifacts, rightArtifacts) },
     });
   });
   api.post('/nexus/:workflowId/restore', async (c) => {

@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { z } from 'zod';
 import { FileArtifactStore } from './artifactStore.js';
-import { allowedHttpHost, ToolApprovalRequiredError, ToolRegistry } from './toolRegistry.js';
+import { allowedHttpHost, ToolApprovalRequiredError, ToolRegistry, type RegisteredTool } from './toolRegistry.js';
 import type { AgentStore, WorkflowTask } from './contracts.js';
 
 const task = (id = 'tool-task'): WorkflowTask => ({
@@ -35,6 +36,48 @@ test('tool catalog exposes risk, schema, timeout, and approval metadata', () => 
   assert.equal(catalog.find((tool) => tool.name === 'workspace.search')?.executionBoundary, 'sandbox');
   assert.equal(catalog.find((tool) => tool.name === 'workspace.write')?.executionBoundary, 'host-bounded');
   assert.equal(catalog.find((tool) => tool.name === 'database.query')?.executionBoundary, 'host-bounded');
+});
+
+test('semantic external-tool routing applies Top-K, health, authorization, and Agent permissions', () => {
+  const registry = new ToolRegistry({ execute: async () => ({ stdout: '', stderr: '', exitCode: 0, durationMs: 1, auditId: 'fake' }) } as never);
+  const addExternal = (name: string, overrides: Partial<NonNullable<RegisteredTool['routing']>> = {}) => registry.upsert({
+    name,
+    description: '查询城市天气',
+    risk: 'low',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    schema: z.object({}).strict(),
+    timeoutMs: 5_000,
+    routing: {
+      sourceId: `source-${name}`,
+      categories: ['research'],
+      capabilityTags: ['天气', 'weather'],
+      healthStatus: 'healthy',
+      authorizationStatus: 'not-required',
+      allowedAgentIds: ['builder'],
+      sourceRisk: 'low',
+      successRate: 0.9,
+      latencyMs: 100,
+      ...overrides,
+    },
+    handler: async () => ({ stdout: 'ok', stderr: '', exitCode: 0, durationMs: 1, auditId: 'external' }),
+  });
+  for (let index = 0; index < 10; index += 1) addExternal(`external_weather_${index}`);
+  addExternal('external_unhealthy', { healthStatus: 'unhealthy' });
+  addExternal('external_pending_auth', { authorizationStatus: 'pending' });
+  addExternal('external_wrong_agent', { allowedAgentIds: ['analyst'] });
+
+  const selected = registry.catalogForTask({ query: '查询上海天气并形成简报', agentIds: ['builder'], externalLimit: 6 });
+  const externalNames = selected.filter((tool) => tool.routing).map((tool) => tool.name);
+  assert.equal(externalNames.length, 6);
+  assert.ok(externalNames.every((name) => /^external_weather_/u.test(name)));
+  assert.equal(selected.some((tool) => tool.name === 'external_unhealthy'), false);
+  assert.equal(selected.some((tool) => tool.name === 'external_pending_auth'), false);
+  assert.equal(selected.some((tool) => tool.name === 'external_wrong_agent'), false);
+
+  const unrelated = registry.catalogForTask({ query: '修改本地文件中的标题', agentIds: ['builder'], externalLimit: 6 });
+  assert.equal(unrelated.some((tool) => tool.routing), false);
+  const forbiddenExplicit = registry.catalogForTask({ query: '查询天气', agentIds: ['builder'], explicitNames: ['external_wrong_agent'] });
+  assert.equal(forbiddenExplicit.some((tool) => tool.name === 'external_wrong_agent'), false);
 });
 
 test('agent.propose creates a private draft through the AgentStore boundary', async () => {

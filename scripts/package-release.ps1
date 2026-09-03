@@ -80,7 +80,7 @@ $installNote = @"
 
 This archive never includes .env.local, local databases, Artifact data, logs,
 node_modules, demo files, QA screenshots, or API keys.
-See README.md and docs/migration-v2.md before upgrading an existing deployment.
+See README.md and docs/migration-v2.1.md before upgrading an existing deployment.
 "@
 Set-Content -LiteralPath (Join-Path $stagingRoot "DEPLOY.txt") -Value $installNote -Encoding UTF8
 

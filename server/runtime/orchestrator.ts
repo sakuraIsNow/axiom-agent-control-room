@@ -27,7 +27,7 @@ import type { AgentMemory } from './memoryClient.js';
 import type { ModelClient, ModelToolDefinition } from './modelClient.js';
 import { agentCatalog, appendMissingAgentDirectory } from './agentCatalog.js';
 import { ToolApprovalRequiredError, ToolRegistry, type ToolExecution } from './toolRegistry.js';
-import { executeWorkflowSpecialist, isWorkflowSpecialist } from './workflowSpecialists.js';
+import { executeWorkflowSpecialist, isWorkflowSpecialist, type WorkflowSpecialistAttachment } from './workflowSpecialists.js';
 import { routeSkillIds, runtimeSkillCatalog, skillInstructions } from './skillCatalog.js';
 import { evaluateWorkflowConditions, explainWorkflowConditions } from './workflowConditions.js';
 import { analyzeWorkflowDag, workflowDagIssueText } from './workflowDag.js';
@@ -37,6 +37,8 @@ import type { ModelRoutingPolicy } from './modelRouting.js';
 import type { ArtifactStore } from './artifactStore.js';
 import type { ArtifactCatalog } from './artifactCatalog.js';
 import type { BusinessCapabilityStore } from './businessCapabilityStore.js';
+import { decodeAttachmentDataUrl } from './attachmentContent.js';
+import { nexusArtifactSetDigest, parseNexusArtifactSnapshot } from './nexusArtifacts.js';
 
 const nativeToolNameMaxLength = 64;
 
@@ -644,6 +646,7 @@ export class WorkflowOrchestrator {
   private readonly activeStepControllers = new Map<string, Map<string, AbortController>>();
   private readonly guidanceLocks = new Map<string, Promise<void>>();
   private readonly memoryPolicies = new Map<string, { enabled: boolean; disabledAgentIds: Set<string> }>();
+  private readonly nexusArtifactCache = new Map<string, Promise<WorkflowSpecialistAttachment[]>>();
   private readonly stepConcurrency: number;
   private readonly reasoningStepConcurrency: number;
   private readonly stepMaxAttempts: number;
@@ -790,6 +793,70 @@ export class WorkflowOrchestrator {
     const resolved = this.modelResolver(task).then((model) => model ?? this.model);
     this.taskModels.set(task.id, resolved);
     return resolved;
+  }
+
+  private nexusAttachments(task: WorkflowTask) {
+    const cached = this.nexusArtifactCache.get(task.id);
+    if (cached) return cached;
+    const loading = this.loadNexusAttachments(task);
+    this.nexusArtifactCache.set(task.id, loading);
+    return loading;
+  }
+
+  private async loadNexusAttachments(task: WorkflowTask): Promise<WorkflowSpecialistAttachment[]> {
+    if (!task.templateId || !this.businessCapabilities) return [];
+    const parseSnapshots = (value: unknown) => Array.isArray(value)
+      ? value.map(parseNexusArtifactSnapshot).filter((item): item is NonNullable<typeof item> => Boolean(item))
+      : [];
+    let source = (await this.businessCapabilities.list(task.tenantId, 'nexus-test-run', { limit: 500 }))
+      .find((record) => record.data.taskId === task.id && record.data.workflowId === task.templateId);
+    if (!source) {
+      const events = await this.store.getEvents(task.id);
+      const releaseId = events.map((event) => event.payload.nexusReleaseId).find((value): value is string => typeof value === 'string' && value.length > 0);
+      source = releaseId ? await this.businessCapabilities.get(releaseId, task.tenantId) ?? undefined : undefined;
+      if (!source) {
+        source = (await this.businessCapabilities.list(task.tenantId, 'nexus-release', { limit: 500 }))
+          .find((record) => record.status === 'published'
+            && record.data.workflowId === task.templateId
+            && Number(record.data.workflowVersion) === Number(task.plan?.version));
+      }
+      if (source && (source.kind !== 'nexus-release' || source.status !== 'published')) throw new Error('Agent Nexus 发布快照无效或已撤回。');
+    }
+    if (!source) return [];
+    const snapshots = parseSnapshots(source.data.artifacts);
+    if (snapshots.length !== (Array.isArray(source.data.artifacts) ? source.data.artifacts.length : 0)) {
+      throw new Error('Agent Nexus 附件快照已损坏。');
+    }
+    const expectedSetDigest = typeof source.data.artifactSetDigest === 'string' ? source.data.artifactSetDigest : '';
+    if (!expectedSetDigest || nexusArtifactSetDigest(snapshots) !== expectedSetDigest) throw new Error('Agent Nexus 附件集合摘要校验失败。');
+    if (!snapshots.length) return [];
+    if (!this.artifactStore) throw new Error('Agent Nexus 附件存储不可用。');
+    const configuredBudget = Number(process.env.AXIOM_NEXUS_ARTIFACT_BUDGET_BYTES ?? 20 * 1024 * 1024);
+    const budget = Math.min(64 * 1024 * 1024, Math.max(1 * 1024 * 1024, Number.isFinite(configuredBudget) ? configuredBudget : 20 * 1024 * 1024));
+    if (snapshots.reduce((total, artifact) => total + artifact.bytes, 0) > budget) throw new Error(`Agent Nexus 附件总量超过 ${Math.floor(budget / 1024 / 1024)} MB 运行预算。`);
+    const allowedMime = /^(?:text\/|image\/|application\/(?:pdf|json|xml|vnd\.openxmlformats-officedocument\.|msword))/iu;
+    return Promise.all(snapshots.map(async (snapshot) => {
+      if (!allowedMime.test(snapshot.mimeType) || snapshot.bytes > 10 * 1024 * 1024) throw new Error(`Agent Nexus 附件 ${snapshot.name} 的类型或大小不符合运行策略。`);
+      const record = await this.businessCapabilities!.get(snapshot.artifactRecordId, task.tenantId);
+      if (!record || record.kind !== 'nexus-artifact' || record.data.workflowId !== task.templateId || record.data.artifactId !== snapshot.artifactId) {
+        throw new Error(`Agent Nexus 附件 ${snapshot.name} 不属于当前租户或流程。`);
+      }
+      let content: Uint8Array | null = null;
+      if (snapshot.storageEncoding === 'binary') {
+        if (!this.artifactStore!.getBinary) throw new Error('当前 Artifact 存储不支持二进制附件读取。');
+        content = await this.artifactStore!.getBinary(snapshot.artifactId, task.tenantId);
+      } else {
+        const stored = await this.artifactStore!.get(snapshot.artifactId, task.tenantId);
+        if (stored !== null) {
+          const decoded = snapshot.storageEncoding === 'legacy-data-url' ? decodeAttachmentDataUrl(stored) : null;
+          content = decoded?.bytes ?? Buffer.from(stored, 'utf8');
+        }
+      }
+      if (!content || content.byteLength !== snapshot.bytes || createHash('sha256').update(content).digest('hex') !== snapshot.digest) {
+        throw new Error(`Agent Nexus 附件 ${snapshot.name} 的内容摘要校验失败。`);
+      }
+      return { ...snapshot, content };
+    }));
   }
 
   private plannerModelCatalog(task: WorkflowTask) {
@@ -1431,12 +1498,15 @@ Do not claim tools or evidence that are not available.`,
       let specialistAttempt = 0;
       for (specialistAttempt = 1; specialistAttempt <= attemptsAllowed; specialistAttempt += 1) {
         try {
+          const specialistAttachments = specialistId === 'vision-agent' || specialistId === 'document-agent'
+            ? await this.nexusAttachments(task)
+            : [];
           specialistResult = await executeWorkflowSpecialist(specialistId, [
             `用户输入：\n${task.input}`,
             `当前 Agent 目标：\n${step.objective}`,
             dependencyContext ? `上游 Agent 输出（优先作为本 Agent 输入）：\n${dependencyContext}` : '',
             humanNotes ? `人工补充：\n${humanNotes}` : '',
-          ].filter(Boolean).join('\n\n'), specialistSignal);
+          ].filter(Boolean).join('\n\n'), specialistSignal, specialistAttachments, await this.modelForTask(task));
           break;
         } catch (caught) {
           lastSpecialistError = caught;
@@ -1537,9 +1607,12 @@ Do not claim tools or evidence that are not available.`,
     const stepSignal = AbortSignal.any([signal, AbortSignal.timeout(stepTimeoutMs)]);
     const attemptsAllowed = step.failureStrategy === 'retry' ? this.stepMaxAttempts : 1;
     const availableTools = canUseTools && this.tools?.enabled()
-      ? this.tools.catalog()
-        .filter((tool) => !allowedTools.length || allowedTools.includes(tool.name))
-        .slice(0, 16)
+      ? this.tools.catalogForTask({
+        query: `${task.input}\n${step.objective}`,
+        agentIds: [step.role, step.agentContract?.agentId, agentId].filter((item): item is string => Boolean(item)),
+        explicitNames: allowedTools,
+        externalLimit: 6,
+      }).slice(0, 24)
       : [];
     const nativeToolAliases = buildNativeToolAliasMap(availableTools.map((tool) => tool.name));
     const toolDefinitions: ModelToolDefinition[] = availableTools.map((tool) => ({
@@ -2802,6 +2875,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
     } finally {
       this.taskModels.delete(initialTask.id);
       this.activeStepControllers.delete(initialTask.id);
+      this.nexusArtifactCache.delete(initialTask.id);
     }
   }
 }

@@ -10,7 +10,7 @@
 
 ## 最新本机验证（2026-09-03）
 
-本轮门禁开始前已确认 Docker、`ubuntu:22.04` 沙箱镜像和独立 PostgreSQL 测试库可用。在当前 Windows 单节点、本地测试数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1524.12 RPS / P95 10.11ms`、Readiness `2339.63 RPS / P95 5.45ms`、运行观测 `675.24 RPS / P95 22.18ms`、任务列表 `1424.44 RPS / P95 9.96ms`。独立 PostgreSQL 测试库下单元/API 门禁为 `373 passed / 0 failed / 0 skipped`；`npm run qa:all` 为 `25 passed / 0 failed / 4 skipped`，25 项均在第一次尝试通过。本次复杂 Runtime 产生 874 个连续事件、761 个可见流式增量和 58,899 Token，Reviewer 45 分触发一次真实人工确认后正常完成，并交付 1,006 字符 Artifact。4 个跳过项分别是未配置的 TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar 命令，跳过不等于通过。该基线包含真实模型任务、PostgreSQL 多 Worker 业务记录测试、Docker 沙箱探测和浏览器回归，但不代表公网容量；运行 `npm run perf:smoke` 和 `npm run qa:all` 可在本机重新生成完整结果，生成的结果文件默认不提交到仓库。
+本轮门禁开始前已确认 Docker、`ubuntu:22.04` 沙箱镜像和 PostgreSQL 15 容器可用。在当前 Windows 单节点、本地测试数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1722.04 RPS / P95 8.86ms`、Readiness `2460.17 RPS / P95 5.12ms`、运行观测 `929.22 RPS / P95 11.57ms`、任务列表 `2074.96 RPS / P95 5.77ms`。`npm test` 为 `379 passed / 0 failed / 1 skipped`；唯一跳过的 PostgreSQL 业务契约随后在独立临时数据库中补跑为 `1 passed / 0 failed / 0 skipped`，测试库已删除。`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped`，24 项均在第一次尝试通过；扣除已补跑的 PostgreSQL，剩余 4 项为未配置的 MemoryCore HTTP、MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar。真实复杂 Runtime 产生 732 个连续事件、624 个可见流式增量和 46,523 Token，Reviewer 45 分触发一次真实人工确认后正常完成，并交付 568 字符 Artifact。该基线包含真实模型任务、PostgreSQL 业务记录测试、Docker 沙箱探测和浏览器回归，但不代表公网容量；跳过不等于通过。
 
 ## 当前真实能力
 
@@ -29,6 +29,8 @@
 | 可观测性 | 基础可用 | Prometheus 文本指标、持久任务/事件运营快照和告警 API 已启用；进程内 counters 重启清零，OTel exporter 尚未接入 |
 | Harness/Codex transport | 协议级完成，现场接入待配置 | DeepSeek ACP 与 Codex app-server v2 JSON-RPC stdio、Thread/Turn/Item 事件、审批回放、断点恢复和断流补偿已通过 fake sidecar；真实 sidecar 需固定版本和 workspace |
 | Agent Nexus 控制流 | 已可用 | 条件 DSL、多 Loop/嵌套 Loop（最多 256 步）、分支事件、DAG 展开和节点级局部重跑已通过单元/API 回归 |
+| Nexus 二进制附件 | 单节点已可用，多 Worker 待外部存储验收 | 测试与 Release 固定附件集合和 SHA-256；视觉/文档 Agent 读取真实内容，运行时校验租户、流程、MIME、大小和摘要；当前本地目录只适合单 Worker |
+| MCP/OpenAPI 能力路由 | 无认证服务已可用 | 能力分类、健康探测、Agent 权限、调用质量和任务级 Top-K 已进入统一 Tool Registry；认证型 MCP 保持待授权，加密 Secret/OAuth 代理尚未完成 |
 | 业务能力 V2 | 受控环境可用 | 动态 Replanner、结构化交接、证据图、项目空间、Nexus 附件/发布、动态工具、长期记忆策略、交付后动作、Agent 干预、协作、反馈、解决方案、智能选择和运行预估均复用持久任务事实源 |
 | 插件发布与恢复 | 已可用 | 发布前检查完整结构、直连网络、外部资源、字段冲突和工具权限；修改后自动回草稿，历史版本以新版本恢复；Prompt 运行与 Mini App 打开前均重读当前版本；可选 HMAC 签名覆盖内容、权限和发布身份，内容、权限风险、签名或验签配置漂移时拒绝运行 |
 | 租户内插件市场 | 已可用 | 作者提交具体版本，签名租户 `owner/admin` 审核后生成不可变市场快照；安装固定版本，新版需显式升级；撤回版本立即禁止启动和运行，并可恢复到仍有效的安全审核版本。当前范围是租户内市场，不是跨租户公共应用商店 |
@@ -57,8 +59,9 @@
 ### 3. 工具与执行安全
 
 - 制作包含 `node`、`npm`、`git`、`rg` 等依赖的专用 sandbox image，替换通用 `ubuntu:22.04`。
-- 将 Tool Registry、参数 schema、审批策略、超时和结果 Artifact 正式接入 Planner/Builder workflow。当前沙箱是安全边界，不等于模型已经拥有可审计工具调用能力。
-- 对写文件、网络访问、凭证读取和发布操作增加人工批准或租户级策略。
+- Tool Registry、参数 schema、审批、配额、超时、审计和结果 Artifact 已接入 Planner/Builder workflow；部署时仍需按租户复核工具 allowlist 和写操作政策。
+- 为 MCP API Key、OAuth 2 和服务账号实现加密 Secret 引用、授权回调、Token 刷新和撤销。认证完成前保持待授权，不允许把 Secret 写进 specification 或模型上下文。
+- 建立审核后的能力包市场、后台定时健康巡检、熔断恢复和租户调用/schema 预算；不把大量第三方 MCP 无审核地全量暴露给所有 Agent。
 
 ### 4. Harness、MemoryCore 与 Nexus 现场验收
 
