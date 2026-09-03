@@ -30,6 +30,22 @@ const changedPixels = (first, second) => {
   return changed;
 };
 
+const screenshotPage = async (targetPage, options) => {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await targetPage.screenshot({ ...options, animations: 'disabled', timeout: 30_000 });
+    } catch (error) {
+      lastError = error;
+      const transientCaptureFailure = error instanceof Error
+        && /Page\.captureScreenshot.*Unable to capture screenshot/i.test(error.message);
+      if (!transientCaptureFailure || attempt === 3 || targetPage.isClosed()) throw error;
+      await targetPage.waitForTimeout(250 * attempt);
+    }
+  }
+  throw lastError;
+};
+
 const layout = async (page) => page.evaluate(() => {
   const board = document.querySelector('.dash-task-board')?.getBoundingClientRect();
   const orbit = document.querySelector('.dash-orbit-stage, .dash-carousel-empty')?.getBoundingClientRect();
@@ -298,7 +314,7 @@ for (const [index, title] of ['每日 Agent 行业简报', '每日代码质量�
 // readiness signal. The dashboard root below is the actual UI contract.
 await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
 await page.locator('.axiom-dashboard').waitFor({ state: 'visible', timeout: 30_000 });
-const dashboardShot = await page.screenshot({ path: resolve(outputDir, 'dashboard-default.png'), fullPage: false });
+const dashboardShot = await screenshotPage(page, { path: resolve(outputDir, 'dashboard-default.png'), fullPage: false });
 const dashboardPixels = pixelStats(dashboardShot);
 const dashboardLayout = await layout(page);
 const currentModel = (await page.locator('.dash-header-state strong').textContent())?.trim() ?? '';
@@ -348,7 +364,7 @@ const deepGrayThemeReadable = await page.locator('.axiom-dashboard').evaluate((d
     && contrast(ink, background) >= 7
     && contrast(muted, background) >= 4.5;
 });
-await page.screenshot({ path: resolve(outputDir, 'dashboard-theme-deep-gray.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-theme-deep-gray.png'), fullPage: false });
 await page.locator('.theme-trigger').first().click();
 await page.locator('.theme-option[data-theme-id="obsidian"]').click();
 const dailyProcessVisible = await page.getByText('每日工作进程', { exact: true }).count() === 1;
@@ -406,7 +422,7 @@ const settingsUseDashboardGlass = await page.locator('.settings-panel').evaluate
   const style = getComputedStyle(element);
   return style.backgroundImage.includes('radial-gradient') && style.backdropFilter.includes('blur') && style.borderRadius === '8px';
 });
-await page.screenshot({ path: resolve(outputDir, 'dashboard-settings.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-settings.png'), fullPage: false });
 await page.locator('.settings-panel .icon-button').first().click();
 
 await page.locator('.dash-header-actions button[title="生产就绪"]').click();
@@ -421,7 +437,7 @@ const readinessUsesDashboardGlass = await readinessPanel.evaluate((element) => {
   return style.backgroundImage.includes('radial-gradient') && style.backdropFilter.includes('blur') && Number.parseFloat(style.fontSize) >= 16;
 });
 const readinessTimeRemoved = await readinessPanel.locator('.readiness-time').count() === 0;
-await page.screenshot({ path: resolve(outputDir, 'readiness-panel.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'readiness-panel.png'), fullPage: false });
 await readinessPanel.locator('.icon-button').first().click();
 
 const notificationTrigger = page.locator('.dash-notification-trigger');
@@ -449,11 +465,11 @@ const notificationChannelShowsMaskedTarget = notificationChannelCardText.include
 await notificationChannelPanel.getByRole('button', { name: '发送测试', exact: true }).click();
 await notificationChannelPanel.getByText('测试消息已送达。', { exact: true }).waitFor({ state: 'visible' });
 const notificationChannelTestWorks = await notificationChannelPanel.getByText('测试消息', { exact: false }).count() > 0;
-await page.screenshot({ path: resolve(outputDir, 'dashboard-notification-channels.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-notification-channels.png'), fullPage: false });
 await notificationPopover.getByRole('button', { name: '返回通知', exact: true }).click();
 let notificationHasRealActions = false;
 let notificationHasUnreadCount = false;
-await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-notifications.png'), fullPage: false });
 await notificationPopover.getByRole('button', { name: '关闭', exact: true }).click();
 
 let pluginListRequests = 0;
@@ -491,7 +507,7 @@ await page.getByRole('tab', { name: '插件市场', exact: true }).click();
 const pluginMarketEmptyState = await page.locator('.dash-plugin-market-search').isVisible()
   && await page.locator('.dash-plugin-market-grid').isVisible()
   && (await page.locator('.dash-plugin-market-grid').innerText()).includes('市场正在等待第一个插件');
-await page.screenshot({ path: resolve(outputDir, 'dashboard-plugin-market.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-plugin-market.png'), fullPage: false });
 await page.getByRole('tab', { name: '我的插件', exact: true }).click();
 const leftNavSettingsRemoved = await page.locator('.dash-nav-rail').getByRole('button', { name: '设置', exact: true }).count() === 0;
 await page.getByRole('button', { name: 'Agent 创建', exact: true }).click();
@@ -511,7 +527,7 @@ const pluginWindowSizeEditor = page.locator('.dash-plugin-size-editor');
 await pluginWindowSizeEditor.waitFor({ state: 'visible' });
 await page.getByLabel('插件窗口宽度', { exact: true }).fill('700');
 await page.getByLabel('插件窗口高度', { exact: true }).fill('520');
-await page.screenshot({ path: resolve(outputDir, 'dashboard-plugin-size-editor.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-plugin-size-editor.png'), fullPage: false });
 const pluginResizeResponse = page.waitForResponse((response) => response.request().method() === 'PATCH'
   && new URL(response.url()).pathname === `/api/plugins/${qaPluginId}`, { timeout: 5_000 });
 await page.getByRole('button', { name: '保存大小', exact: true }).click();
@@ -535,7 +551,7 @@ const pluginRollbackConfirmation = await page.locator('.dash-plugin-delete-backd
   && (await page.locator('.dash-plugin-delete-backdrop').innerText()).includes('恢复版本 1？')
   && (await page.locator('.dash-plugin-delete-backdrop').innerText()).includes('新的草稿版本');
 await page.locator('.dash-plugin-delete-backdrop').getByRole('button', { name: '取消', exact: true }).click();
-await page.screenshot({ path: resolve(outputDir, 'dashboard-plugin-designer.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-plugin-designer.png'), fullPage: false });
 await page.getByRole('button', { name: '返回插件', exact: false }).click();
 const pluginLaunchResponse = page.waitForResponse((response) => response.request().method() === 'POST'
   && new URL(response.url()).pathname === `/api/plugins/${qaPluginId}/launch`, { timeout: 5_000 });
@@ -560,7 +576,7 @@ const resizedMiniAppRect = await page.locator('.mini-app-window').evaluate((elem
 });
 const pluginWindowResizePersists = Math.abs(resizedMiniAppRect.width - 700) <= 3
   && Math.abs(resizedMiniAppRect.height - 520) <= 3;
-await page.screenshot({ path: resolve(outputDir, 'dashboard-mini-app.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-mini-app.png'), fullPage: false });
 await page.getByRole('button', { name: '关闭插件', exact: true }).click();
 await page.getByRole('button', { name: `修改插件 ${fixturePluginName}`, exact: true }).click();
 const pluginCompatibilityAfterOpen = page.waitForResponse((response) => response.request().method() === 'GET'
@@ -581,7 +597,7 @@ const pluginDeleteWarnsIrreversible = await page.locator('.dash-plugin-delete-ba
   && (await page.locator('.dash-plugin-delete-backdrop').innerText()).includes('删除后无法恢复');
 await page.locator('.dash-plugin-delete-backdrop').getByRole('button', { name: '取消', exact: true }).click();
 page.off('request', countPluginRequest);
-await page.screenshot({ path: resolve(outputDir, 'dashboard-plugins.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-plugins.png'), fullPage: false });
 
 let templateListRequests = 0;
 let templateCatalogRequests = 0;
@@ -612,7 +628,7 @@ const templateRefreshUsesSingleRequest = templateListRequests === 1 && templateC
 const leftNavToolsRemoved = await page.locator('.dash-nav-rail').getByRole('button', { name: '工具与就绪', exact: true }).count() === 0;
 const headerReadinessStillAvailable = await page.locator('.dash-header-actions button[title="生产就绪"]').count() === 1;
 page.off('request', countTemplateRequest);
-await page.screenshot({ path: resolve(outputDir, 'dashboard-templates.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-templates.png'), fullPage: false });
 
 await page.route('**/api/schedules/draft', async (route) => {
   await route.fulfill({
@@ -687,7 +703,7 @@ const scheduleDraftRequiresConfirmation = await page.getByText('待确认', { ex
   && await page.getByRole('button', { name: '确认并启用', exact: true }).isVisible()
   && await page.locator('.schedule-card').count() === qaScheduleIds.length;
 const scheduleNoHorizontalOverflow = await page.locator('.schedule-workspace').evaluate(() => document.body.scrollWidth <= innerWidth + 1);
-await page.screenshot({ path: resolve(outputDir, 'dashboard-schedules.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-schedules.png'), fullPage: false });
 await page.getByRole('button', { name: '关闭草案', exact: true }).click();
 await page.unroute('**/api/schedules/draft');
 
@@ -807,7 +823,7 @@ const workflowScopedAgentCreated = await page.getByText('工作流私有验证�
 const workflowInspectorVisible = await page.locator('.workflow-inspector').isVisible();
 const workflowRunnerVisible = await page.locator('.workflow-runner').isVisible();
 await page.getByRole('button', { name: '关闭设置', exact: true }).click();
-await page.screenshot({ path: resolve(outputDir, 'dashboard-workflows.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-workflows.png'), fullPage: false });
 await page.locator('.dash-nav-new').click();
 await page.locator('.dash-chat-workspace').waitFor({ state: 'visible', timeout: 5_000 });
 const input = page.locator('.dash-chat-composer textarea');
@@ -904,10 +920,10 @@ if (sessionDeleteAvailable) {
     const buttons = [...element.querySelectorAll('button')].map((button) => button.textContent?.trim());
     return title === '确认删除？' && element.querySelectorAll('p').length === 0 && buttons.join('|') === '取消|删除';
   });
-  await page.screenshot({ path: resolve(outputDir, 'dashboard-delete-confirm.png'), fullPage: false });
+  await screenshotPage(page, { path: resolve(outputDir, 'dashboard-delete-confirm.png'), fullPage: false });
   await page.locator('.dash-confirm-actions button').first().click();
 }
-await page.screenshot({ path: resolve(outputDir, 'dashboard-chat.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-chat.png'), fullPage: false });
 
 qaArtifactSessionId = `qa-artifact-${fixtureStamp}`;
 const artifactFixtureResponse = await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(qaArtifactSessionId)}`, {
@@ -988,7 +1004,7 @@ await waitForFrameContent('.dash-chat-artifact.svg iframe', 'svg').catch(() => u
 await waitForFrameContent('.dash-chat-artifact.html iframe', 'html').catch(() => undefined);
 const svgPreviewRendered = await svgPreview.isVisible().catch(() => false);
 const htmlPreviewRendered = await htmlPreview.isVisible().catch(() => false);
-await page.screenshot({ path: resolve(outputDir, 'dashboard-chat-artifacts.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-chat-artifacts.png'), fullPage: false });
 
 let qaTaskTerminal = !qaTaskId;
 if (qaTaskId) {
@@ -1021,7 +1037,7 @@ await notificationPopover.waitFor({ state: 'visible' });
 await page.waitForTimeout(250);
 notificationHasRealActions = await notificationPopover.locator('.dash-notification-action').count() > 0;
 notificationHasUnreadCount = await notificationTrigger.locator('span').count() === 1;
-await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications-with-runtime-state.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-notifications-with-runtime-state.png'), fullPage: false });
 await notificationPopover.getByRole('button', { name: '关闭', exact: true }).click();
 await page.getByRole('button', { name: '任务管理', exact: true }).click();
 await page.locator('.dash-task-board').waitFor({ state: 'visible' });
@@ -1152,7 +1168,7 @@ await projectWorkspace.getByText('已归档，只读查看', { exact: true }).wa
 const projectFieldsDisabled = await projectWorkspace.locator('.business-project-fields').getAttribute('disabled') !== null;
 const projectArchiveReadOnlyWorks = projectFieldsDisabled
   && await projectWorkspace.locator('.business-project-title button[title="归档"]').count() === 0;
-await page.screenshot({ path: resolve(outputDir, 'dashboard-project-workspace.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-project-workspace.png'), fullPage: false });
 
 await page.setViewportSize({ width: 390, height: 844 });
 await page.reload({ waitUntil: 'domcontentloaded' });
@@ -1170,9 +1186,9 @@ const mobileNotificationChannelsFitViewport = await page.locator('.dash-notifica
   const rect = element.getBoundingClientRect();
   return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && document.body.scrollWidth <= innerWidth + 1;
 });
-await page.screenshot({ path: resolve(outputDir, 'dashboard-notification-channels-mobile.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-notification-channels-mobile.png'), fullPage: false });
 await page.locator('.dash-notification-popover').getByRole('button', { name: '返回通知', exact: true }).click();
-await page.screenshot({ path: resolve(outputDir, 'dashboard-notifications-mobile.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-notifications-mobile.png'), fullPage: false });
 await page.locator('.dash-notification-popover').getByRole('button', { name: '关闭', exact: true }).click();
 await page.getByRole('button', { name: '插件', exact: true }).click();
 await page.locator('.dash-plugin-workspace').waitFor({ state: 'visible', timeout: 8_000 });
@@ -1180,7 +1196,7 @@ await page.getByRole('tab', { name: '插件市场', exact: true }).click();
 const mobilePluginMarketNoOverflow = await page.evaluate(() => document.body.scrollWidth <= innerWidth + 1);
 const mobilePluginMarketUsable = await page.locator('.dash-plugin-market-search').isVisible()
   && await page.locator('.dash-plugin-market-grid').isVisible();
-await page.screenshot({ path: resolve(outputDir, 'dashboard-plugin-market-mobile.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-plugin-market-mobile.png'), fullPage: false });
 await page.getByRole('button', { name: 'Agent Nexus', exact: true }).click();
 await page.locator('.dash-workflow-studio').waitFor({ state: 'visible', timeout: 8_000 });
 const mobileWorkflowLayout = await layout(page);
@@ -1193,14 +1209,14 @@ const workflowWorkspaceStartsAtTop = await page.evaluate(() => {
   const studioRect = studio.getBoundingClientRect();
   return layout.scrollTop === 0 && main.scrollTop === 0 && studioRect.top >= layoutRect.top + 70;
 });
-await page.screenshot({ path: resolve(outputDir, 'dashboard-workflows-mobile.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-workflows-mobile.png'), fullPage: false });
 await page.getByRole('button', { name: '日程', exact: true }).click();
 await page.locator('.schedule-workspace').waitFor({ state: 'visible', timeout: 5_000 });
 await page.locator('.schedule-card').filter({ hasText: '每日 Agent 行业简报' }).waitFor({ state: 'visible', timeout: 5_000 });
 const mobileScheduleNoHorizontalOverflow = await page.evaluate(() => document.body.scrollWidth <= innerWidth + 1);
 const mobileScheduleComposerVisible = await page.locator('.schedule-agent-composer textarea').isVisible();
 const mobileSchedulePlannerVisible = await page.locator('.schedule-intelligence').isVisible();
-await page.screenshot({ path: resolve(outputDir, 'dashboard-schedules-mobile.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-schedules-mobile.png'), fullPage: false });
 await page.getByRole('button', { name: '对话', exact: true }).click();
 await page.locator('.dash-chat-workspace').waitFor({ state: 'visible', timeout: 5_000 });
 const mobileLayout = await layout(page);
@@ -1208,7 +1224,7 @@ await page.locator('.dash-agent-graph-expand').click();
 const mobileGraphRect = await page.locator('.dash-agent-signal-graph.is-expanded').boundingBox();
 const mobileGraphFullscreenWorks = Boolean(mobileGraphRect && mobileGraphRect.width >= 380 && mobileGraphRect.height >= 820);
 await page.locator('.dash-agent-graph-expand').click();
-await page.screenshot({ path: resolve(outputDir, 'dashboard-chat-mobile.png'), fullPage: false });
+await screenshotPage(page, { path: resolve(outputDir, 'dashboard-chat-mobile.png'), fullPage: false });
 
 const existingUserGuideHidden = await page.locator('.dash-first-run-guide').count() === 0;
 const verifyFirstRunDestination = async ({ destination, selector, viewport, screenshot }) => {
@@ -1224,7 +1240,7 @@ const verifyFirstRunDestination = async ({ destination, selector, viewport, scre
     await onboardingPage.goto(baseUrl, { waitUntil: 'networkidle' });
     const guide = onboardingPage.locator('.dash-first-run-guide');
     await guide.waitFor({ state: 'visible', timeout: 20_000 });
-    if (screenshot) await onboardingPage.screenshot({ path: resolve(outputDir, screenshot), fullPage: false });
+    if (screenshot) await screenshotPage(onboardingPage, { path: resolve(outputDir, screenshot), fullPage: false });
     const noHorizontalOverflow = await onboardingPage.evaluate(() => document.body.scrollWidth <= innerWidth + 1);
     await guide.locator(`button[data-destination="${destination}"]`).click();
     await onboardingPage.locator(selector).waitFor({ state: 'visible', timeout: 10_000 });

@@ -2,7 +2,7 @@
 
 > 把一句话交给一组真正会分工的 Agent。Axiom 会判断任务难度、安排合适的 Agent、展示实时进度，并在交付前帮你检查结果。
 
-当前发布版本：**v1.1.0**（`v1.0.0` 为可回退的基线版本）
+当前发布版本：**v2.0.0**（受控环境生产候选；`v1.1.0` 为升级前稳定基线）
 
 ![Axiom 任务台](docs/images/overview.png)
 
@@ -110,7 +110,7 @@ npm run qa:search-agent
 npm run qa:all      25 passed / 0 failed / 4 skipped
 ```
 
-本轮门禁开始前已经确认 Docker 与 PostgreSQL 测试容器正常运行；25 个可运行项目全部在第一次尝试通过。真实复杂任务产生 874 个连续事件和 761 个 SSE 流式增量，共使用 58,899 Token；Reviewer 评分 45 后触发一次真实人工确认，最终正常完成并保存 1,006 字符 Artifact。4 个跳过项仅对应未配置的 MemoryCore、外部对象存储和 Harness/Codex sidecar 现场验收，跳过不等于通过。
+本轮门禁开始前已经确认 Docker 与 PostgreSQL 测试容器正常运行；25 个可运行项目全部在第一次尝试通过。真实复杂任务产生 560 个连续事件和 468 个 SSE 流式增量，共使用 24,774 Token；Reviewer 评分 45 后触发一次真实人工确认，最终正常完成并保存 625 字符 Artifact。4 个跳过项仅对应未配置的 MemoryCore、外部对象存储和 Harness/Codex sidecar 现场验收，跳过不等于通过。
 
 跳过的 4 项只涉及尚未配置的外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar 现场握手。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；跳过不等于通过，也不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
 
@@ -120,10 +120,10 @@ npm run qa:all      25 passed / 0 failed / 4 skipped
 
 | 接口 | 吞吐 | P95 延迟 |
 | --- | ---: | ---: |
-| 健康检查 | 1,829.88 请求/秒 | 8.22 ms |
-| 就绪检查 | 2,734.18 请求/秒 | 4.53 ms |
-| 任务列表 | 2,375.65 请求/秒 | 5.37 ms |
-| 运行观测 | 856.02 请求/秒 | 29.16 ms |
+| 健康检查 | 1,687.55 请求/秒 | 10.21 ms |
+| 就绪检查 | 2,255.98 请求/秒 | 5.53 ms |
+| 任务列表 | 2,071.95 请求/秒 | 6.22 ms |
+| 运行观测 | 1,061.45 请求/秒 | 10.25 ms |
 
 这组数据衡量的是 Axiom 自己的 API、调度和数据库访问，不包含 DeepSeek 的网络延迟、排队时间或模型生成速度。可以用下面的命令在自己的机器上重新测试：
 
@@ -339,6 +339,7 @@ npm run qa:context-summary # 持久摘要 API 回归
 npm run qa:harness-live # 已配置 sidecar 的真实能力握手
 npm run qa:object-storage # 已配置 MinIO/S3/COS 时验证跨 Worker Artifact
 npm run qa:all      # 生产门禁回归
+npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 ```
 
 生产构建完成后访问 <http://127.0.0.1:8787>，Hono 会同时提供 API 和 `dist/` 中的前端。
@@ -391,6 +392,8 @@ npm run qa:all      # 生产门禁回归
 - [业务闭环评测](docs/runtime-business-evaluation.md)：分段评测维度和失败定位方式。
 - [Reasonix 运行时采纳说明](docs/reasonix-runtime-adoption.md)：DAG、统一运行上下文、写入冲突调度和交付证据的设计边界。
 - [上线就绪度](docs/launch-readiness.md)：当前能力、风险和生产前置条件。
+- [v2.0.0 迁移指南](docs/migration-v2.md)：从 v1.1.0 备份、升级、验证和回滚。
+- [版本变更记录](CHANGELOG.md)：每个正式版本的新增能力、行为变化和外部依赖。
 
 ## 📄 开源许可
 

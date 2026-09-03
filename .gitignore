@@ -25,4 +25,5 @@ qa/runtime-results.json
 *.tsbuildinfo
 vite.config.d.ts
 *.zip
+release/
 _compare-*/
