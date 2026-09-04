@@ -68,10 +68,13 @@ Approved writes resume from the persisted checkpoint. A rejected write leaves th
 
 - `AXIOM_TOOL_MAX_CALLS_PER_TASK` limits calls per task in a rolling one-hour window; the default is `8`.
 - `AXIOM_EXTERNAL_TOOL_TOP_K` limits task-relevant external MCP/OpenAPI operations exposed to one Agent step; the default is `6` and the hard maximum is `12`.
+- `AXIOM_MCP_CALL_TIMEOUT_MS` bounds one MCP request to 10-120000ms (default 30000ms). `AXIOM_EXTERNAL_READ_RETRIES` permits up to three extra attempts for transient failures on read-only operations; medium/high-risk writes are always single-attempt.
+- `AXIOM_TOOL_APPROVAL_TTL_MS` controls high-risk approval lifetime (default 15 minutes, clamped to 1 second-24 hours). Expired approvals are persisted as `expired` and cannot be reused.
 - `AXIOM_INTEGRATION_SECRET` encrypts Feishu and future integration credentials with AES-256-GCM; if omitted, the runtime falls back to `AXIOM_PROVIDER_SECRET`.
 - `AXIOM_TOOL_TIMEOUT_MS` can lower the per-tool timeout; each tool also has a local upper bound.
 - `AXIOM_TOOL_ALLOWED_NPM_SCRIPTS` controls `workspace.test`; the default allowlist is `test,check,build,qa:routing,qa:business,qa:runtime`.
 - Tool output is capped before it is included in model context.
+- MCP/OpenAPI descriptions and results are treated as untrusted data: control characters, prompt-boundary tags, and common instruction-injection phrases are filtered, and result text is wrapped with a non-instruction marker before it reaches the Agent or Artifact store.
 - Tool output Artifacts carry `taskId`, `stepId`, and `toolCallId` lineage, plus the audit ID, risk, signature, exit code, and output byte count.
 - `database.query` uses `AXIOM_READONLY_DATABASE_URL` (falling back to `DATABASE_URL`), starts a `READ ONLY` transaction, rejects multiple statements and all non-read-only verbs, and caps returned rows.
 - `http.fetch` and `browser.open` default to disabled until `AXIOM_HTTP_ALLOWLIST` contains an exact host or `*.example.com` suffix. Loopback, RFC1918, link-local, unique-local, IPv4-mapped private IPv6, cloud metadata IPs/hostnames, and redirects are rejected. DNS-level egress policy remains a deployment concern.

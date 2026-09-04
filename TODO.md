@@ -276,14 +276,14 @@ Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Run
 ## P2：规模化和产品化
 
 - [ ] S3/COS/MinIO Artifact 对象存储与生命周期管理。
-- [ ] OIDC / HMAC principal / RBAC / 租户配额 / Secret Manager。
-- [ ] OpenTelemetry trace、日志关联和外部 Prometheus；`metrics.ts` 当前是纯内存 counters，进程重启即清零，多副本部署下每次滚动发布会产生假的指标断崖，需评估跨重启持久化或跨副本聚合方案。
+- [x] 内网 HMAC principal / RBAC 边界与租户工具配额：已有签名主体、角色矩阵、写操作校验和持久配额策略；OIDC、可信反向代理和 Secret Manager 仍待外部部署。
+- [x] 内网运行指标持久化：治理存储按租户/日期/模型/Agent/Tool 保存关键事件计数，重启后可恢复；OpenTelemetry、跨副本 Prometheus exporter 仍待外部部署。
 - [x] 3D 节点悬停、Graph 双向联动和低性能降级：生产入口采用独立于 WebGL 的 CSS 3D 渲染，按设备能力、节能模式、减少动态偏好、页面可见性和视口交叉状态自动降级或暂停。
 - [x] 场景生产分包已按真实依赖修正：当前 `AxiomDashboard` 未挂载旧 R3F/WebGL 场景，生产产物不再生成或预加载 Three.js、R3F、postprocessing chunk；`react-dom/client` 归入 React framework chunk，删除了误导性的约 1 MB 旧结论。
 - [x] 移动端 Graph 全屏、节点详情抽屉和长事件虚拟滚动：节点支持鼠标、触摸、键盘选择，桌面/移动端均可全屏；运行事件上限为 500 条并按固定行高窗口化渲染。
 - [x] MCP / OpenAPI 受控能力目录：已完成分类标签、版本固定、真实健康探测、Agent 权限、调用统计和按任务 Top-K 路由，外部工具不会全量注入所有 Agent。
-- [ ] 通用 MCP 加密认证代理与能力包市场：飞书服务账号已率先使用加密 Secret 引用；任意 MCP 的 API Key 注入、OAuth 回调、Token 刷新、审核发布、撤回和租户配额仍待完成。
-- [ ] 多租户计费、配额、审计查询和行业工作流。
+- [x] 通用 MCP 加密认证代理与能力包固定清单：API Key/OAuth2/服务账号 Secret 统一加密引用，能力包记录 digest、权限、风险和审核状态；真实 OAuth 回调、跨租户市场签名和撤回仍待外部/下一批。
+- [ ] 多租户计费、完整 Token 账本、审计查询和行业工作流。
 
 ## 本轮交付记录
 
@@ -574,7 +574,7 @@ npm run qa:search-agent
 - [x] Codex app-server JSON-RPC stdio/sidecar transport，固定 commit、workspace 和审批策略：协议 transport 与边界测试已完成，部署固定项待现场配置。
 - [x] Agent Nexus 条件分支、多 Loop、嵌套 Loop、节点级局部恢复和单节点重跑：已完成受限条件 DSL、最多 256 步展开、稳定 Loop 路径、分支事件和 rerun 检查点。
 - [x] Agent Nexus 分支可解释性第一阶段：`branch.selected`/`branch.skipped` 事件记录表达式、来源 Agent 状态、置信度、输出字符数和命中结果；不持久化完整上游正文，便于 UI/运营审计而不扩大事件体积。
-- [ ] OpenTelemetry、Prometheus、日志关联、队列/Worker 指标和跨重启持久化。
+- [x] 内网持久化运行指标：按租户、日期和维度累加任务/模型/工具/人工接管事件，运营 API 返回 durableMetrics；外部 OpenTelemetry/Prometheus 聚合仍待部署。
 - [x] 运行观测告警第一阶段：新增 `GET /api/runtime/alerts`，从持久化队列、Worker 租约、模型/工具失败、人工待确认、Artifact 清理和 Readiness 生成严重/关注/提示三级告警；阈值可由环境变量调整，前端运行观测已展示。
 - [x] 插件签名、兼容性检查、版本回滚和权限声明：支持可选 HMAC-SHA256 发布证明、强制签名部署策略、内容篡改失败关闭、发布前/运行前复核、历史版本以新草稿恢复，以及面向普通用户的“版本与权限”面板。
 - [x] 租户内插件市场：已完成发布者身份、管理员审核、搜索、固定版本安装、显式升级/安全回退、卸载、版本撤回和运行时失效；市场快照移除插件开发对话，避免内部设计记录随插件分发。
@@ -817,12 +817,12 @@ npm run qa:search-agent
 
 ### v2.2 后续：受控 MCP 规模化
 
-1. [ ] 通用 MCP 加密认证代理：为任意 MCP/OpenAPI 完成 API Key 注入、OAuth 2 回调、state/PKCE、Token 刷新、撤销和审计；Secret 不进入 specification、日志或模型上下文。
-2. [ ] 审核能力包与租户市场：在现有七类目录和租户启停基础上，补固定版本签名、权限声明、发布审核、撤回和兼容性检查，不提供无审核“一键全开”。
-3. [ ] 后台健康巡检与熔断：定时探测、连续失败熔断、半开恢复、延迟/成功率趋势和告警；模型请求不现场执行健康探测。
-4. [ ] 租户工具配额：限制来源数量、每小时调用、并发、schema/Token 预算和高风险写操作策略；配额拒绝进入持久审计和运营指标。
+1. [x] 通用 MCP/OpenAPI 凭据代理（内网）：API Key、OAuth2、服务账号统一加密存储，工具源按 credential 引用，Secret 不进入 specification、日志或模型上下文；真实 OAuth 供应商回调仍待部署验收。
+2. [x] 能力包固定清单治理（内网）：安装记录固定版本、manifest digest、权限声明、风险级别和审核状态，变更会生成新 revision；跨租户市场签名和撤回流程仍待下一批。
+3. [x] 工具调用熔断（内网）：连续失败打开、冷却后半开、成功恢复，拒绝原因和健康快照持久化；后台定时巡检和外部告警仍待部署验收。
+4. [x] 租户工具配额（内网）：来源数量、每小时调用、并发、schema Token、月度调用预算均有持久策略；月度模型 Token 扣减和计费对账仍待下一批。
 5. [x] 本机外部对象存储验收：固定 MinIO 镜像、自动测试桶、双 Store 二进制读取、租户隔离、删除和大对象回读已进入总门禁。
-6. [ ] MCP 业务评测：为办公、研究、开发等能力包建立成功率、误选率、延迟、Token、费用和人工接管基线，Router 只根据可验证数据调整排序。
+6. [x] MCP 业务评测：新增本地 Fake MCP 与 30 个 P0 案例，覆盖工具路由、跨轮漂移、Schema 参数、租户/Agent 权限、小时/月度/并发配额、熔断半开恢复、高风险拒绝与人工审核、副作用幂等、Artifact lineage 和敏感信息脱敏；`npm run qa:mcp-business` 已接入 `qa:all:local`。
 7. [ ] 目标对象存储部署验收：在实际 S3/COS/MinIO 上验证超时、分片/断点、生命周期和删除失败补偿。
 
 ### 2026-09-04 v2.2.0 稳定版收口
@@ -834,3 +834,33 @@ npm run qa:search-agent
 5. [x] `qa:all:local` 自动准备 MinIO 和一次性 PostgreSQL 数据库；基础回归与外部凭据环境隔离，正常结束后清理测试库，并注册中止信号清理处理器。
 6. [x] 稳定版完整门禁：`30 passed / 0 failed / 3 skipped`，30 项均首次通过；真实 Runtime 为 513 个连续事件、411 个 SSE 增量、24,014 Token，Reviewer 低分触发人工门禁并在明确批准后完成 717 字符交付。
 7. [ ] 正式 TencentDB MemoryCore 与真实 Harness/Codex sidecar 仍待目标 endpoint/命令，不能将协议测试或本地替代实现记为外部验收。
+
+### 2026-09-04 v2.3.0-rc.1 内网企业化治理
+
+1. [x] 新增 `EnterpriseGovernanceStore`，SQLite/PostgreSQL 双实现，统一保存租户策略、工具使用窗口、工具健康状态和运行指标。
+2. [x] 租户工具治理闭环：来源数量、每小时调用、并发槽位、月度工具调用和 schema Token 预算均在服务端原子检查；拒绝不依赖前端提示。
+3. [x] 工具熔断状态机：`healthy -> degraded -> open -> half-open -> healthy`，连续失败阈值、冷却时间和恢复阈值可配置，半开探测成功后才重新放行。
+4. [x] 通用 MCP/OpenAPI 凭据 API：创建、轮换、删除和列表均租户隔离，Secret 只在服务端 AES-256-GCM 密文中保存，API 仅返回字段名和使用时间。
+5. [x] 能力包安装记录增加固定 manifest digest、权限声明、风险级别和审核状态，安装版本可追溯，变更触发 revision。
+6. [x] 运行指标跨重启持久化，并在 `/api/capabilities/governance`、`/api/runtime/operations` 暴露租户治理快照和 durableMetrics；新增 `qa:governance` 门禁。
+7. [x] 内网回归：`npm test` 391 tests / 390 passed / 0 failed / 1 skipped；`npm run qa:all:local` 31 passed / 0 failed / 3 skipped，治理专项 2/2 通过。外部 OIDC、OAuth 供应商、MemoryCore、对象存储厂商和 Harness/Codex sidecar 现场验收继续保持待部署状态。
+
+### 2026-09-04 v2.3.0-rc.2 Fake MCP P0 质量门禁
+
+- [x] 新增本地 Fake MCP HTTP 服务，真实覆盖 `initialize`、`notifications/initialized`、`tools/list` 和 `tools/call`。
+- [x] 完成 30 个 P0 业务案例：工具路由、跨轮漂移、简单对话无 MCP 副作用、Schema 参数、租户/Agent 权限、工具目录隔离、小时/月度/并发配额、熔断半开恢复、高风险拒绝与人工审核、审批幂等、Artifact lineage 和敏感信息脱敏。
+- [x] 工具参数在配额、审核和外部调用前校验；非法参数不会消耗配额、创建审核或触发外部副作用。
+- [x] `qa:mcp-business` 已接入 `qa:all:local`，并生成 `qa/mcp-business-eval-results.json` 作为机器可读结果。
+- [x] 专项结果：30 passed / 0 failed / 0 skipped；Fake MCP 只代表本地可重复门禁，真实外部服务仍需目标环境验收。
+- [x] 完整本地门禁：`npm test` 为 421 tests / 420 passed / 0 failed / 1 skipped；`npm run qa:all:local` 为 32 passed / 0 failed / 3 skipped，所有可运行项目首次通过。
+
+### 2026-09-04 v2.3.0-rc.4 MCP 安全与恢复门禁
+
+- [x] Fake MCP 增加协议故障注入：非法 JSON-RPC、初始化错误、空工具目录、目录漂移和延迟响应，并通过业务 API 验证失败关闭与恢复。
+- [x] MCP 健康探测对实时 `tools/list` 生成规范化目录摘要，与固定版本比对；漂移会持久化 `unhealthy`、下线注册工具并阻断调用。
+- [x] MCP 调用超时增加 `AXIOM_MCP_CALL_TIMEOUT_MS`，服务端限制 10ms 至 120s；超时结果保留失败审计，后续调用可恢复。
+- [x] 外部工具描述和结果按不可信数据清洗，过滤提示边界和常见提示词注入片段，并在结果中保留明确的非指令边界标记。
+- [x] 高风险审批增加默认 15 分钟 TTL（`AXIOM_TOOL_APPROVAL_TTL_MS`，服务端限制 1 秒至 24 小时）；过期审批自动失效，不能继续触发写操作。
+- [x] 凭据轮换重新加密并替换旧密文，API 响应和列表不返回 Secret；只读工具默认最多重试 2 次，中高风险写操作保持单次执行。
+- [x] 新增 10 个 P1 评测，连同 P0 共 40/40 通过；`qa:mcp-business` 与 `qa:all:local` 均自动执行。
+- [ ] 下一批：接入真实 MCP OAuth/API Key 轮换现场验收、工具输出引用/证据可信度评测，并将恶意内容隔离指标接入运行观测和告警。

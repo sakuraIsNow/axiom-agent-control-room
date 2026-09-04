@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export type CapabilityPackId = 'development' | 'research' | 'office' | 'data' | 'content' | 'operations' | 'business';
 
 export type CapabilityPackDefinition = {
@@ -15,6 +17,8 @@ export type CapabilityPackDefinition = {
     status: 'builtin' | 'available' | 'planned';
     note: string;
   }>;
+  permissions?: string[];
+  riskLevel?: 'low' | 'medium' | 'high';
 };
 
 export const capabilityPackCatalog: CapabilityPackDefinition[] = [
@@ -77,3 +81,8 @@ export const capabilityPackCatalog: CapabilityPackDefinition[] = [
 
 export const capabilityPackById = (id: string) => capabilityPackCatalog.find((pack) => pack.id === id);
 export const recommendedCapabilityPackIds = capabilityPackCatalog.filter((pack) => pack.recommended).map((pack) => pack.id);
+
+/** Stable manifest identity used by the internal capability market. */
+export const capabilityPackManifestDigest = (pack: CapabilityPackDefinition) => createHash('sha256')
+  .update(JSON.stringify({ id: pack.id, version: pack.version, capabilities: pack.capabilities, connectors: pack.connectors, permissions: pack.permissions ?? [], riskLevel: pack.riskLevel ?? 'low' }))
+  .digest('hex');

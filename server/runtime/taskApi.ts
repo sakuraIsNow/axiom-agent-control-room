@@ -38,6 +38,7 @@ import { buildScheduleInsights } from './scheduleInsights.js';
 import { breadthFirstThreadDescendants, buildHarnessThreadGraph } from './harnessThreadGraph.js';
 import { outboundNotificationKinds, type NotificationEndpointLocation, type OutboundNotificationManager } from './outboundNotifications.js';
 import { createBusinessCapabilityApi } from './businessCapabilities.js';
+import type { EnterpriseGovernanceStore } from './enterpriseGovernance.js';
 import type { BusinessCapabilityStore } from './businessCapabilityStore.js';
 import type { ModelRoutingPolicy } from './modelRouting.js';
 import type { IntegrationCredentialStore } from './integrationCredentialStore.js';
@@ -699,6 +700,7 @@ export const createTaskApi = (dependencies: {
   harnessAdapter?: HarnessAdapter;
   outboundNotifications?: OutboundNotificationManager;
   businessCapabilities?: BusinessCapabilityStore;
+  enterpriseGovernance?: EnterpriseGovernanceStore;
   integrationCredentials?: IntegrationCredentialStore;
   modelRouting?: ModelRoutingPolicy;
 }) => {
@@ -1214,6 +1216,7 @@ export const createTaskApi = (dependencies: {
       artifacts: artifactStore,
       artifactCatalog,
       modelRouting: dependencies.modelRouting,
+      enterpriseGovernance: dependencies.enterpriseGovernance,
       memory,
       integrationCredentials: dependencies.integrationCredentials,
       createSchedule: async (input) => {
@@ -2091,6 +2094,7 @@ export const createTaskApi = (dependencies: {
       toolExecutor: { ...toolExecutor.describe(), probe: await toolExecutor.probe() },
       tools: toolRegistry?.catalog() ?? [],
     },
+    enterpriseGovernance: dependencies.enterpriseGovernance ? { available: true, policy: await dependencies.enterpriseGovernance.getPolicy(identity(c.req.raw.headers).tenantId) } : { available: false },
   }));
 
   api.get('/runtime/skills', (c) => c.json({
@@ -2117,14 +2121,16 @@ export const createTaskApi = (dependencies: {
     const { tenantId, userId } = controlPrincipal;
     const requestedHours = Number(c.req.query('hours') ?? 24);
     const hours = Number.isFinite(requestedHours) ? Math.min(168, Math.max(1, Math.floor(requestedHours))) : 24;
-    const [snapshot, sessions, artifactStats] = await Promise.all([
+    const [snapshot, sessions, artifactStats, durableMetrics] = await Promise.all([
       store.getOperationsSnapshot(tenantId, hours),
       store.listSessions(tenantId, userId, 500),
       artifactCatalog ? artifactCatalog.stats(tenantId) : undefined,
+      dependencies.enterpriseGovernance?.metrics(tenantId, { days: Math.min(7, Math.ceil(hours / 24)), limit: 500 }) ?? Promise.resolve([]),
     ]);
     return c.json({
       ...snapshot,
       contextSummaries: aggregateContextSummaryQuality(sessions.map((session) => session.contextSummary)),
+      durableMetrics,
       ...(artifactStats ? { artifacts: artifactStats } : {}),
     });
   });

@@ -4,13 +4,21 @@
 
 ## 结论
 
-当前版本是可用于本地、内网或受控团队环境的 `v2.2.0` 稳定版，不是可以直接暴露到公网的完整企业 SaaS。任务、事件、租约恢复、动态路由、子 Agent 并行、Reviewer 质量门禁、PostgreSQL 持久化、Docker 沙箱和本地 MinIO 验收已经形成可运行闭环。当前启动实例的 `GET /api/health` 返回 `ready`；`GET /api/runtime/readiness` 返回 `degraded` 且没有硬阻塞，PostgreSQL、文本与图像模型、Docker 沙箱和 Prometheus 已就绪。未启用签名租户身份、未配置视频服务和长期记忆、正式实例仍使用本地 Artifact 目录是当前四项降级告警。用户级任务、日程和 Artifact 通知已经可以通过签名 Webhook 外发；邮件渠道、运营级系统告警外发、Scheduler/Outbox 多副本和目标云环境灾难恢复仍待完成。
+当前工作树是 `v2.3.0-rc.4` 内网企业化与 MCP 安全恢复候选版：在 `v2.2.0` 稳定执行链上补齐了租户治理、工具配额与熔断、通用凭据代理、能力包 manifest 审计、跨重启运行指标、本地 Fake MCP P0/P1 质量门禁、工具目录漂移保护和不可信工具内容隔离。内网 PostgreSQL/MinIO 和完整本地门禁已通过；外部 OIDC/OAuth 供应商、MemoryCore、云对象存储和 Harness/Codex sidecar 仍按部署环境单独验收。
+
+当前版本可用于本地、内网或受控团队环境，但不是可以直接暴露到公网的完整企业 SaaS。任务、事件、租约恢复、动态路由、子 Agent 并行、Reviewer 质量门禁、PostgreSQL 持久化、Docker 沙箱、MinIO 验收和租户治理已经形成可运行闭环。当前启动实例的 `GET /api/health` 返回 `ready`；`GET /api/runtime/readiness` 返回 `degraded` 且没有硬阻塞，PostgreSQL、文本与图像模型、Docker 沙箱和 Prometheus 已就绪。未启用签名租户身份、未配置视频服务和长期记忆、正式实例尚未绑定目标云 Artifact 存储是当前降级告警。用户级任务、日程和 Artifact 通知已经可以通过签名 Webhook 外发；邮件渠道、运营级系统告警外发、Scheduler/Outbox 多副本和目标云环境灾难恢复仍待完成。
 
 这意味着：内部试用、单团队灰度和受控网络部署可以开始；面向多个租户、外部用户或高价值自动化任务前，必须完成下面的上线门禁。
 
+## v2.3.0-rc.4 MCP 安全恢复验证（2026-09-04）
+
+本候选版在 30 个 P0 MCP 案例之上增加 10 个 P1 故障、安全与恢复案例：非法 JSON-RPC、初始化失败、空工具目录、实时工具目录漂移、调用超时恢复、恶意描述/结果清洗、审批过期、凭据轮换和读写重试策略。工具源健康探测会对实时 `tools/list` 生成规范化摘要，并与固定版本比对；漂移会持久化为 `unhealthy`、从 Tool Registry 下线并阻断调用。MCP 调用超时由 `AXIOM_MCP_CALL_TIMEOUT_MS` 控制，服务端限制在 10ms 至 120s；只读工具默认最多重试 2 次，中高风险写工具不自动重试。
+
+本地专项结果为 `40 passed / 0 failed / 0 skipped`，其中 P0 为 `30/30`，P1 为 `10/10`。完整 `npm run qa:all:local` 重新通过 `32 passed / 0 failed / 3 skipped`；跳过项仍仅为未配置的 TencentDB MemoryCore 和 Harness/Codex sidecar 真实现场验收。
+
 ## v2.2.0 稳定版验证（2026-09-04）
 
-`npm run check`、`npm run build` 通过；`npm test` 为 `388 tests / 387 passed / 0 failed / 1 skipped`，跳过的 PostgreSQL 用例由独立专项覆盖。`npm run qa:all:local` 使用一次性 PostgreSQL 数据库与固定版本 MinIO，最终为 `30 passed / 0 failed / 3 skipped`，30 项均在第一次尝试通过。三项跳过仅为未配置端点或命令的 MemoryCore HTTP、MemoryCore Axiom 适配器和 Harness/Codex sidecar。
+`npm run check`、`npm run build` 通过；`npm test` 为 `421 tests / 420 passed / 0 failed / 1 skipped`，跳过的 PostgreSQL 用例由独立专项覆盖。`npm run qa:all:local` 使用一次性 PostgreSQL 数据库与固定版本 MinIO，最终为 `32 passed / 0 failed / 3 skipped`，32 项均在第一次尝试通过。三项跳过仅为未配置端点或命令的 MemoryCore HTTP、MemoryCore Axiom 适配器和 Harness/Codex sidecar。
 
 真实复杂 Runtime 产生 513 个连续事件、411 个可见 SSE 增量和 24,014 Token；Reviewer 低分触发人工门禁，明确批准后交付 717 字符 Artifact。PostgreSQL 演练先通过打包后的 `server-dist/migrate.js` 执行迁移，再强制终止持有租约的 OS 进程，验证租约到期后的唯一接管、旧 owner 隔离、连续事件序号和单次终态；首次并发迁移使用 advisory transaction lock 与 schema 版本哨兵，不再重复执行运行期 DDL。MinIO 演练验证双 Store 跨 Worker 读取、租户隔离、范围删除、约 1 MB 对象和 PNG 二进制，测试对象和临时数据库均已清理。
 
@@ -120,3 +128,18 @@ PostgreSQL 专项随后在独立临时库补跑为 `1 passed / 0 failed`，验�
 - 参考 `aceternity-saasternity` 的 3D/悬停层次，将 3D 仅用于运行时拓扑，不用大面积渐变和光球装饰。
 - 参考 `react-bits`/GSAP 的渐进出现和 reduced-motion 处理，首屏改成任务入口、路由上下文和交付状态。
 - 保持移动端输入区、运行拓扑和执行轨迹可用，并用真实状态显示 `DEGRADED / LOCAL`，不伪装成已经完全生产化。
+
+# v2.3.0-rc.2 内网企业化验收补充（2026-09-04）
+
+本轮把不依赖外部供应商的企业能力落到服务端：`EnterpriseGovernanceStore` 同时支持 SQLite 与 PostgreSQL，保存租户治理策略、工具配额窗口、熔断状态、健康统计和运行指标。工具源创建与调用都会经过租户级来源数量、schema Token、小时/月度调用和并发检查；连续失败会打开熔断，冷却后进入半开探测，成功后才恢复。
+
+新增内网控制面接口：
+
+- `GET /api/capabilities/governance`：租户策略、工具健康、配额使用和近 7 日指标。
+- `PATCH /api/capabilities/governance/policy`：owner/admin 按 revision 更新策略。
+- `GET /api/capabilities/governance/metrics` 与 `/governance/tools/health`：运营查询。
+- `GET/POST/DELETE /api/capabilities/credentials`：通用 MCP/OpenAPI 凭据的加密代理，响应永不包含 Secret。
+
+能力包安装记录现在包含固定版本、manifest digest、权限、风险和审核状态。运行事件中的任务、模型、工具和人工接管计数写入 durable metrics，服务重启后仍可查询；`npm run qa:governance` 与完整 `npm test` 已覆盖上述边界。
+
+本轮不宣称外部环境已经就绪：OIDC/可信代理、真实 OAuth 供应商、TencentDB MemoryCore endpoint、目标 S3/COS、邮件供应商以及 DeepSeek/Codex sidecar 仍需部署配置和现场验收。Readiness 的降级项只代表这些依赖未配置，不阻断内网核心任务执行链。

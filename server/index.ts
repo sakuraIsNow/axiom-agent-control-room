@@ -41,6 +41,7 @@ import { createOutboundNotificationStore, OutboundNotificationManager } from './
 import { createBusinessCapabilityStore } from './runtime/businessCapabilityStore.js';
 import { registerPersistedExternalTools } from './runtime/businessCapabilities.js';
 import { createIntegrationCredentialStore } from './runtime/integrationCredentialStore.js';
+import { createEnterpriseGovernanceStore, governanceMetricDay } from './runtime/enterpriseGovernance.js';
 import { frontendCacheControl } from './runtime/frontendCache.js';
 
 dotenv.config({ path: resolve(process.cwd(), '.env.local'), quiet: true });
@@ -181,6 +182,8 @@ const businessCapabilityStore = createBusinessCapabilityStore();
 await businessCapabilityStore.initialize();
 const integrationCredentialStore = createIntegrationCredentialStore();
 await integrationCredentialStore.initialize();
+const enterpriseGovernanceStore = createEnterpriseGovernanceStore();
+await enterpriseGovernanceStore.initialize();
 const outboundNotificationStore = createOutboundNotificationStore();
 await outboundNotificationStore.initialize();
 const outboundNotifications = new OutboundNotificationManager(outboundNotificationStore, fetch, logger);
@@ -191,6 +194,20 @@ eventHub.subscribeAll((event) => {
   if (event.type === 'task.completed') metrics.recordTask('completed');
   if (event.type === 'task.failed') metrics.recordTask('failed');
   if (event.type === 'task.cancelled') metrics.recordTask('cancelled');
+  const tenantId = event.runtimeContext?.tenantId;
+  if (tenantId) {
+    const metricMap: Record<string, string> = {
+      'task.created': 'tasks_created', 'task.completed': 'tasks_completed', 'task.failed': 'tasks_failed',
+      'task.cancelled': 'tasks_cancelled', 'tool.started': 'tool_calls_started', 'tool.completed': 'tool_calls_completed',
+      'tool.failed': 'tool_calls_failed', 'review.approval_requested': 'human_takeovers', 'model.completed': 'model_calls_completed',
+    };
+    const name = metricMap[event.type];
+    if (name) void enterpriseGovernanceStore.recordMetric({ tenantId, day: governanceMetricDay(), name, dimensions: {
+      ...(typeof event.agentId === 'string' ? { agentId: event.agentId } : {}),
+      ...(typeof event.payload.model === 'string' ? { model: event.payload.model } : {}),
+      ...(typeof event.payload.sourceId === 'string' ? { sourceId: event.payload.sourceId } : {}),
+    }, value: 1 }).catch((error) => logger.warn({ error, eventType: event.type }, 'durable runtime metric write failed'));
+  }
 });
 const runtimeModel = new OpenAICompatibleModelClient({ onUsage: (usage) => metrics.recordUsage(usage) });
 const configuredModelNames = (process.env.AXIOM_ALLOWED_MODELS ?? '')
@@ -232,7 +249,7 @@ try {
 }
 const runtimeTools = new ToolRegistry(undefined, runtimeArtifactStore, agentStore, runtimeArtifactCatalog);
 try {
-  const registeredExternalTools = await registerPersistedExternalTools(businessCapabilityStore, runtimeTools, integrationCredentialStore);
+  const registeredExternalTools = await registerPersistedExternalTools(businessCapabilityStore, runtimeTools, integrationCredentialStore, fetch, enterpriseGovernanceStore);
   if (registeredExternalTools > 0) logger.info({ count: registeredExternalTools }, 'restored external MCP/OpenAPI tools');
 } catch (error) {
   logger.warn({ error }, 'external tools could not be restored; built-in tools remain available');
@@ -557,6 +574,7 @@ app.route('/api', createTaskApi({
   outboundNotifications,
   businessCapabilities: businessCapabilityStore,
   integrationCredentials: integrationCredentialStore,
+  enterpriseGovernance: enterpriseGovernanceStore,
   modelRouting: modelRoutingPolicy,
 }));
 
@@ -1839,6 +1857,7 @@ const shutdown = async (signal: string) => {
   await agentStore.close();
   await businessCapabilityStore.close();
   await integrationCredentialStore.close();
+  await enterpriseGovernanceStore.close();
   await templateStore.close();
   await taskStore.close();
   await providerCredentialStore.close?.();

@@ -54,6 +54,8 @@ const checks = [
   ['Nexus 会话隔离', 'qa:nexus-session'],
   ['路由评估', 'qa:routing'],
   ['业务案例评估', 'qa:business'],
+  ['MCP 业务评测', 'qa:mcp-business'],
+  ['内网企业治理（配额、熔断、持久指标）', 'qa:governance'],
   ['3D Agent Graph', 'qa:agentgraph3d'],
   ['浏览器视觉回归', 'qa:visual'],
   ['并发性能基线', 'perf:smoke'],

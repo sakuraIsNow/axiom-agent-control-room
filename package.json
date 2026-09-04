@@ -1,6 +1,6 @@
 {
   "name": "agent-control-room",
-  "version": "2.2.0",
+  "version": "2.3.0-rc.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -37,6 +37,8 @@
     "qa:data-isolation": "node qa/data-isolation-regression.mjs",
     "qa:routing": "node scripts/routing-eval.mjs",
     "qa:business": "node scripts/business-eval.mjs",
+    "qa:mcp-business": "node qa/mcp-business-eval.mjs",
+    "qa:governance": "tsx --test server/runtime/enterpriseGovernance.test.ts",
     "qa:business-postgres": "node --import tsx --test server/runtime/businessCapabilityStore.postgres.test.ts",
     "qa:postgres-failover": "node --import tsx qa/postgres-multi-worker-failover.mjs",
     "qa:postgres:local": "node scripts/local-postgres-acceptance.mjs",

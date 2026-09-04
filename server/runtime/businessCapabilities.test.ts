@@ -450,8 +450,9 @@ test('OpenAPI and MCP tools validate, pin, authorize, approve, audit, and preser
       method: 'POST', headers: ownerHeaders,
       body: JSON.stringify({ operationId: 'read.item', agentId: 'builder', args: {} }),
     });
-    assert.equal(badArgs.status, 502);
-    assert.match((await json<{ error: string }>(badArgs)).error, /id不能为空/);
+    assert.equal(badArgs.status, 400);
+    const badArgsBody = await json<{ error: string; details?: string[] }>(badArgs);
+    assert.match(JSON.stringify(badArgsBody.details ?? badArgsBody.error), /id/);
 
     const foreignTask = await harness.tasks.createTask({ tenantId: 'tenant-other', userId: 'other', sessionId: 'other', title: '其他任务', input: 'x', mode: 'analyze' });
     const foreignLineage = await harness.request(`/tool-sources/${source.id}/call`, {
@@ -551,7 +552,9 @@ test('OpenAPI and MCP tools validate, pin, authorize, approve, audit, and preser
     const listedSources = (await json<{ sources: Array<{ id: string; data: { usageCount: number; successRate: number } }> }>(sourceList)).sources;
     const usedSource = listedSources.find((item) => item.id === source.id);
     assert.ok((usedSource?.data.usageCount ?? 0) >= 2);
-    assert.ok((usedSource?.data.successRate ?? 0) > 0.5 && (usedSource?.data.successRate ?? 1) < 1);
+    // Invalid arguments are rejected before provider execution and therefore
+    // must not dilute the source success rate.
+    assert.equal(usedSource?.data.successRate, 1);
 
     const pendingAuthResponse = await harness.request('/tool-sources', {
       method: 'POST', headers: ownerHeaders,

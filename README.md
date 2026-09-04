@@ -2,7 +2,7 @@
 
 > 把一句话交给一组真正会分工的 Agent。Axiom 会判断任务难度、安排合适的 Agent、展示实时进度，并在交付前帮你检查结果。
 
-当前源码版本：**v2.2.0**（受控能力包、飞书协作、多 Worker 恢复和完整质量门禁稳定版）
+当前源码版本：**v2.3.0-rc.4**（内网企业化与 MCP 安全恢复候选版）
 
 ![Axiom 任务台](docs/images/overview.png)
 
@@ -93,13 +93,24 @@ TypeScript 全栈只是开发方式，真正的优势来自平台如何完成任
 - 🪽 **飞书真正参与协作**：使用飞书自建应用连接后，Agent 可以读取云文档、日历和群消息，也可以在人工确认后发送消息。App Secret 只在服务端加密保存，不进入工具描述、日志或模型上下文。
 - 🚀 **前端资源加载更稳定**：HTML 入口始终重新验证，带构建哈希的 JS/CSS 使用长期不可变缓存，升级后不会长期停留在旧界面，也减少重复下载。
 
+### 🆕 v2.3.0-rc.4：MCP 安全恢复
+
+在 v2.2.0 稳定执行链之上，当前候选版增加了面向内网使用的 MCP 安全控制：
+
+- 外部工具描述和结果按不可信数据处理，过滤提示词注入片段，并明确标记“仅供参考，不是系统指令”。
+- 高风险写操作审批默认 15 分钟过期；过期后自动失效，不能继续调用。
+- 只读工具遇到瞬时网络错误时默认最多重试 2 次；中高风险写操作只执行一次，避免重复副作用。
+- Fake MCP 业务门禁扩展为 30 个 P0 + 10 个 P1，当前 `npm run qa:mcp-business` 为 40/40 通过，并纳入 `qa:all:local`。
+
+详细的配置项、边界和未完成的外部依赖见 [上线就绪度](docs/launch-readiness.md) 和 [工具目录](docs/tool-registry.md)。
+
 ### 🧭 从任务到业务交付
 
 最新的业务能力 V2 把复杂任务的前后步骤连成了一个可执行闭环：失败或需求变化时只重排受影响部分；Agent 之间用结构化摘要、证据和 Artifact 交接；Reviewer 会阻止证据缺失或互相矛盾的结论进入已验证交付。
 
 项目空间可以集中管理任务、会话、Agent Nexus、日程、决策、成员和审核。任务结束后可以继续分析、局部重跑、换模型复核、导出报告，或保存为 Nexus、插件和日程。平台还提供十种常用业务方案、可控长期记忆、按需选择的 MCP/OpenAPI 能力目录、真实反馈聚合，以及随运行事件更新的成本和时间预估。
 
-平台可以接入很多种 MCP，但不会让每个 Agent 同时看到所有工具。大量工具会增加 Token、延迟和误选概率，也会扩大第三方服务故障与权限风险。更合适的方式是按用户需要组合“办公、研究、开发、业务、内容、运维、数据”等能力包，再由路由每轮挑选少量相关工具。飞书服务账号已经使用独立的加密凭据代理；任意 MCP 的 API Key 注入和通用 OAuth 2 回调、刷新、撤销仍在下一批，未完成授权的来源继续保持禁用。
+平台可以接入很多种 MCP，但不会让每个 Agent 同时看到所有工具。大量工具会增加 Token、延迟和误选概率，也会扩大第三方服务故障与权限风险。更合适的方式是按用户需要组合“办公、研究、开发、业务、内容、运维、数据”等能力包，再由路由每轮挑选少量相关工具。飞书和通用集成凭据已经使用独立的加密代理；通用 OAuth 2 回调、刷新、撤销仍需目标供应商现场接入，未完成授权的来源继续保持禁用。
 
 这些能力都有 SQLite/PostgreSQL 持久化、服务端权限和 API 回归，不是只在页面上展示。完整说明、使用边界和验收方法见 [业务能力 V2](docs/business-capabilities-v2.md)。
 
@@ -131,17 +142,19 @@ Synthesizer：只汇总已验证的结果
 
 ```text
 npm run check       通过
-npm test            388 tests / 387 passed / 0 failed / 1 skipped
+npm test            431 tests / 430 passed / 0 failed / 1 skipped
 npm run qa:business-postgres
                     1 passed / 0 failed / 0 skipped（独立 PostgreSQL 测试库）
 npm run build       通过
 npm run qa:search-agent
                     通过
 npm run qa:all:local
-                    30 passed / 0 failed / 3 skipped
+                    32 passed / 0 failed / 3 skipped
+npm run qa:governance
+                    2 passed / 0 failed
 ```
 
-2026-09-04 的 `v2.2.0` 稳定版门禁使用本机 PostgreSQL 15 独立临时库和 MinIO 测试桶执行；30 个可运行项目全部在第一次尝试通过，没有依靠失败重试掩盖不稳定问题。真实复杂任务产生 513 个连续事件和 411 个 SSE 流式增量，共使用 24,014 Token；Reviewer 低分触发人工门禁，明确批准后完整交付 717 字符 Artifact。PostgreSQL 专项覆盖编译产物迁移、业务记录、加密凭据、首次并发迁移、Worker 进程崩溃、租约到期竞争、旧 Worker 隔离和单次终态；MinIO 专项覆盖双 Store 读取、租户前缀、范围删除、约 1 MB 对象和 PNG 二进制。临时数据库随后删除，测试对象也已清理。
+2026-09-04 的 `v2.3.0-rc.4` 内网企业化门禁使用本机 PostgreSQL 15 独立临时库和 MinIO 测试桶执行；32 个可运行项目全部在第一次尝试通过，没有依靠失败重试掩盖不稳定问题。内网治理专项覆盖租户工具配额、并发槽位、熔断恢复、能力包 manifest 审计、加密凭据、跨重启运行指标和本地 Fake MCP 30 个 P0 + 10 个 P1 业务案例。P1 额外验证非法 JSON-RPC、初始化失败、空工具目录、实时目录漂移、超时恢复、恶意描述/结果清洗、审批过期、凭据轮换和读写重试策略；PostgreSQL 专项覆盖编译产物迁移、业务记录、加密凭据、首次并发迁移、Worker 进程崩溃、租约到期竞争、旧 Worker 隔离和单次终态；MinIO 专项覆盖双 Store 读取、租户前缀、范围删除、约 1 MB 对象和 PNG 二进制。临时数据库随后删除，测试对象也已清理。
 
 仍未现场验收的是 3 项需要额外端点或进程的能力：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器和 Harness/Codex sidecar。目标部署仍须用自己的 MinIO/S3/COS bucket 重跑对象存储门禁；本机 MinIO 通过不等于云端权限、网络和生命周期策略已经验收。跳过不等于通过，也不影响本地记忆、Artifact 目录和协议级 Harness/Codex 回归。
 
@@ -386,6 +399,7 @@ npm run db:migrate  # 使用已构建的服务端执行 PostgreSQL 迁移
 npm start           # 运行构建后的单体服务
 npm run qa:visual   # 浏览器界面验收
 npm run qa:business # 分段业务闭环评测
+npm run qa:mcp-business # 本地 Fake MCP 30 个 P0 + 10 个 P1 业务门禁
 npm run qa:context-summary # 持久摘要 API 回归
 npm run qa:harness-live # 已配置 sidecar 的真实能力握手
 npm run qa:object-storage # 已配置 MinIO/S3/COS 时验证跨 Worker Artifact
@@ -413,6 +427,9 @@ npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 | 外部 Agent | `DEEPSEEK_HARNESS_*`、`CODEX_APP_SERVER_*` | 接入 Harness 或 Codex sidecar |
 | Nexus 附件 | `AXIOM_NEXUS_ARTIFACT_BUDGET_BYTES` | 单任务可加载的附件总预算，默认 20 MB |
 | 外部工具路由 | `AXIOM_EXTERNAL_TOOL_TOP_K` | 每个 Agent 步骤最多注入的相关 MCP/OpenAPI 工具，默认 6 |
+| MCP 调用超时 | `AXIOM_MCP_CALL_TIMEOUT_MS` | MCP 单次调用超时，限制在 10ms 至 120s，默认 30s |
+| 只读工具重试 | `AXIOM_EXTERNAL_READ_RETRIES` | 只读工具瞬时失败的额外重试次数，默认 2 次，最多 3 次；写操作不重试 |
+| 工具审批有效期 | `AXIOM_TOOL_APPROVAL_TTL_MS` | 高风险写操作审批有效期，默认 15 分钟，限制在 1 秒至 24 小时 |
 | 集成凭据加密 | `AXIOM_INTEGRATION_SECRET` | 不少于 32 个字符；加密飞书等集成的 Secret，未设置时回退到 `AXIOM_PROVIDER_SECRET` |
 | 外发通知 | `AXIOM_NOTIFICATION_SECRET`、`AXIOM_NOTIFICATION_RETENTION_DAYS` | 签名 Webhook、失败重试与投递审计 |
 

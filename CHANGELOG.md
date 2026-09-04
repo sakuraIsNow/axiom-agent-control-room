@@ -2,6 +2,47 @@
 
 本项目采用语义化版本。只有完成源码检查、测试、构建和规定的 QA 门禁后，版本才会进入正式标签。
 
+## [2.3.0-rc.4] - 2026-09-04
+
+### MCP 安全与恢复评测
+
+- 外部 MCP/OpenAPI 描述和结果统一按不可信数据处理：移除控制字符、提示边界标签和常见提示词注入片段，并用明确的结果边界标记交给 Agent 与 Artifact。
+- 高风险工具审批增加默认 15 分钟有效期（可用 `AXIOM_TOOL_APPROVAL_TTL_MS` 配置，服务端限制 1 秒至 24 小时）；过期审批自动失效，不能继续执行写操作。
+- 凭据轮换通过相同凭据 ID 重新加密替换，旧密文不再可解析，API 响应和列表继续不返回 Secret。
+- 只读工具支持有限指数退避重试（默认最多 2 次重试，可用 `AXIOM_EXTERNAL_READ_RETRIES` 配置，最多 3 次）；中高风险写操作保持单次调用并继续使用审批幂等，避免重复副作用。
+
+### 质量门禁
+
+- Fake MCP 评测从 30 个 P0 + 5 个 P1 扩展为 30 个 P0 + 10 个 P1，新增恶意描述/结果、审批过期、凭据轮换和读写重试策略；`npm run qa:mcp-business` 为 40/40 通过，并纳入 `qa:all:local`。
+
+## [2.3.0-rc.3] - 2026-09-04
+
+### MCP 可靠性与故障闭环
+
+- 新增 5 个 P1 Fake MCP 案例，覆盖非法 JSON-RPC、初始化失败、空工具目录、实时工具目录漂移和调用超时后的恢复；保留原有 30 个 P0 案例不变。
+- MCP 健康探测会对实时 `tools/list` 生成规范化目录摘要，并与固定版本比较；目录漂移会持久化为不健康状态、从 Tool Registry 下线并阻断调用。
+- MCP 调用超时增加 `AXIOM_MCP_CALL_TIMEOUT_MS` 配置，服务端限制在 10ms 至 120s，异常响应保持失败可审计，不会伪造成功。
+
+### 质量门禁
+
+- `npm run qa:mcp-business`：35 passed / 0 failed / 0 skipped，其中 P0 为 30/30，P1 为 5/5。
+- 完整 `npm run qa:all:local` 会自动包含 35 个 MCP 案例；本地 PostgreSQL、MinIO、运行时、浏览器视觉回归和性能基线继续纳入同一门禁。
+- Fake MCP 仍只代表本地可重复验收；真实 MemoryCore、目标对象存储和 Harness/Codex sidecar 仍需部署环境现场验证。
+
+## [2.3.0-rc.2] - 2026-09-04
+
+### 新增
+
+- 新增本地 HTTP Fake MCP 质量门禁，真实覆盖 `initialize`、`notifications/initialized`、`tools/list` 和 `tools/call`，不绕过业务 API 直接测试内部函数。
+- 完成 30 个 P0 业务评测案例，覆盖工具路由、简单对话无副作用、跨轮工具漂移、租户与 Agent 权限、工具目录隔离、Schema 参数校验、小时/月度/并发配额、熔断半开恢复、高风险拒绝与人工审核、审批幂等重试、Artifact lineage 和敏感信息脱敏。
+- 工具参数在配额、审核和外部调用前校验；非法参数不会消耗配额、创建审核或触发 MCP 副作用。
+
+### 质量门禁
+
+- 新增 `npm run qa:mcp-business`，输出 TAP 结果并生成 `qa/mcp-business-eval-results.json`。
+- `npm run qa:all:local` 已自动包含 MCP 业务评测；最近一次专项结果为 `30 passed / 0 failed / 0 skipped`，耗时约 3.2 秒；完整本地门禁结果为 `32 passed / 0 failed / 3 skipped`。
+- Fake MCP 仅用于本地可重复的业务安全评测，不代表真实 MemoryCore、S3/COS、OAuth 或 Harness/Codex sidecar 已完成目标环境现场验收。
+
 ## [2.2.0] - 2026-09-04
 
 ### 新增
@@ -147,3 +188,22 @@
 ## [1.0.0]
 
 - 首个开源基线版本。
+## [2.3.0-rc.1] - 2026-09-04
+
+### 新增
+
+- 内网企业治理存储，SQLite/PostgreSQL 双实现，持久化租户策略、工具配额窗口、工具健康和运行指标。
+- 租户工具源数量、schema Token、小时/月度调用和并发配额；配额拒绝在服务端原子执行。
+- Tool Registry 调用熔断状态机（healthy/degraded/open/half-open），连续失败自动熔断，冷却后半开恢复。
+- 通用 MCP/OpenAPI 凭据 API，统一加密保存 API Key、OAuth2 和服务账号 Secret，支持轮换与删除。
+- 能力包安装记录增加 manifest digest、权限、风险和审核状态；新增 `qa:governance` 生产门禁。
+
+### 边界
+
+- 本版只完成内网可自证的控制面；真实 OAuth 供应商、OIDC、TencentDB MemoryCore、云对象存储、邮件和 Harness/Codex sidecar 仍需目标环境现场验收。
+
+### 验收
+
+- `npm run check` 通过。
+- `npm test`：391 tests / 390 passed / 0 failed / 1 skipped。
+- `npm run qa:all:local`：31 passed / 0 failed / 3 skipped；`npm run qa:governance`：2 passed / 0 failed。
