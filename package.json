@@ -1,6 +1,6 @@
 {
   "name": "agent-control-room",
-  "version": "2.3.0-rc.4",
+  "version": "2.3.0-rc.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,6 +16,7 @@
     "qa:runtime": "node scripts/runtime-smoke.mjs",
     "qa:report-export": "tsx scripts/report-export-smoke.ts",
     "qa:visual": "node scripts/visual-qa.mjs",
+    "qa:i18n": "node qa/ui-language-smoke.mjs",
     "qa:agentgraph3d": "node qa/agentgraph-3d-smoke.mjs",
     "qa:object-storage": "node --import tsx qa/object-storage-integration.mjs",
     "qa:object-storage:local": "node scripts/local-object-storage-acceptance.mjs",

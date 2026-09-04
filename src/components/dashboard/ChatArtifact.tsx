@@ -70,7 +70,7 @@ export function ChatFileArtifact({ attachment }: { attachment: FileAttachment })
 export function ChatMessageMarkdown({ content }: { content: string }) {
   const rawKind = inferRawArtifactKind(content);
   if (rawKind) return <ChatArtifact kind={rawKind} content={content.trim()} name="Agent 生成内容" />;
-  return <ReactMarkdown
+  return <div className="dash-chat-markdown" data-i18n-ignore="true"><ReactMarkdown
     remarkPlugins={[remarkGfm]}
     components={{
       table: ({ children }) => <div className="dash-chat-table-wrap"><table>{children}</table></div>,
@@ -85,5 +85,5 @@ export function ChatMessageMarkdown({ content }: { content: string }) {
         return <code className={className} {...props}>{children}</code>;
       },
     }}
-  >{content}</ReactMarkdown>;
+  >{content}</ReactMarkdown></div>;
 }

@@ -864,3 +864,11 @@ npm run qa:search-agent
 - [x] 凭据轮换重新加密并替换旧密文，API 响应和列表不返回 Secret；只读工具默认最多重试 2 次，中高风险写操作保持单次执行。
 - [x] 新增 10 个 P1 评测，连同 P0 共 40/40 通过；`qa:mcp-business` 与 `qa:all:local` 均自动执行。
 - [ ] 下一批：接入真实 MCP OAuth/API Key 轮换现场验收、工具输出引用/证据可信度评测，并将恶意内容隔离指标接入运行观测和告警。
+
+### 2026-09-04 v2.3.0-rc.5 中英文界面
+
+- [x] Git 默认 README 改为英文并保留完整中文 README，两份文档可双向切换。
+- [x] 平台默认英文，右上角可切换简体中文；语言选择使用本地存储与 `?lang=` 深链接持久化。
+- [x] 覆盖九个主工作区、模型配置、Readiness 和通知中心；用户输入、模型回答、代码和 Artifact 不参与界面翻译。
+- [x] 新增 `qa:i18n` 并接入完整生产门禁，验证默认英文、可见平台文案、中文持久化和英文回切。
+- [x] 完整本地门禁：`npm test` 为 433 tests / 432 passed / 0 failed / 1 skipped；`npm run qa:all:local` 为 33 passed / 0 failed / 3 skipped，所有可运行项目首次通过。

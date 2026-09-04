@@ -80,6 +80,13 @@ try {
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: headers });
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem('axiom-ui-language-v1', 'zh-CN');
+    } catch {
+      // Sandboxed previews intentionally cannot access origin storage.
+    }
+  });
   const page = await context.newPage();
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
   await page.getByRole('button', { name: 'Agent Nexus', exact: true }).click();

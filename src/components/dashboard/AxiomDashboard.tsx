@@ -24,6 +24,7 @@ import { FirstRunGuide } from './FirstRunGuide';
 import { groupTaskRuns } from '../../lib/taskGrouping';
 import type { DashboardProps } from './dashboardTypes';
 import { ThemePicker } from '../ThemePicker';
+import { LanguagePicker } from '../LanguagePicker';
 import { readDashboardUrlState, subscribeDashboardUrlState, writeDashboardUrlState } from '../../lib/dashboardUrlState';
 import '../../styles/dashboard.css';
 
@@ -210,6 +211,7 @@ export function AxiomDashboard(props: DashboardProps) {
         <button type="button" onClick={onOpenReadiness} title="生产就绪"><Wrench size={15} /></button>
         <button type="button" onClick={onOpenSettings} title="运行设置"><Settings2 size={15} /></button>
         <ThemePicker value={theme} onChange={onThemeChange} />
+        <LanguagePicker />
       </div>
     </header>
     <div ref={layoutRef} className={`dash-layout ${nav === 'chat' ? 'chat-active' : nav === 'projects' ? 'projects-active' : nav === 'plugins' ? 'plugins-active' : nav === 'templates' ? 'templates-active' : nav === 'workflows' ? 'workflows-active' : nav === 'operations' ? 'operations-active' : ''}`}>

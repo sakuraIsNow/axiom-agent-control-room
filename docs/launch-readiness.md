@@ -4,7 +4,15 @@
 
 ## 结论
 
-当前工作树是 `v2.3.0-rc.4` 内网企业化与 MCP 安全恢复候选版：在 `v2.2.0` 稳定执行链上补齐了租户治理、工具配额与熔断、通用凭据代理、能力包 manifest 审计、跨重启运行指标、本地 Fake MCP P0/P1 质量门禁、工具目录漂移保护和不可信工具内容隔离。内网 PostgreSQL/MinIO 和完整本地门禁已通过；外部 OIDC/OAuth 供应商、MemoryCore、云对象存储和 Harness/Codex sidecar 仍按部署环境单独验收。
+当前工作树是 `v2.3.0-rc.5` 中英文界面与内网企业化候选版：在 `v2.3.0-rc.4` 的 MCP 安全恢复基础上增加默认英文、简体中文切换、语言持久化和独立浏览器门禁。租户治理、工具配额与熔断、通用凭据代理、能力包 manifest 审计、跨重启运行指标、本地 Fake MCP P0/P1 质量门禁、工具目录漂移保护和不可信工具内容隔离继续保留。内网 PostgreSQL/MinIO 和完整本地门禁已通过；外部 OIDC/OAuth 供应商、MemoryCore、云对象存储和 Harness/Codex sidecar 仍按部署环境单独验收。
+
+## v2.3.0-rc.5 中英文界面验证（2026-09-04）
+
+- `README.md` 默认使用英文，`README.zh-CN.md` 保留完整中文说明并提供双向入口。
+- 新用户界面默认 `en`，右上角可以切换 `zh-CN`；选择跨刷新持久化，`?lang=` 可以显式覆盖。
+- `qa:i18n` 遍历九个工作区、模型配置、Readiness 和通知中心，检查英文界面无可见平台中文残留，并验证中文持久化和英文回切；用户与模型内容明确排除。
+- `qa:i18n` 已加入生产门禁；本节只描述界面语言能力，不改变 rc.4 已记录的外部服务现场验收边界。
+- `npm test` 为 `433 tests / 432 passed / 0 failed / 1 skipped`；完整 `npm run qa:all:local` 为 `33 passed / 0 failed / 3 skipped`，33 个可运行门禁均在第一次尝试通过。
 
 当前版本可用于本地、内网或受控团队环境，但不是可以直接暴露到公网的完整企业 SaaS。任务、事件、租约恢复、动态路由、子 Agent 并行、Reviewer 质量门禁、PostgreSQL 持久化、Docker 沙箱、MinIO 验收和租户治理已经形成可运行闭环。当前启动实例的 `GET /api/health` 返回 `ready`；`GET /api/runtime/readiness` 返回 `degraded` 且没有硬阻塞，PostgreSQL、文本与图像模型、Docker 沙箱和 Prometheus 已就绪。未启用签名租户身份、未配置视频服务和长期记忆、正式实例尚未绑定目标云 Artifact 存储是当前降级告警。用户级任务、日程和 Artifact 通知已经可以通过签名 Webhook 外发；邮件渠道、运营级系统告警外发、Scheduler/Outbox 多副本和目标云环境灾难恢复仍待完成。
 

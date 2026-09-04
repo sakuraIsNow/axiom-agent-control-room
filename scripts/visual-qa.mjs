@@ -64,6 +64,13 @@ const layout = async (page) => page.evaluate(() => {
 
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, extraHTTPHeaders: qaHeaders });
+await context.addInitScript(() => {
+  try {
+    localStorage.setItem('axiom-ui-language-v1', 'zh-CN');
+  } catch {
+    // Sandboxed plugin previews intentionally cannot access origin storage.
+  }
+});
 const page = await context.newPage();
 const consoleErrors = [];
 const httpErrors = [];
@@ -1253,6 +1260,13 @@ const verifyFirstRunDestination = async ({ destination, selector, viewport, scre
     viewport,
     extraHTTPHeaders: { 'x-axiom-tenant-id': onboardingTenant, 'x-axiom-user-id': onboardingTenant },
   });
+  await onboardingContext.addInitScript(() => {
+    try {
+      localStorage.setItem('axiom-ui-language-v1', 'zh-CN');
+    } catch {
+      // Sandboxed previews intentionally cannot access origin storage.
+    }
+  });
   const onboardingPage = await onboardingContext.newPage();
   onboardingPage.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(`[onboarding:${destination}] ${message.text()}`); });
   onboardingPage.on('pageerror', (caught) => consoleErrors.push(`[onboarding:${destination}] ${caught.message}`));
@@ -1293,6 +1307,13 @@ const onboardingDeepLinkTenant = `${qaTenant}-onboarding-deep-link`;
 const onboardingDeepLinkContext = await browser.newContext({
   viewport: { width: 1440, height: 900 },
   extraHTTPHeaders: { 'x-axiom-tenant-id': onboardingDeepLinkTenant, 'x-axiom-user-id': onboardingDeepLinkTenant },
+});
+await onboardingDeepLinkContext.addInitScript(() => {
+  try {
+    localStorage.setItem('axiom-ui-language-v1', 'zh-CN');
+  } catch {
+    // Sandboxed previews intentionally cannot access origin storage.
+  }
 });
 const onboardingDeepLinkPage = await onboardingDeepLinkContext.newPage();
 onboardingDeepLinkPage.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(`[onboarding:deep-link] ${message.text()}`); });

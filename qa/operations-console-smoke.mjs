@@ -4,6 +4,13 @@ import { resolve } from 'node:path';
 const baseUrl = process.env.QA_URL ?? 'http://127.0.0.1:4300';
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+await context.addInitScript(() => {
+  try {
+    localStorage.setItem('axiom-ui-language-v1', 'zh-CN');
+  } catch {
+    // Sandboxed previews intentionally cannot access origin storage.
+  }
+});
 const page = await context.newPage();
 const consoleErrors = [];
 page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });

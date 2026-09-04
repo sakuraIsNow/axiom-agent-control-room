@@ -57,6 +57,7 @@ const checks = [
   ['MCP 业务评测', 'qa:mcp-business'],
   ['内网企业治理（配额、熔断、持久指标）', 'qa:governance'],
   ['3D Agent Graph', 'qa:agentgraph3d'],
+  ['界面中英文回归', 'qa:i18n'],
   ['浏览器视觉回归', 'qa:visual'],
   ['并发性能基线', 'perf:smoke'],
 ];

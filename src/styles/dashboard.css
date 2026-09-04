@@ -831,6 +831,8 @@
 .dash-chat-message-content { min-width: 0; font-size: 14px; line-height: 1.72; overflow-wrap: anywhere; }
 .dash-chat-message-content > :first-child { margin-top: 0; }
 .dash-chat-message-content > :last-child { margin-bottom: 0; }
+.dash-chat-markdown > :first-child { margin-top: 0; }
+.dash-chat-markdown > :last-child { margin-bottom: 0; }
 .dash-chat-message-content pre { max-width: 100%; overflow-x: auto; padding: 12px; border: 1px solid var(--dash-line); border-radius: 6px; background: rgb(0 0 0 / 42%); }
 .dash-chat-message-content code { font-family: "Cascadia Code", Consolas, monospace; font-size: .9em; }
 .dash-chat-table-wrap { width: 100%; max-width: 100%; margin: 14px 0; overflow-x: auto; border: 1px solid var(--dash-line-strong); border-radius: 8px; background: rgb(255 255 255 / 4%); }

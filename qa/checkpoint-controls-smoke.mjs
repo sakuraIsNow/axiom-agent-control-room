@@ -52,6 +52,13 @@ const diff = {
 
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 820 } });
+await context.addInitScript(() => {
+  try {
+    localStorage.setItem('axiom-ui-language-v1', 'zh-CN');
+  } catch {
+    // Sandboxed previews intentionally cannot access origin storage.
+  }
+});
 const page = await context.newPage();
 const consoleErrors = [];
 const failedResponses = [];
