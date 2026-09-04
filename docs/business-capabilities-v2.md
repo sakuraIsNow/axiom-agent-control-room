@@ -103,6 +103,8 @@ npm run qa:all
 
 2026-09-04 v2.2.0-rc.1 验收：`npm test` 为 `384 passed / 0 failed / 1 skipped`；`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped`，所有可运行项目均在第一次尝试通过。真实复杂任务形成 520 个连续事件、421 个 SSE 增量和 30,415 Token，经过 Reviewer 与一次人工确认后完成。PostgreSQL 专项在独立临时库补跑为 `1 passed / 0 failed`，同时验证凭据跨实例恢复、跨租户覆盖拒绝和多 Worker 首次初始化；测试库已删除。扣除已补跑的 PostgreSQL，仍有 MemoryCore、外部对象存储和 Harness/Codex sidecar 四项外部现场验收未执行。
 
+2026-09-04 v2.2.0 稳定版验收：`npm run qa:all:local` 为 `30 passed / 0 failed / 3 skipped`，所有可运行项目均首次通过。新增门禁使用一次性 PostgreSQL 数据库验证打包后迁移入口、Task Worker 进程崩溃、租约到期唯一接管、旧 owner 隔离和单次终态，并用本机 MinIO 验证跨 Store 读写、租户隔离、范围删除、大对象与 PNG 二进制；扫描 PDF 页码定位也已进入单元回归。三项跳过仅为未配置 endpoint/命令的 MemoryCore HTTP、MemoryCore 适配器和 Harness/Codex sidecar。
+
 ## 当前边界
 
 - 单节点可以使用本地文件 Artifact；多 Worker 必须配置 MinIO/S3/COS，并在目标环境验证二进制跨进程读取、租户隔离、超时、删除和失败恢复。

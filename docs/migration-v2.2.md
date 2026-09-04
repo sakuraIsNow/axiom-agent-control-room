@@ -1,12 +1,12 @@
 # v2.2 能力包迁移指南
 
-本文适用于从 `v2.1.0` 升级到 `v2.2.0-rc.2`。这一候选版增加按租户管理的能力包、加密集成凭据仓库和飞书服务账号连接器，并补齐生产门禁与前端资源缓存，不改变现有任务、会话、Nexus 或 Artifact 数据格式。
+本文适用于从 `v2.1.0` 升级到 `v2.2.0`。这一稳定版增加按租户管理的能力包、加密集成凭据仓库、飞书服务账号连接器、PostgreSQL 多 Worker 故障接管门禁和本地 MinIO 验收，并补齐生产门禁与前端资源缓存，不改变现有任务、会话、Nexus 或 Artifact 数据格式。
 
 ## 升级步骤
 
-1. 备份 PostgreSQL/SQLite 和 `.env.local`，安装依赖后运行 `npm run build`。
+1. 备份 PostgreSQL/SQLite 和 `.env.local`。源码部署安装依赖后先运行 `npm run build`；发布 ZIP 已包含 `server-dist/`，可直接安装生产依赖。
 2. 为生产或长期测试环境设置不少于 32 个字符、随机且稳定的 `AXIOM_INTEGRATION_SECRET`。未设置时会回退到 `AXIOM_PROVIDER_SECRET`，回退密钥也必须满足同样长度。
-3. 启动服务。SQLite/PostgreSQL 会自动创建 `integration_credentials` 表，现有业务表不会被清空。
+3. PostgreSQL 部署先运行 `npm run db:migrate`，再启动服务。SQLite/PostgreSQL 会自动创建 `integration_credentials` 表；PostgreSQL Task Store 使用串行迁移和 schema 版本哨兵，现有业务表不会被清空。正式命令只依赖已构建的 `server-dist/`，源码调试也可使用 `npm run db:migrate:dev`。
 4. 进入“项目空间 → 能力”，确认开发与代码、研究与论文、办公协作、数据分析四个推荐包已启用。
 5. 在飞书开放平台创建企业自建应用，授予实际需要的只读或发送权限，再使用 App ID/App Secret 完成真实连接验证。
 
@@ -19,7 +19,11 @@
 
 ## 密钥轮换
 
-`AXIOM_INTEGRATION_SECRET` 是本地加密主密钥，不会存入数据库。直接更换会导致旧密文无法解密；当前候选版尚未提供在线重加密命令。轮换前应先断开现有飞书连接，更换密钥并重启，再重新连接。正式多副本部署必须让所有 Worker 使用同一个 Secret Manager 版本。
+`AXIOM_INTEGRATION_SECRET` 是本地加密主密钥，不会存入数据库。直接更换会导致旧密文无法解密；当前版本尚未提供在线重加密命令。轮换前应先断开现有飞书连接，更换密钥并重启，再重新连接。正式多副本部署必须让所有 Worker 使用同一个 Secret Manager 版本。
+
+## 升级后验收
+
+本机安装 Docker 且 PostgreSQL 管理账号允许创建临时数据库时，运行 `npm run qa:all:local`。脚本会启动 `docker-compose.local.yml` 中固定版本的 MinIO，创建并删除独立 QA 数据库，同时执行完整门禁。目标环境使用自己的 S3/COS/MinIO 时，仍需配置对应 endpoint、bucket 和凭据后运行 `npm run qa:object-storage`。
 
 ## 尚未包含
 

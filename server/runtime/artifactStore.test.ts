@@ -202,6 +202,8 @@ test('S3 endpoint configuration supports s3 URLs and path-style MinIO/COS endpoi
     process.env.AXIOM_OBJECT_STORAGE_ENDPOINT = 's3://axiom-artifacts/runs';
     delete process.env.AXIOM_OBJECT_STORAGE_BUCKET;
     delete process.env.AXIOM_OBJECT_STORAGE_PREFIX;
+    delete process.env.AXIOM_OBJECT_STORAGE_REGION;
+    delete process.env.AXIOM_OBJECT_STORAGE_FORCE_PATH_STYLE;
     const s3 = s3ArtifactConfigFromEnv();
     assert.deepEqual(s3 && { bucket: s3.bucket, prefix: s3.prefix, endpoint: s3.endpoint, forcePathStyle: s3.forcePathStyle }, {
       bucket: 'axiom-artifacts', prefix: 'runs', endpoint: undefined, forcePathStyle: false,

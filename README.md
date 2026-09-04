@@ -2,7 +2,7 @@
 
 > 把一句话交给一组真正会分工的 Agent。Axiom 会判断任务难度、安排合适的 Agent、展示实时进度，并在交付前帮你检查结果。
 
-当前源码版本：**v2.2.0-rc.2**（能力包、飞书连接与质量门禁候选版；`v2.1.0` 为当前稳定标签）
+当前源码版本：**v2.2.0**（受控能力包、飞书协作、多 Worker 恢复和完整质量门禁稳定版）
 
 ![Axiom 任务台](docs/images/overview.png)
 
@@ -131,18 +131,19 @@ Synthesizer：只汇总已验证的结果
 
 ```text
 npm run check       通过
-npm test            385 passed / 0 failed / 1 skipped
+npm test            388 tests / 387 passed / 0 failed / 1 skipped
 npm run qa:business-postgres
                     1 passed / 0 failed / 0 skipped（独立 PostgreSQL 测试库）
 npm run build       通过
 npm run qa:search-agent
                     通过
-npm run qa:all      27 passed / 0 failed / 4 skipped
+npm run qa:all:local
+                    30 passed / 0 failed / 3 skipped
 ```
 
-2026-09-04 的 `v2.2.0-rc.2` 候选版门禁开始前已确认 Docker 与 PostgreSQL 容器正常运行；27 个可运行门禁项目全部在第一次尝试通过，没有依靠失败重试掩盖不稳定问题。真实复杂任务产生 939 个连续事件和 842 个 SSE 流式增量，共使用 44,681 Token；Reviewer 触发一次真实人工确认后正常完成。PostgreSQL 专项使用独立临时数据库进入总门禁，覆盖业务记录、凭据跨实例恢复、跨租户覆盖拒绝和首次并发初始化；测试库随后删除，未触碰业务数据库。
+2026-09-04 的 `v2.2.0` 稳定版门禁使用本机 PostgreSQL 15 独立临时库和 MinIO 测试桶执行；30 个可运行项目全部在第一次尝试通过，没有依靠失败重试掩盖不稳定问题。真实复杂任务产生 513 个连续事件和 411 个 SSE 流式增量，共使用 24,014 Token；Reviewer 低分触发人工门禁，明确批准后完整交付 717 字符 Artifact。PostgreSQL 专项覆盖编译产物迁移、业务记录、加密凭据、首次并发迁移、Worker 进程崩溃、租约到期竞争、旧 Worker 隔离和单次终态；MinIO 专项覆盖双 Store 读取、租户前缀、范围删除、约 1 MB 对象和 PNG 二进制。临时数据库随后删除，测试对象也已清理。
 
-仍未现场验收的是 4 项外部服务：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器、MinIO/S3/COS 对象存储和 Harness/Codex sidecar。配置对应 endpoint 或命令后，可以继续进行真实多 Worker 验收；跳过不等于通过，也不影响 SQLite、本地 Artifact 目录和协议级 Harness/Codex 回归。
+仍未现场验收的是 3 项需要额外端点或进程的能力：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器和 Harness/Codex sidecar。目标部署仍须用自己的 MinIO/S3/COS bucket 重跑对象存储门禁；本机 MinIO 通过不等于云端权限、网络和生命周期策略已经验收。跳过不等于通过，也不影响本地记忆、Artifact 目录和协议级 Harness/Codex 回归。
 
 ### 📈 本机性能基线
 
@@ -346,6 +347,7 @@ DATABASE_URL=postgresql://postgres:change-me@127.0.0.1:5432/axiom
 执行迁移并启动：
 
 ```bash
+npm run build
 npm run db:migrate
 npm run dev
 ```
@@ -380,13 +382,17 @@ SQLite 适合单人本地使用；PostgreSQL 用于多 Worker、任务恢复和�
 npm run check       # TypeScript 检查
 npm test            # 单元和运行时测试
 npm run build       # 构建前端和服务端
+npm run db:migrate  # 使用已构建的服务端执行 PostgreSQL 迁移
 npm start           # 运行构建后的单体服务
 npm run qa:visual   # 浏览器界面验收
 npm run qa:business # 分段业务闭环评测
 npm run qa:context-summary # 持久摘要 API 回归
 npm run qa:harness-live # 已配置 sidecar 的真实能力握手
 npm run qa:object-storage # 已配置 MinIO/S3/COS 时验证跨 Worker Artifact
+npm run qa:object-storage:local # 自动准备本机 MinIO 并验收测试桶
+npm run qa:postgres:local # 使用一次性 PostgreSQL 数据库演练 Worker 接管
 npm run qa:all      # 生产门禁回归
+npm run qa:all:local # 本机 MinIO + 临时 PostgreSQL 完整稳定版门禁
 npm run release:package # 构建可部署 ZIP，并生成 SHA-256 校验文件
 ```
 

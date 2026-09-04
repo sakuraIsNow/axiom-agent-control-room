@@ -4,9 +4,17 @@
 
 ## 结论
 
-当前版本是“本地或受控单节点生产候选”，不是可以直接暴露到公网的企业生产系统。任务、事件、租约恢复、动态路由、子 Agent 并行、Reviewer 质量门禁、PostgreSQL 持久化、PostgreSQL 调度和 Docker 沙箱已经形成可运行闭环。当前启动实例的 `GET /api/health` 返回 `ready`；`GET /api/runtime/readiness` 返回 `degraded` 且没有硬阻塞，PostgreSQL、文本与图像模型、Docker 沙箱和 Prometheus 已就绪。未启用签名租户身份、未配置视频服务和长期记忆、对象存储仍使用本地目录是当前四项降级告警。用户级任务、日程和 Artifact 通知已经可以通过签名 Webhook 外发；邮件渠道、运营级系统告警自动外发和真实 PostgreSQL 多 Worker 演练仍待完成。
+当前版本是可用于本地、内网或受控团队环境的 `v2.2.0` 稳定版，不是可以直接暴露到公网的完整企业 SaaS。任务、事件、租约恢复、动态路由、子 Agent 并行、Reviewer 质量门禁、PostgreSQL 持久化、Docker 沙箱和本地 MinIO 验收已经形成可运行闭环。当前启动实例的 `GET /api/health` 返回 `ready`；`GET /api/runtime/readiness` 返回 `degraded` 且没有硬阻塞，PostgreSQL、文本与图像模型、Docker 沙箱和 Prometheus 已就绪。未启用签名租户身份、未配置视频服务和长期记忆、正式实例仍使用本地 Artifact 目录是当前四项降级告警。用户级任务、日程和 Artifact 通知已经可以通过签名 Webhook 外发；邮件渠道、运营级系统告警外发、Scheduler/Outbox 多副本和目标云环境灾难恢复仍待完成。
 
 这意味着：内部试用、单团队灰度和受控网络部署可以开始；面向多个租户、外部用户或高价值自动化任务前，必须完成下面的上线门禁。
+
+## v2.2.0 稳定版验证（2026-09-04）
+
+`npm run check`、`npm run build` 通过；`npm test` 为 `388 tests / 387 passed / 0 failed / 1 skipped`，跳过的 PostgreSQL 用例由独立专项覆盖。`npm run qa:all:local` 使用一次性 PostgreSQL 数据库与固定版本 MinIO，最终为 `30 passed / 0 failed / 3 skipped`，30 项均在第一次尝试通过。三项跳过仅为未配置端点或命令的 MemoryCore HTTP、MemoryCore Axiom 适配器和 Harness/Codex sidecar。
+
+真实复杂 Runtime 产生 513 个连续事件、411 个可见 SSE 增量和 24,014 Token；Reviewer 低分触发人工门禁，明确批准后交付 717 字符 Artifact。PostgreSQL 演练先通过打包后的 `server-dist/migrate.js` 执行迁移，再强制终止持有租约的 OS 进程，验证租约到期后的唯一接管、旧 owner 隔离、连续事件序号和单次终态；首次并发迁移使用 advisory transaction lock 与 schema 版本哨兵，不再重复执行运行期 DDL。MinIO 演练验证双 Store 跨 Worker 读取、租户隔离、范围删除、约 1 MB 对象和 PNG 二进制，测试对象和临时数据库均已清理。
+
+浏览器回归覆盖桌面与移动布局、Agent Graph、Agent Nexus、插件、设置、项目能力包、飞书入口、通知、日程、报告 Artifact 和人工审核交付，控制台与 HTTP 错误均为 0。10 并发、每接口 50 次请求全部返回 HTTP 200；health、Readiness、运行观测和任务列表的吞吐/P95 分别为 `1216.68 RPS / 12.72ms`、`1908.76 / 6.36ms`、`728.78 / 15.50ms`、`1297.97 / 9.22ms`。
 
 ## v2.2.0-rc.2 候选版验证（2026-09-04）
 
@@ -28,26 +36,26 @@ PostgreSQL 专项随后在独立临时库补跑为 `1 passed / 0 failed`，验�
 
 | 能力 | 当前状态 | 证据/边界 |
 | --- | --- | --- |
-| 任务持久化与恢复 | 已可用 | PostgreSQL task/event 表、租约、`FOR UPDATE SKIP LOCKED`、SSE 事件回放 |
+| 任务持久化与恢复 | 已可用，本机故障接管已验收 | PostgreSQL task/event 表、租约、`FOR UPDATE SKIP LOCKED`、SSE 事件回放；跨进程崩溃、到期竞争、唯一接管和单次终态已进入 `qa:postgres-failover` |
 | 智能分级路由 | 已可用 | `direct`、`single-agent`、`team`、`full-workflow` 四路回归评测 4/4 |
 | 子 Agent 协作 | 已可用 | Planner 生成依赖批次，Researcher/Analyst/Builder 并行，Reviewer 可要求修正 |
 | 失败处理 | 已可用 | 模型超时/429/5xx 退避重试；推理模型自适应超时与并发；流读取停滞可中止；部分 Agent 失败时保留检查点并生成部分交付，全部失败才终止 |
 | 工具执行隔离 | 有边界可用 | Docker `--network=none`、只读根文件系统、能力丢弃、命令白名单；当前已接入 4 个只读/测试 Tool Registry 工具，写入和发布工具仍需策略审批 |
 | 图片生成/编辑 | 已可用 | 独立于文本会话的 Image Runtime；服务端 DMX 或临时自定义 Provider |
 | 长期记忆 | 适配器与恢复闭环已完成，部署未启用 | `TencentMemoryClient` 已完成 L1/L2/L3 召回、过期/置信度过滤、时间游标去重、跨重启收据和失败补偿；当前平台正式环境仍未配置 `TDAI_MEMORY_ENDPOINT`，真实 TencentDB 现场验收待凭据 |
-| 多实例 Artifact | 生命周期目录已接入，外部存储部署未验收 | `artifact_records`/`artifact_references` 持久化来源、保留期、引用和清理状态；S3 兼容 Put/Get/Delete、租户作用域 key、超时和 `HeadBucket` 探测已接入；`npm run qa:object-storage` 可在配置 endpoint 后验证双 Worker 读写、租户隔离、删除和大对象回读；当前仍使用本地目录，需配置 MinIO/S3/COS 并完成真实验收 |
+| 多实例 Artifact | 本机 MinIO 已验收，目标部署待复验 | `artifact_records`/`artifact_references` 持久化来源、保留期、引用和清理状态；S3 兼容 Put/Get/Delete、租户作用域 key、超时和 `HeadBucket` 探测已接入；本机已验证双 Store 读写、租户隔离、范围删除、大对象和二进制回读，正式实例仍需配置自己的 MinIO/S3/COS |
 | 多实例触发器 | 基础可用 | 配置 `DATABASE_URL` 时使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 调度和租约；Webhook 已有 HMAC、幂等、指数退避和死信恢复，仍需外部告警与多实例压测 |
 | 用户与租户隔离 | 仅有边界 | HMAC principal 已实现，但本地未启用；公网不能信任客户端租户 header |
 | 可观测性 | 基础可用 | Prometheus 文本指标、持久任务/事件运营快照和告警 API 已启用；进程内 counters 重启清零，OTel exporter 尚未接入 |
 | Harness/Codex transport | 协议级完成，现场接入待配置 | DeepSeek ACP 与 Codex app-server v2 JSON-RPC stdio、Thread/Turn/Item 事件、审批回放、断点恢复和断流补偿已通过 fake sidecar；真实 sidecar 需固定版本和 workspace |
 | Agent Nexus 控制流 | 已可用 | 条件 DSL、多 Loop/嵌套 Loop（最多 256 步）、分支事件、DAG 展开和节点级局部重跑已通过单元/API 回归 |
-| Nexus 二进制附件 | 单节点已可用，多 Worker 待外部存储验收 | 测试与 Release 固定附件集合和 SHA-256；视觉/文档 Agent 读取真实内容，运行时校验租户、流程、MIME、大小和摘要；当前本地目录只适合单 Worker |
+| Nexus 二进制附件 | 单节点已可用，多 Worker 存储契约已验收 | 测试与 Release 固定附件集合和 SHA-256；视觉/文档 Agent 读取真实内容，运行时校验租户、流程、MIME、大小和摘要；本机 MinIO 二进制跨 Store 回读已通过，目标部署仍须用实际 bucket 复验 |
 | MCP/OpenAPI 能力路由 | 能力包和飞书服务账号已可用 | 七类能力包、租户启停、健康探测、Agent 权限、调用质量和任务级 Top-K 已进入统一 Tool Registry；飞书 Secret 已加密，通用 MCP API Key/OAuth 代理尚未完成 |
 | 业务能力 V2 | 受控环境可用 | 动态 Replanner、结构化交接、证据图、项目空间、Nexus 附件/发布、动态工具、长期记忆策略、交付后动作、Agent 干预、协作、反馈、解决方案、智能选择和运行预估均复用持久任务事实源 |
 | 插件发布与恢复 | 已可用 | 发布前检查完整结构、直连网络、外部资源、字段冲突和工具权限；修改后自动回草稿，历史版本以新版本恢复；Prompt 运行与 Mini App 打开前均重读当前版本；可选 HMAC 签名覆盖内容、权限和发布身份，内容、权限风险、签名或验签配置漂移时拒绝运行 |
 | 租户内插件市场 | 已可用 | 作者提交具体版本，签名租户 `owner/admin` 审核后生成不可变市场快照；安装固定版本，新版需显式升级；撤回版本立即禁止启动和运行，并可恢复到仍有效的安全审核版本。当前范围是租户内市场，不是跨租户公共应用商店 |
 | Checkpoint 分支与合并 | 已可用 | revision 原子冲突检测、幂等分支、差异比较和三方合并已通过单元/API/浏览器回归；冲突策略必须显式选择 |
-| 长结果与上下文恢复 | 已可用，外部对象存储待现场配置 | 大步骤输出使用 `result_ref`，普通 Agent 只接收预览，Reviewer/Synthesizer 有界回读；持久摘要带来源 digest，漂移后自动重建；运行观测展示压缩、覆盖、复用、重建和 tokenizer 可信模式，当前默认仍是保守 Token 估算；对象存储故障时数据库保留全文 |
+| 长结果与上下文恢复 | 已可用，本机外部存储已验收 | 大步骤输出使用 `result_ref`，普通 Agent 只接收预览，Reviewer/Synthesizer 有界回读；持久摘要带来源 digest，漂移后自动重建；运行观测展示压缩、覆盖、复用、重建和 tokenizer 可信模式，当前默认仍是保守 Token 估算；对象存储故障时数据库保留全文，目标 bucket 仍需复验 |
 | 首次使用路径 | 已可用 | 仅在默认任务页且任务和会话均成功确认为空时显示工作区内引导，三个入口直接进入对话、插件和 Agent Nexus；已有用户、接口读取失败和 URL 深链接恢复场景不误弹，桌面/移动端浏览器回归已覆盖 |
 | 运行告警 | 已可用 | `GET /api/runtime/alerts` 根据队列积压、租约过期、模型/工具失败、Artifact 清理和 Readiness 生成带严重级别的告警；阈值由环境变量控制 |
 | 用户外发 Webhook | 已可用，部署接收端待现场验收 | 从真实站内通知幂等投影到持久 Outbox；地址与签名密钥加密，投递带 HMAC 签名、租约、指数退避、死信、人工重投和脱敏审计；公网目标只允许 HTTPS 并在发送前复核 DNS。邮件渠道尚未实现 |
@@ -63,7 +71,7 @@ PostgreSQL 专项随后在独立临时库补跑为 `1 passed / 0 failed`，验�
 
 ### 2. 持久化与分布式运行
 
-- 为已接入的 S3/COS/MinIO adapter 配置真实 bucket，运行 `npm run qa:object-storage` 完成双 Worker 读写/删除、租户前缀、生命周期策略和大文件回读验收；大文件分片能力仍需按目标供应商协议补充。
+- 本机可运行 `npm run qa:object-storage:local` 重现 MinIO 基础验收；目标部署仍需配置自己的 S3/COS/MinIO bucket 并运行 `npm run qa:object-storage`，补充供应商分片/断点、生命周期和故障注入。
 - 使用运行观测中的 Artifact 面板检查孤儿和待清理数量；任务删除失败会保留在 `delete_pending` 重试队列，可通过 `POST /api/runtime/artifacts/cleanup` 由租户管理员重试。
 - scheduler、入站 Webhook 与外发通知 Outbox 在真实 PostgreSQL 多实例环境完成租约、幂等、退避、死信恢复和故障演练；使用真实 HTTPS 接收端验证 HMAC、重复投递和密钥轮换。
 - PostgreSQL 配置备份、恢复演练、连接池上限、慢查询监控和迁移回滚策略。

@@ -31,7 +31,7 @@
 - OpenTelemetry Collector + Prometheus：配置 `OTEL_EXPORTER_OTLP_ENDPOINT` 或 `PROMETHEUS_ENABLED=true`。
 - S3/COS/MinIO：配置 `AXIOM_OBJECT_STORAGE_ENDPOINT`。AWS 默认可写成 `s3://bucket/prefix`；MinIO/COS 可写成 `http://minio:9000/bucket/prefix` 或服务商 HTTPS endpoint，并设置 `AXIOM_OBJECT_STORAGE_BUCKET`、区域和访问凭据。服务启动时会通过 `HeadBucket` 探测可达性，失败会显示 degraded，不会伪报 ready。
 
-配置对象存储后运行 `npm run qa:object-storage`，它会用两份独立 Store 验证跨 Worker 读写、同名 Artifact 的租户隔离、租户级删除和约 1 MB 大对象回读。没有 endpoint 时该检查会明确标记为 skipped，不会把本地文件目录当成多实例验收结果。受网络限制时可手动下载并固定 MinIO 镜像版本，再设置 `AXIOM_OBJECT_STORAGE_ENDPOINT=http://127.0.0.1:9000/<bucket>/axiom-artifacts`、`AXIOM_OBJECT_STORAGE_ACCESS_KEY` 和 `AXIOM_OBJECT_STORAGE_SECRET_KEY`。
+配置对象存储后运行 `npm run qa:object-storage`，它会用两份独立 Store 验证跨 Worker 读写、同名 Artifact 的租户隔离、租户级删除、约 1 MB 大对象和 PNG 二进制回读。没有 endpoint 时该检查会明确标记为 skipped，不会把本地文件目录当成多实例验收结果。本机 Docker 环境可直接运行 `npm run qa:object-storage:local`，脚本会准备固定版本 MinIO 和测试桶；受网络限制时可先手动下载对应镜像。
 
 本地 MinIO 快速启动：
 

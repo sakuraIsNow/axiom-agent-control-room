@@ -2,6 +2,29 @@
 
 本项目采用语义化版本。只有完成源码检查、测试、构建和规定的 QA 门禁后，版本才会进入正式标签。
 
+## [2.2.0] - 2026-09-04
+
+### 新增
+
+- 新增可重复的 `qa:object-storage:local`：自动准备固定版本 MinIO、幂等创建测试桶，并验证双 Store 跨 Worker 读取、租户隔离、范围删除、大对象和二进制 Artifact。
+- 新增跨 OS 进程的 PostgreSQL Worker 故障演练：强制终止持有租约的 Worker，让两个后继 Worker 竞争过期任务，并验证唯一接管、旧 owner 隔离、连续事件序号和单次终态。
+- 新增扫描 PDF 回归：在内存中生成三页图片 PDF 和两页文本 PDF，验证前两页视觉预算、页码定位、页面顺序和文本页边界。
+- 新增 `qa:all:local`，使用一次性 PostgreSQL 数据库和本机 MinIO 执行完整稳定版门禁，结束后自动删除测试库和测试对象。
+
+### 修复
+
+- PostgreSQL Task Store 初始化增加 advisory transaction lock 和 schema 版本哨兵；新 Worker 不再重复执行 DDL，修复首次并发建表竞态以及运行期认领与重复 `ALTER TABLE` 的死锁。
+- 生产门禁隔离基础回归与外部验收环境，只有 PostgreSQL、MinIO、MemoryCore 和 Harness 专项收到各自配置，避免环境变量改变无关单测的 Store 行为。
+- S3 配置测试完整保存和恢复对象存储环境，修复在真实 MinIO 配置下继承 path-style 开关导致的错误失败。
+- 发布包的 `db:migrate` 改为运行已打包的 `server-dist/migrate.js`，不再依赖未包含的 TypeScript 源码和已由 `npm ci --omit=dev` 排除的 `tsx`；源码开发可使用 `db:migrate:dev`。
+
+### 验收
+
+- `npm run check`、`npm run build` 通过；`npm test` 为 `388 tests / 387 passed / 0 failed / 1 skipped`，跳过项由独立 PostgreSQL 专项覆盖。
+- `npm run qa:all:local` 为 `30 passed / 0 failed / 3 skipped`，30 个可运行项目均首次通过；跳过项仅为未配置端点的 MemoryCore HTTP、MemoryCore Axiom 适配器和 Harness/Codex sidecar。
+- 真实复杂 Runtime 产生 513 个连续事件、411 个 SSE 增量和 24,014 Token；Reviewer 低分触发人工门禁，明确批准后最终交付 717 字符 Artifact。
+- 10 并发、每接口 50 次请求均为 HTTP 200；health、Readiness、运行观测和任务列表 P95 分别为 12.72、6.36、15.50、9.22 ms。
+
 ## [2.2.0-rc.2] - 2026-09-04
 
 ### 修复

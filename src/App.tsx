@@ -1695,6 +1695,10 @@ function App() {
   const openCatalogTask = useCallback(async (summary: { id: string }, fallbackSession?: Session) => {
     // Clear the previous session's graph immediately; stale async responses cannot win later.
     resetSessionRuntime();
+    // Reset the previous task's operator note before the asynchronous detail
+    // request starts. Clearing it after the request resolves can erase text the
+    // operator entered while the task panel was already visible.
+    setOperatorNote('');
     const revision = sessionRuntimeRevisionRef.current;
     setTaskCatalogBusy(true);
     try {
@@ -1815,7 +1819,6 @@ function App() {
         gaps: task.review.gaps,
         requiredCorrections: task.review.requiredCorrections,
       } : null);
-      setOperatorNote('');
       if (terminal || task.status === 'paused' || task.status === 'waiting_for_human' || task.status === 'awaiting_approval') {
         setActiveTaskId(null);
         setPausedTaskId(task.status === 'paused' || task.status === 'waiting_for_human' || task.status === 'awaiting_approval' ? task.id : null);

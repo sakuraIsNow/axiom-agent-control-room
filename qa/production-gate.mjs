@@ -15,6 +15,21 @@ process.env.QA_URL_A ??= configuredQaUrl;
 const alternateUrl = new URL(configuredQaUrl);
 alternateUrl.hostname = alternateUrl.hostname === '127.0.0.1' ? 'localhost' : alternateUrl.hostname;
 process.env.QA_URL_B ??= alternateUrl.toString().replace(/\/$/, '');
+const acceptanceEnv = { ...process.env };
+const baseEnv = { ...process.env };
+for (const key of [
+  'DATABASE_URL',
+  'AXIOM_TEST_DATABASE_URL',
+  'AXIOM_OBJECT_STORAGE_ENDPOINT',
+  'AXIOM_OBJECT_STORAGE_BUCKET',
+  'AXIOM_OBJECT_STORAGE_REGION',
+  'AXIOM_OBJECT_STORAGE_PREFIX',
+  'AXIOM_OBJECT_STORAGE_ACCESS_KEY',
+  'AXIOM_OBJECT_STORAGE_SECRET_KEY',
+  'AXIOM_OBJECT_STORAGE_SESSION_TOKEN',
+  'AXIOM_OBJECT_STORAGE_FORCE_PATH_STYLE',
+  'AXIOM_OBJECT_STORAGE_SSE',
+]) delete baseEnv[key];
 const checks = [
   ['静态检查', 'check'],
   ['单元与集成测试', 'test'],
@@ -44,11 +59,11 @@ const checks = [
   ['并发性能基线', 'perf:smoke'],
 ];
 
-const runOnce = (name, script) => new Promise((resolveResult) => {
+const runOnce = (name, script, env = baseEnv) => new Promise((resolveResult) => {
   const startedAt = Date.now();
   const child = spawn(npm, ['run', script], {
     cwd: root,
-    env: process.env,
+    env,
     stdio: 'inherit',
     shell: process.platform === 'win32',
     windowsHide: true,
@@ -72,14 +87,14 @@ const runOnce = (name, script) => new Promise((resolveResult) => {
   }));
 });
 
-const run = async (name, script) => {
+const run = async (name, script, env = baseEnv) => {
   const attempts = [];
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     // A completed model task can leave short-lived worker cleanup in flight.
     // Retry one time so the gate distinguishes that transient from a stable
     // contract failure while retaining both outcomes in the report.
     // eslint-disable-next-line no-await-in-loop
-    const result = await runOnce(name, script);
+    const result = await runOnce(name, script, env);
     attempts.push({ attempt, ...result });
     if (result.status === 'passed') return { ...result, attempts };
     if (attempt < 2) await new Promise((resolveResult) => setTimeout(resolveResult, 1_000));
@@ -97,20 +112,35 @@ for (const [name, script] of checks) {
 
 const businessPostgresUrl = (process.env.AXIOM_TEST_DATABASE_URL ?? '').trim();
 if (businessPostgresUrl) {
-  results.push(await run('PostgreSQL 业务能力与多 Worker 一致性', 'qa:business-postgres'));
+  const postgresEnv = { ...acceptanceEnv, DATABASE_URL: businessPostgresUrl };
+  results.push(await run('PostgreSQL 编译产物迁移', 'db:migrate', postgresEnv));
+  results.push(await run('PostgreSQL 业务记录与凭据一致性', 'qa:business-postgres', acceptanceEnv));
+  results.push(await run('PostgreSQL 多 Worker 故障接管', 'qa:postgres-failover', acceptanceEnv));
 } else {
   results.push({
-    name: 'PostgreSQL 业务能力与多 Worker 一致性',
+    name: 'PostgreSQL 编译产物迁移',
+    script: 'db:migrate',
+    status: 'skipped',
+    reason: 'AXIOM_TEST_DATABASE_URL 未配置；发布包的编译后迁移入口未现场执行',
+  });
+  results.push({
+    name: 'PostgreSQL 业务记录与凭据一致性',
     script: 'qa:business-postgres',
     status: 'skipped',
     reason: 'AXIOM_TEST_DATABASE_URL 未配置；SQLite 回归已执行，但 PostgreSQL 现场验收未执行',
+  });
+  results.push({
+    name: 'PostgreSQL 多 Worker 故障接管',
+    script: 'qa:postgres-failover',
+    status: 'skipped',
+    reason: 'AXIOM_TEST_DATABASE_URL 未配置；跨进程崩溃、租约接管和幂等终态未演练',
   });
 }
 
 const memoryEndpoint = (process.env.TDAI_MEMORY_ENDPOINT ?? '').trim();
 if (memoryEndpoint) {
-  results.push(await run('MemoryCore HTTP 真实验收', 'qa:memorycore'));
-  results.push(await run('MemoryCore Axiom 适配器验收', 'qa:memorycore-adapter'));
+  results.push(await run('MemoryCore HTTP 真实验收', 'qa:memorycore', acceptanceEnv));
+  results.push(await run('MemoryCore Axiom 适配器验收', 'qa:memorycore-adapter', acceptanceEnv));
 } else {
   results.push({
     name: 'MemoryCore HTTP 真实验收',
@@ -128,7 +158,7 @@ if (memoryEndpoint) {
 
 const objectStorageEndpoint = (process.env.AXIOM_OBJECT_STORAGE_ENDPOINT ?? '').trim();
 if (objectStorageEndpoint) {
-  results.push(await run('Artifact 外部存储真实验收', 'qa:object-storage'));
+  results.push(await run('Artifact 外部存储真实验收', 'qa:object-storage', acceptanceEnv));
 } else {
   results.push({
     name: 'Artifact 外部存储真实验收',
@@ -145,7 +175,7 @@ const harnessSidecarConfigured = Boolean(
   || process.env.CODEX_APP_SERVER_COMMAND_JSON?.trim(),
 );
 if (harnessSidecarConfigured) {
-  results.push(await run('Harness sidecar 真实能力握手', 'qa:harness-live'));
+  results.push(await run('Harness sidecar 真实能力握手', 'qa:harness-live', acceptanceEnv));
 } else {
   results.push({
     name: 'Harness sidecar 真实能力握手',

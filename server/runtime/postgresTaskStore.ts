@@ -125,12 +125,22 @@ export class PostgresTaskStore implements TaskStore {
   }
 
   async initialize() {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('axiom:postgres-task-store:initialize'))");
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      const currentSchema = await client.query('SELECT 1 FROM schema_migrations WHERE version = 2');
+      if (currentSchema.rows[0]) {
+        await client.query('COMMIT');
+        return;
+      }
+      await client.query(`
       CREATE TABLE IF NOT EXISTS tasks (
         id UUID PRIMARY KEY,
         run_id UUID NOT NULL UNIQUE,
@@ -223,7 +233,15 @@ export class PostgresTaskStore implements TaskStore {
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS graph_json JSONB;
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_summary_json JSONB;
       ALTER TABLE task_events ADD COLUMN IF NOT EXISTS runtime_context_json JSONB;
-    `);
+      INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING;
+      `);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async close() {

@@ -345,7 +345,7 @@ npm run qa:search-agent
 - [x] 增加 DeepSeek Files API 图片上传与 24 小时内存缓存；上传失败自动回退 inline `image_url`，不影响自定义 Provider。
 - [x] 新增 `docs/deepseek-native-capabilities.md`，明确 DeepSeek 原生 API 与 Axiom 执行层的职责边界。
 - [x] 增加扫描 PDF 页面渲染、页码/表格上下文和 Vision 分页分析；扫描 PDF 限制前两页/1200px 宽度，文本 PDF 保留页码标记和表格 Markdown。
-- [ ] 为 PDF 页面视觉分析补充真实扫描样本和引用定位回归测试。
+- [x] 为 PDF 页面视觉分析补充真实扫描样本和引用定位回归测试：测试在内存中生成三页图片 PDF 和两页文本 PDF，验证前两页视觉预算、页码定位、页面顺序和文本页边界。
 
 ### 2026-08-26 对话语义路由与会话一致性
 
@@ -568,7 +568,8 @@ npm run qa:search-agent
 - [x] Artifact 第一阶段：接入 S3 兼容 `ArtifactStore`，支持 AWS S3、MinIO、腾讯 COS 的 Put/Get/Delete、租户作用域对象 key、超时、`HeadBucket` Readiness 探测、路径解析和本地文件降级；最终结果在任务进入终态前写入，删除任务/会话会清理事件关联对象；工具 Artifact 写入失败不会诱发已执行工具重试。
 - [x] MemoryCore L0-L3 深度接入：完成时间游标去重、来源/置信度/过期过滤、L1/L2/L3 更新删除、记忆质量指标、跨重启收据和失败补偿；真实 TencentDB endpoint 的现场验收按部署凭据单独执行。
 - [x] Artifact 生命周期治理（第一版）：新增持久化 `artifact_records`/`artifact_references` 目录，记录来源、租户、任务、保留期限、引用数和清理状态；任务删除会进入待清理队列，失败记录可重试，`GET/POST /api/runtime/artifacts` 提供孤儿扫描、清理和运行观测统计；启动时自动从既有任务/事件回填目录。
-- [ ] Artifact 外部存储生产验收仍待真实 MinIO/S3/COS：跨 Worker Put/Get/Delete、租户前缀隔离、断点/超时、大文件分片和跨实例清理演练。
+- [x] Artifact 外部存储本机 MinIO 验收：双 Store Put/Get/Delete、租户前缀隔离、范围删除、约 1 MB 大对象和 PNG 二进制回读已进入 `qa:object-storage:local` 与 `qa:all:local`。
+- [ ] 目标 S3/COS/MinIO 仍需补供应商现场验收：分片/断点上传、故障注入、生命周期策略和任务删除后的跨实例补偿，不能用本机 MinIO 冒充通过。
 - [x] DeepSeek Harness ACP Thread/Turn/Subscribe transport，并接入任务委托与断点恢复：ACP JSON-RPC stdio、统一事件、审批回放、Artifact/任务关联、断流暂停和跨重启恢复已通过 fake sidecar；HTTP capability discovery 仅用于兼容探测，真实 sidecar 现场验收仍需部署配置。
 - [x] Codex app-server JSON-RPC stdio/sidecar transport，固定 commit、workspace 和审批策略：协议 transport 与边界测试已完成，部署固定项待现场配置。
 - [x] Agent Nexus 条件分支、多 Loop、嵌套 Loop、节点级局部恢复和单节点重跑：已完成受限条件 DSL、最多 256 步展开、稳定 Loop 路径、分支事件和 rerun 检查点。
@@ -609,7 +610,7 @@ npm run qa:search-agent
 - [x] 带真实 MemoryCore 的完整 `npm run qa:all` 通过：`22 passed / 0 failed / 1 skipped`；唯一跳过项为未配置外部 S3/MinIO/COS 的 `qa:object-storage`，不把本地文件目录冒充多实例验收。
 
 ### 下一阶段执行顺序（2026-08-29 复核后）
-1. [ ] Artifact 外部存储真实验收：使用本地 PostgreSQL + MinIO/S3/COS 双 Worker 完成跨进程 Put/Get/Delete、租户前缀隔离、断点/超时和任务删除清理验证。
+1. [x] Artifact 外部存储基础真实验收：本地 MinIO 已完成双 Store Put/Get/Delete、租户前缀隔离、范围删除、大对象和二进制回读；厂商分片/断点、故障注入和任务删除补偿保留在 P2 部署验收。
 2. [x] Artifact 生命周期治理：为 Artifact 增加创建来源、保留期限和引用状态，提供孤儿扫描/清理任务，清理失败进入可重试队列并可在运行观测中查看；SQLite/PostgreSQL 目录和自动回填已完成，真实对象存储验收仍属于第 1 项。
 3. [x] MemoryCore 生产服务接入：L0-L3 适配器、跨重启收据、游标去重、过期/置信度过滤和失败补偿已完成；正式 TencentDB endpoint 的现场验收待部署凭据。
 4. [x] Harness transport 生产接入：DeepSeek ACP/Codex v2 stdio、审批回放、Artifact/事件关联、跨重启断点恢复和失败补偿已完成协议级回归；真实 sidecar 现场验收待部署环境。
@@ -820,5 +821,16 @@ npm run qa:search-agent
 2. [ ] 审核能力包与租户市场：在现有七类目录和租户启停基础上，补固定版本签名、权限声明、发布审核、撤回和兼容性检查，不提供无审核“一键全开”。
 3. [ ] 后台健康巡检与熔断：定时探测、连续失败熔断、半开恢复、延迟/成功率趋势和告警；模型请求不现场执行健康探测。
 4. [ ] 租户工具配额：限制来源数量、每小时调用、并发、schema/Token 预算和高风险写操作策略；配额拒绝进入持久审计和运营指标。
-5. [ ] 外部对象存储现场验收：PostgreSQL + MinIO/S3/COS 双 Worker 验证二进制跨进程读取、租户隔离、超时、删除和失败补偿。
+5. [x] 本机外部对象存储验收：固定 MinIO 镜像、自动测试桶、双 Store 二进制读取、租户隔离、删除和大对象回读已进入总门禁。
 6. [ ] MCP 业务评测：为办公、研究、开发等能力包建立成功率、误选率、延迟、Token、费用和人工接管基线，Router 只根据可验证数据调整排序。
+7. [ ] 目标对象存储部署验收：在实际 S3/COS/MinIO 上验证超时、分片/断点、生命周期和删除失败补偿。
+
+### 2026-09-04 v2.2.0 稳定版收口
+
+1. [x] PostgreSQL Task Store 初始化使用 advisory transaction lock 与 schema 版本哨兵，修复首次并发迁移和重复 DDL/任务认领死锁。
+2. [x] 跨进程 Worker 故障演练覆盖持租约进程崩溃、到期后双 Worker 竞争、唯一接管、旧 owner 隔离、连续事件序号和单次终态。
+3. [x] 本地 MinIO 验收覆盖跨 Store 读取、租户前缀、范围删除、约 1 MB 对象和 PNG 二进制，并在结束时清理测试对象。
+4. [x] 扫描 PDF 与文本 PDF 回归覆盖页面预算、顺序、页码引用定位和视觉回退边界。
+5. [x] `qa:all:local` 自动准备 MinIO 和一次性 PostgreSQL 数据库；基础回归与外部凭据环境隔离，正常结束后清理测试库，并注册中止信号清理处理器。
+6. [x] 稳定版完整门禁：`30 passed / 0 failed / 3 skipped`，30 项均首次通过；真实 Runtime 为 513 个连续事件、411 个 SSE 增量、24,014 Token，Reviewer 低分触发人工门禁并在明确批准后完成 717 字符交付。
+7. [ ] 正式 TencentDB MemoryCore 与真实 Harness/Codex sidecar 仍待目标 endpoint/命令，不能将协议测试或本地替代实现记为外部验收。
