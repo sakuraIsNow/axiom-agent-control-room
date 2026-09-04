@@ -8,6 +8,12 @@
 
 这意味着：内部试用、单团队灰度和受控网络部署可以开始；面向多个租户、外部用户或高价值自动化任务前，必须完成下面的上线门禁。
 
+## v2.2.0-rc.2 候选版验证（2026-09-04）
+
+`npm run check`、`npm run build` 通过；`npm test` 为 `385 passed / 0 failed / 1 skipped`，`npm run qa:all` 为 `27 passed / 0 failed / 4 skipped`，所有可运行门禁均在第一次尝试通过。真实复杂 Runtime 产生 939 个连续事件、842 个可见 SSE 增量和 44,681 Token，经过一次真实人工确认后完整结束。浏览器回归覆盖桌面和移动布局、Agent Graph、Agent Nexus、插件、模型设置、能力包、飞书入口、报告导出和人工审核交付，控制台与 HTTP 错误均为 0。
+
+PostgreSQL 专项使用隔离临时数据库进入总门禁并通过，测试库随后删除。25 并发、每接口 200 次请求全部返回 HTTP 200；health、Readiness、运行观测和任务列表的吞吐/P95 分别为 `2030.49 RPS / 21.38ms`、`2493.75 / 11.77ms`、`1156.45 / 34.40ms`、`2596.16 / 14.78ms`。仍未现场验收的四项是 MemoryCore HTTP、MemoryCore Axiom 适配器、外部对象存储和 Harness/Codex sidecar；跳过不等于通过。
+
 ## 最新本机验证（2026-09-03）
 
 本轮门禁开始前已确认 Docker、`ubuntu:22.04` 沙箱镜像和 PostgreSQL 15 容器可用。在当前 Windows 单节点、本地测试数据和 10 并发条件下，50 次请求全部返回 HTTP 200；本次 `npm run perf:smoke` 的并发吞吐为 health `1722.04 RPS / P95 8.86ms`、Readiness `2460.17 RPS / P95 5.12ms`、运行观测 `929.22 RPS / P95 11.57ms`、任务列表 `2074.96 RPS / P95 5.77ms`。`npm test` 为 `379 passed / 0 failed / 1 skipped`；唯一跳过的 PostgreSQL 业务契约随后在独立临时数据库中补跑为 `1 passed / 0 failed / 0 skipped`，测试库已删除。`npm run qa:all` 为 `24 passed / 0 failed / 5 skipped`，24 项均在第一次尝试通过；扣除已补跑的 PostgreSQL，剩余 4 项为未配置的 MemoryCore HTTP、MemoryCore 适配器、外部 Artifact 存储和 Harness/Codex sidecar。真实复杂 Runtime 产生 732 个连续事件、624 个可见流式增量和 46,523 Token，Reviewer 45 分触发一次真实人工确认后正常完成，并交付 568 字符 Artifact。该基线包含真实模型任务、PostgreSQL 业务记录测试、Docker 沙箱探测和浏览器回归，但不代表公网容量；跳过不等于通过。

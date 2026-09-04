@@ -5,21 +5,21 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const configuredQaUrl = process.env.QA_URL?.trim().replace(/\/$/, '');
-if (configuredQaUrl) {
-  process.env.AXIOM_API_ORIGIN ??= configuredQaUrl;
-  process.env.AXIOM_WEB_ORIGIN ??= configuredQaUrl;
-  process.env.AXIOM_API_BASE ??= configuredQaUrl;
-  process.env.QA_API ??= configuredQaUrl;
-  process.env.QA_URL_A ??= configuredQaUrl;
-  const alternateUrl = new URL(configuredQaUrl);
-  alternateUrl.hostname = alternateUrl.hostname === '127.0.0.1' ? 'localhost' : alternateUrl.hostname;
-  process.env.QA_URL_B ??= alternateUrl.toString().replace(/\/$/, '');
-}
+const configuredQaUrl = (process.env.QA_URL?.trim() || 'http://127.0.0.1:8787').replace(/\/$/, '');
+process.env.QA_URL = configuredQaUrl;
+process.env.AXIOM_API_ORIGIN ??= configuredQaUrl;
+process.env.AXIOM_WEB_ORIGIN ??= configuredQaUrl;
+process.env.AXIOM_API_BASE ??= configuredQaUrl;
+process.env.QA_API ??= configuredQaUrl;
+process.env.QA_URL_A ??= configuredQaUrl;
+const alternateUrl = new URL(configuredQaUrl);
+alternateUrl.hostname = alternateUrl.hostname === '127.0.0.1' ? 'localhost' : alternateUrl.hostname;
+process.env.QA_URL_B ??= alternateUrl.toString().replace(/\/$/, '');
 const checks = [
   ['静态检查', 'check'],
   ['单元与集成测试', 'test'],
   ['生产构建', 'build'],
+  ['多格式报告导出', 'qa:report-export'],
   ['运行时 SSE 与 Artifact', 'qa:runtime'],
   ['聊天与多模态', 'qa:chat'],
   ['直达聊天流式重试', 'qa:direct-stream'],
@@ -30,6 +30,7 @@ const checks = [
   ['租户隔离', 'qa:data-isolation'],
   ['任务删除', 'qa:task-delete'],
   ['人工审核', 'qa:human-review'],
+  ['审核后交付结果回填', 'qa:review-delivery'],
   ['执行中实时引导', 'qa:live-guidance'],
   ['检查点分支与合并', 'qa:checkpoint'],
   ['运营观测', 'qa:operations'],

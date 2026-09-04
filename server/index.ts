@@ -41,6 +41,7 @@ import { createOutboundNotificationStore, OutboundNotificationManager } from './
 import { createBusinessCapabilityStore } from './runtime/businessCapabilityStore.js';
 import { registerPersistedExternalTools } from './runtime/businessCapabilities.js';
 import { createIntegrationCredentialStore } from './runtime/integrationCredentialStore.js';
+import { frontendCacheControl } from './runtime/frontendCache.js';
 
 dotenv.config({ path: resolve(process.cwd(), '.env.local'), quiet: true });
 dotenv.config({ quiet: true });
@@ -1803,8 +1804,14 @@ app.post('/api/images', async (c) => {
 
 const serveFrontend = !process.argv.includes('--api-only') && process.env.AXIOM_SERVE_FRONTEND !== 'false';
 if (serveFrontend) {
-  app.use('/*', serveStatic({ root: './dist' }));
-  app.get('*', serveStatic({ path: './dist/index.html' }));
+  app.use('/*', serveStatic({
+    root: './dist',
+    onFound: (path, c) => c.header('Cache-Control', frontendCacheControl(path)),
+  }));
+  app.get('*', serveStatic({
+    path: './dist/index.html',
+    onFound: (_path, c) => c.header('Cache-Control', 'no-cache'),
+  }));
 }
 
 const httpServer = serve(
