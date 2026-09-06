@@ -39,6 +39,7 @@ export type ToolContext = {
   stepId: string;
   callId: string;
   auditId: string;
+  approvalId?: string;
 };
 
 export type RegisteredTool = {
@@ -626,7 +627,7 @@ export class ToolRegistry {
     }
     this.checkQuota(task.id);
     const startedAt = Date.now();
-    const context = { task, stepId, callId, auditId };
+    const context = { task, stepId, callId, auditId, ...(existingApproval?.status === 'approved' ? { approvalId: existingApproval.id } : {}) };
     const commandArgs = tool.handler ? undefined : tool.buildArgs!(parsedArgs);
     let result: SandboxResult;
     try {

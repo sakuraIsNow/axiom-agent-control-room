@@ -20,6 +20,7 @@ testUrl.pathname = `/${database}`;
 const admin = new Pool({ connectionString: adminUrl.toString(), max: 1, connectionTimeoutMillis: 10_000 });
 const node = process.execPath;
 const productionGate = process.argv.includes('--production-gate');
+const stabilityGate = process.argv.includes('--stability');
 let databaseCreated = false;
 let cleanupStarted = false;
 
@@ -63,6 +64,14 @@ try {
     process.env.AXIOM_OBJECT_STORAGE_SECRET_KEY = (process.env.AXIOM_MINIO_ROOT_PASSWORD ?? 'change-me-minio').trim();
     process.env.AXIOM_OBJECT_STORAGE_FORCE_PATH_STYLE = 'true';
     await run(['qa/production-gate.mjs']);
+  } else if (stabilityGate) {
+    await run(['--import', 'tsx', '--test', '--test-concurrency=1',
+      'server/runtime/historyScale.test.ts',
+      'server/runtime/enterpriseGovernance.postgres.test.ts',
+      'server/runtime/outboundNotifications.postgres.test.ts',
+      'server/runtime/scheduler.postgres.test.ts',
+      'server/runtime/businessCapabilityStore.postgres.test.ts',
+    ]);
   } else {
     await run(['--import', 'tsx', '--test', 'server/runtime/businessCapabilityStore.postgres.test.ts']);
     await run(['--import', 'tsx', 'qa/postgres-multi-worker-failover.mjs']);
@@ -70,7 +79,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     isolatedDatabase: true,
-    ...(productionGate ? { productionGate: true, localMinio: true } : { businessContracts: true, workerFailover: true }),
+    ...(productionGate ? { productionGate: true, localMinio: true } : stabilityGate ? { stabilityContracts: true } : { businessContracts: true, workerFailover: true }),
   }));
 } finally {
   await cleanup();

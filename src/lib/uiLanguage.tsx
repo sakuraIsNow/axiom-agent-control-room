@@ -123,6 +123,7 @@ const englishByChinese: Record<string, string> = {
   '重新规划并整改': 'Replan and revise',
   '对话工作区': 'Conversation workspace',
   '最近对话': 'Recent conversations',
+  '回到最新消息': 'Jump to latest message',
   '新对话': 'New conversation',
   '开始对话': 'Start a conversation',
   '你': 'You',

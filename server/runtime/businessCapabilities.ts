@@ -5,7 +5,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { ArtifactStore } from './artifactStore.js';
 import type { ArtifactCatalog } from './artifactCatalog.js';
-import { BusinessRecordRevisionConflictError, type BusinessCapabilityStore, type BusinessRecord } from './businessCapabilityStore.js';
+import { BusinessRecordRevisionConflictError, ToolCallQuotaError, type BusinessCapabilityStore, type BusinessRecord } from './businessCapabilityStore.js';
 import type { AgentStore, PluginStore, TaskStore, TemplateAccess, TemplateStore, WorkflowTemplate } from './contracts.js';
 import type { TaskCoordinator } from './coordinator.js';
 import { verifyPrincipal } from './principal.js';
@@ -18,7 +18,7 @@ import type { MemoryScope, TencentMemoryClient } from './memoryClient.js';
 import { capabilityPackById, capabilityPackCatalog, capabilityPackManifestDigest, recommendedCapabilityPackIds } from './capabilityPacks.js';
 import type { IntegrationCredentialStore } from './integrationCredentialStore.js';
 import type { EnterpriseGovernanceStore } from './enterpriseGovernance.js';
-import { GovernanceQuotaError, GovernanceToolUnavailableError } from './enterpriseGovernance.js';
+import { GovernanceQuotaError, GovernanceToolUnavailableError, keepToolCallLease } from './enterpriseGovernance.js';
 import { acquireFeishuTenantToken, feishuOpenApiSpecification, invokeFeishuOperation } from './feishuConnector.js';
 import { attachmentDataUrl, decodeAttachmentDataUrl } from './attachmentContent.js';
 import {
@@ -575,27 +575,51 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
         const currentOperation = (Array.isArray(current.data.operations) ? current.data.operations as Operation[] : [])
           .find((candidate) => candidate.operationId === operation.operationId && candidate.method === operation.method);
         if (!currentOperation) throw new Error('固定工具版本中已不存在该操作。');
+        const validationErrors = validateJsonValue(operationInputSchema(currentOperation), input);
+        if (validationErrors.length) throw new Error(`工具参数校验失败：${validationErrors.slice(0, 8).join(' ')}`);
+        if (currentOperation.risk === 'high' && governance && (await governance.getPolicy(context.task.tenantId)).highRiskPolicy === 'deny') throw new Error('当前租户策略禁止高风险工具调用。');
+        const approval = context.task.toolApprovals?.find((item) => item.id === context.approvalId && item.status === 'approved');
+        if (currentOperation.risk === 'high' && !approval) throw new Error('该外部写操作需要人工批准后才能执行。');
+        const claim = await records.claimToolCall({ tenantId: context.task.tenantId, userId: context.task.userId,
+          sourceId: current.id, approvalId: approval?.id,
+          hourlyQuota: Math.min(1_000, Math.max(1, Number(process.env.AXIOM_EXTERNAL_TOOL_CALLS_PER_HOUR ?? 60))),
+          data: { signature: approval?.signature, taskId: context.task.id, stepId: context.stepId,
+            operationId: currentOperation.operationId, sourceVersion: current.data.version, pinnedDigest: current.data.pinnedDigest } });
+        let receipt = claim.record;
+        if (!claim.claimed) {
+          if (receipt.status === 'completed' && typeof receipt.data.responseContent === 'string') return {
+            stdout: receipt.data.responseContent, stderr: '', exitCode: 0, durationMs: 0, auditId: context.auditId,
+          };
+          throw new Error('该操作正在执行或上次结果尚未确认，请先人工核对执行记录；系统不会重复执行外部写操作。');
+        }
         const startedAt = Date.now();
-        let governanceReserved = false;
+        let reservationId: string | undefined;
+        let stopLease: (() => void) | undefined;
         let attemptStarted = false;
         try {
           if (governance) {
-            await governance.reserveToolCall(context.task.tenantId, current.id);
-            governanceReserved = true;
+            reservationId = (await governance.reserveToolCall(context.task.tenantId, current.id)).reservationId;
+            stopLease = keepToolCallLease(governance, context.task.tenantId, reservationId);
           }
           attemptStarted = true;
           const result = await invokeExternalOperation(current, currentOperation, input, integrations, fetchImpl);
           const durationMs = Date.now() - startedAt;
-          await recordExternalToolOutcome(records, current.id, context.task.tenantId, result.ok, durationMs);
-          if (governance) await governance.recordToolOutcome(context.task.tenantId, current.id, result.ok, durationMs);
-          return { stdout: result.content, stderr: result.ok ? '' : `外部工具返回 HTTP ${result.responseStatus}。`, exitCode: result.ok ? 0 : result.responseStatus, durationMs, auditId: context.auditId };
+          const content = redactExternalContent(result.content, input).slice(0, 48_000);
+          receipt = await records.update(receipt.id, context.task.tenantId, { status: result.ok ? 'completed' : currentOperation.risk === 'high' ? 'outcome_unknown' : 'failed',
+            data: { ...receipt.data, responseStatus: result.responseStatus, responseContent: content } }, receipt.revision);
+          await recordExternalToolOutcome(records, current.id, context.task.tenantId, result.ok, durationMs).catch(() => undefined);
+          if (governance) await governance.recordToolOutcome(context.task.tenantId, current.id, result.ok, durationMs, undefined, reservationId).catch(() => undefined);
+          return { stdout: content, stderr: result.ok ? '' : `外部工具返回 HTTP ${result.responseStatus}。`, exitCode: result.ok ? 0 : result.responseStatus, durationMs, auditId: context.auditId };
         } catch (error) {
           const durationMs = Date.now() - startedAt;
-          if (attemptStarted || !governance) await recordExternalToolOutcome(records, current.id, context.task.tenantId, false, durationMs);
-          if (governance && attemptStarted) await governance.recordToolOutcome(context.task.tenantId, current.id, false, durationMs, error instanceof Error ? error.message : '工具调用失败').catch(() => undefined);
+          if (!attemptStarted) await records.delete(receipt.id, context.task.tenantId).catch(() => false);
+          else await records.update(receipt.id, context.task.tenantId, { status: currentOperation.risk === 'high' ? 'outcome_unknown' : 'failed', data: { ...receipt.data, error: String(error instanceof Error ? error.message : '工具调用失败').slice(0, 2_000) } }, receipt.revision).catch(() => undefined);
+          if (attemptStarted) await recordExternalToolOutcome(records, current.id, context.task.tenantId, false, durationMs).catch(() => undefined);
+          if (governance && attemptStarted) await governance.recordToolOutcome(context.task.tenantId, current.id, false, durationMs, error instanceof Error ? error.message : '工具调用失败', reservationId).catch(() => undefined);
           throw error;
         } finally {
-          if (governance && governanceReserved) await governance.releaseToolCall(context.task.tenantId).catch(() => undefined);
+          stopLease?.();
+          if (governance && reservationId) await governance.releaseToolCall(context.task.tenantId, reservationId).catch(() => undefined);
         }
       },
     };
@@ -1457,23 +1481,32 @@ export const createBusinessCapabilityApi = (dependencies: {
       }
       if (approval.kind !== 'task-action' || approval.data.action !== 'tool-approval' || approval.data.signature !== signature || approval.status !== 'approved') return c.json({ error: approval.status === 'rejected' ? '该工具调用已被拒绝。' : '工具调用审批尚未通过。' }, 409);
     }
-    // A high-risk approval is the durable idempotency key. If the client
-    // retries after receiving a successful response, return the existing
-    // receipt without invoking the provider again.
-    if (body.data.approvalId) {
-      const prior = (await records.list(value.tenantId, 'task-action', { limit: 500 }))
-        .find((record) => record.status === 'completed' && record.data.action === 'tool-call' && record.data.approvalId === body.data.approvalId);
-      if (prior) return c.json({ ok: true, responseStatus: Number(prior.data.responseStatus ?? 200), artifactId: prior.data.artifactId, receiptId: prior.id, deduplicated: true });
-    }
-    const recent = (await records.list(value.tenantId, 'task-action', { userId: value.userId, limit: 500 })).filter((record) => record.data.action === 'tool-call' && record.data.sourceId === source.id && Date.now() - Date.parse(record.createdAt) < 60 * 60 * 1_000);
     const hourlyQuota = Math.min(1_000, Math.max(1, Number(process.env.AXIOM_EXTERNAL_TOOL_CALLS_PER_HOUR ?? 60)));
-    if (recent.length >= hourlyQuota) return c.json({ error: `该工具源每小时最多调用 ${hourlyQuota} 次。` }, 429);
-    let governanceReserved = false;
+    let receipt: BusinessRecord;
+    try {
+      const claim = await records.claimToolCall({ tenantId: value.tenantId, userId: value.userId, sourceId: source.id,
+        approvalId: operation.risk === 'high' ? body.data.approvalId : undefined, hourlyQuota,
+        data: { sourceVersion: source.data.version, pinnedDigest: source.data.pinnedDigest, operationId: operation.operationId,
+          agentId: body.data.agentId, taskId: body.data.taskId, signature } });
+      receipt = claim.record;
+      if (!claim.claimed) {
+        if (receipt.data.signature !== signature) return c.json({ error: '该审批已经绑定其他工具参数。' }, 409);
+        if (receipt.status === 'completed') return c.json({ ok: true, responseStatus: Number(receipt.data.responseStatus ?? 200), artifactId: receipt.data.artifactId, receiptId: receipt.id, deduplicated: true });
+        return c.json({ error: '该操作正在执行或上次结果尚未确认。请先核对执行记录，系统不会重复执行外部写操作。', receiptId: receipt.id, executionState: receipt.status }, 409);
+      }
+    } catch (error) {
+      if (error instanceof ToolCallQuotaError) return c.json({ error: `该工具源每小时最多调用 ${hourlyQuota} 次。` }, 429);
+      return c.json({ error: '无法保存工具执行记录，本次未调用外部服务。' }, 503);
+    }
+    let reservationId: string | undefined;
+    let stopLease: (() => void) | undefined;
     if (enterpriseGovernance) {
       try {
-        await enterpriseGovernance.reserveToolCall(value.tenantId, source.id);
-        governanceReserved = true;
+        reservationId = (await enterpriseGovernance.reserveToolCall(value.tenantId, source.id)).reservationId;
+        stopLease = keepToolCallLease(enterpriseGovernance, value.tenantId, reservationId);
       } catch (error) {
+        // The provider has not been entered, so this claim is safe to discard.
+        await records.delete(receipt.id, value.tenantId).catch(() => false);
         const status = error instanceof GovernanceQuotaError ? 429 : error instanceof GovernanceToolUnavailableError ? 503 : 409;
         return c.json({ error: error instanceof GovernanceQuotaError
           ? '租户工具配额已用尽，请稍后再试或联系管理员。'
@@ -1486,19 +1519,20 @@ export const createBusinessCapabilityApi = (dependencies: {
       const content = redactExternalContent(response.content, body.data.args);
       const artifactId = `tool:${source.id}:${randomUUID()}`;
       const stored = artifacts ? await artifacts.put(artifactId, content, value.tenantId) : null;
-      const receipt = await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'task-action', status: response.ok ? 'completed' : 'failed', data: { action: 'tool-call', sourceId: source.id, sourceVersion: source.data.version, pinnedDigest: source.data.pinnedDigest, operationId: operation.operationId, agentId: body.data.agentId, taskId: body.data.taskId, approvalId: body.data.approvalId, responseStatus: response.responseStatus, artifactId, storageKey: stored?.key, bytes: Buffer.byteLength(content), signature } });
-      await recordExternalToolOutcome(records, source.id, value.tenantId, response.ok, Date.now() - startedAt);
-      if (enterpriseGovernance) await enterpriseGovernance.recordToolOutcome(value.tenantId, source.id, response.ok, Date.now() - startedAt);
+      receipt = await records.update(receipt.id, value.tenantId, { status: response.ok ? 'completed' : operation.risk === 'high' ? 'outcome_unknown' : 'failed', data: { ...receipt.data, responseStatus: response.responseStatus, artifactId, storageKey: stored?.key, bytes: Buffer.byteLength(content) } }, receipt.revision);
+      await recordExternalToolOutcome(records, source.id, value.tenantId, response.ok, Date.now() - startedAt).catch(() => undefined);
+      if (enterpriseGovernance) await enterpriseGovernance.recordToolOutcome(value.tenantId, source.id, response.ok, Date.now() - startedAt, undefined, reservationId).catch(() => undefined);
       if (stored && artifactCatalog) await artifactCatalog.register({ id: artifactId, tenantId: value.tenantId, taskId: body.data.taskId ?? receipt.id, source: 'tool', storageKey: stored.key, bytes: stored.bytes, mimeType: 'application/json', referenceKey: `external:${source.id}:${receipt.id}` }).catch(() => undefined);
       return c.json({ ok: response.ok, responseStatus: response.responseStatus, artifactId, receiptId: receipt.id }, response.ok ? 200 : 502);
     } catch (error) {
       const message = error instanceof Error ? error.message : '工具调用失败。';
-      await recordExternalToolOutcome(records, source.id, value.tenantId, false, 0);
-      if (enterpriseGovernance) await enterpriseGovernance.recordToolOutcome(value.tenantId, source.id, false, 0, message).catch(() => undefined);
-      await records.create({ tenantId: value.tenantId, userId: value.userId, ownerId: value.userId, kind: 'task-action', status: 'failed', data: { action: 'tool-call', sourceId: source.id, sourceVersion: source.data.version, pinnedDigest: source.data.pinnedDigest, operationId: operation.operationId, agentId: body.data.agentId, taskId: body.data.taskId, signature, error: message.slice(0, 2_000) } }).catch(() => undefined);
+      await recordExternalToolOutcome(records, source.id, value.tenantId, false, 0).catch(() => undefined);
+      if (enterpriseGovernance) await enterpriseGovernance.recordToolOutcome(value.tenantId, source.id, false, 0, message, reservationId).catch(() => undefined);
+      await records.update(receipt.id, value.tenantId, { status: operation.risk === 'high' ? 'outcome_unknown' : 'failed', data: { ...receipt.data, error: message.slice(0, 2_000) } }, receipt.revision).catch(() => undefined);
       return c.json({ error: message }, 502);
     } finally {
-      if (enterpriseGovernance && governanceReserved) await enterpriseGovernance.releaseToolCall(value.tenantId).catch(() => undefined);
+      stopLease?.();
+      if (enterpriseGovernance && reservationId) await enterpriseGovernance.releaseToolCall(value.tenantId, reservationId).catch(() => undefined);
     }
   });
 

@@ -135,7 +135,7 @@ export class PostgresTaskStore implements TaskStore {
           applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
-      const currentSchema = await client.query('SELECT 1 FROM schema_migrations WHERE version = 2');
+      const currentSchema = await client.query('SELECT 1 FROM schema_migrations WHERE version = 3');
       if (currentSchema.rows[0]) {
         await client.query('COMMIT');
         return;
@@ -185,6 +185,7 @@ export class PostgresTaskStore implements TaskStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_tasks_tenant_updated ON tasks(tenant_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_session_owner ON tasks(tenant_id, user_id, session_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(status, lease_expires_at, created_at);
       CREATE INDEX IF NOT EXISTS idx_events_task_sequence ON task_events(task_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON task_events(timestamp);
@@ -234,6 +235,7 @@ export class PostgresTaskStore implements TaskStore {
       ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_summary_json JSONB;
       ALTER TABLE task_events ADD COLUMN IF NOT EXISTS runtime_context_json JSONB;
       INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING;
+      INSERT INTO schema_migrations (version) VALUES (3) ON CONFLICT (version) DO NOTHING;
       `);
       await client.query('COMMIT');
     } catch (error) {
@@ -284,8 +286,11 @@ export class PostgresTaskStore implements TaskStore {
     return result.rows[0] ? taskFromRow(result.rows[0] as PostgresTaskRow) : null;
   }
 
-  async deleteTask(taskId: string, tenantId: string) {
-    const result = await this.pool.query('DELETE FROM tasks WHERE id = $1 AND tenant_id = $2', [taskId, tenantId]);
+  async deleteTask(taskId: string, tenantId: string, expectedRevision?: number) {
+    const result = await this.pool.query(
+      `DELETE FROM tasks WHERE id = $1 AND tenant_id = $2${expectedRevision === undefined ? '' : ' AND revision = $3'}`,
+      expectedRevision === undefined ? [taskId, tenantId] : [taskId, tenantId, expectedRevision],
+    );
     return (result.rowCount ?? 0) > 0;
   }
 
@@ -379,6 +384,14 @@ export class PostgresTaskStore implements TaskStore {
         )
       ORDER BY t.updated_at ASC LIMIT $1
     `, [Math.min(500, Math.max(1, Math.floor(limit)))]);
+    return result.rows.map((row) => taskFromRow(row as PostgresTaskRow));
+  }
+
+  async listTasksBySession(tenantId: string, userId: string, sessionId: string) {
+    const result = await this.pool.query(
+      'SELECT * FROM tasks WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3 ORDER BY created_at ASC, id ASC',
+      [tenantId, userId, sessionId],
+    );
     return result.rows.map((row) => taskFromRow(row as PostgresTaskRow));
   }
 
@@ -692,6 +705,14 @@ export class PostgresTaskStore implements TaskStore {
   async listDeletedSessionIds(tenantId: string, userId: string) {
     const result = await this.pool.query('SELECT id FROM sessions WHERE tenant_id = $1 AND user_id = $2 AND deleted_at IS NOT NULL', [tenantId, userId]);
     return result.rows.map((row) => String(row.id));
+  }
+
+  async getSession(sessionId: string, tenantId: string, userId: string) {
+    const result = await this.pool.query(
+      'SELECT * FROM sessions WHERE tenant_id = $1 AND user_id = $2 AND id = $3 AND deleted_at IS NULL',
+      [tenantId, userId, sessionId],
+    );
+    return result.rows[0] ? sessionFromRow(result.rows[0] as PostgresSessionRow) : null;
   }
 
   async upsertSession(tenantId: string, userId: string, input: UpsertSessionInput) {

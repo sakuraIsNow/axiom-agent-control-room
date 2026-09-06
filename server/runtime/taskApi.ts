@@ -3102,8 +3102,7 @@ export const createTaskApi = (dependencies: {
     const parsed = reportExportSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: '报告导出参数不完整或格式不受支持。', details: parsed.error.flatten() }, 400);
     const principal = identity(c.req.raw.headers);
-    const session = (await store.listSessions(principal.tenantId, principal.userId, 100))
-      .find((candidate) => candidate.id === parsed.data.sessionId);
+    const session = await store.getSession(parsed.data.sessionId, principal.tenantId, principal.userId);
     if (!session) return c.json({ error: '会话不存在，或当前用户无权导出该会话。' }, 404);
     let reportModel: ModelClient | undefined;
     try {
@@ -3143,7 +3142,7 @@ export const createTaskApi = (dependencies: {
     if (!parsed.success || parsed.data.id && parsed.data.id !== sessionId) return c.json({ error: 'Invalid session history.' }, 400);
     const { tenantId, userId } = identity(c.req.raw.headers);
     try {
-      const previous = (await store.listSessions(tenantId, userId, 100)).find((session) => session.id === sessionId);
+      const previous = await store.getSession(sessionId, tenantId, userId);
       const contextWindowOptions: ContextWindowOptions = {
         recentMessages: 12,
         triggerMessages: 16,
@@ -3187,10 +3186,10 @@ export const createTaskApi = (dependencies: {
     // records. Remove terminal runs owned by this session so a deleted chat
     // cannot reappear as an orphaned task card. Active runs stay visible until
     // they reach a terminal state and can be deleted safely by the operator.
-    const sessionTasks = await store.listTasks(tenantId, 100);
-    for (const task of sessionTasks.filter((item) => item.userId === userId && item.sessionId === sessionId && terminalStatuses.has(item.status))) {
+    const sessionTasks = await store.listTasksBySession(tenantId, userId, sessionId);
+    for (const task of sessionTasks.filter((item) => terminalStatuses.has(item.status))) {
       const events = await store.getEvents(task.id).catch(() => []);
-      if (await store.deleteTask(task.id, tenantId)) {
+      if (await store.deleteTask(task.id, tenantId, task.revision)) {
         await cleanupTaskArtifacts(task, events);
         await dependencies.businessCapabilities?.unlinkProjectResource(tenantId, 'task', task.id);
       }

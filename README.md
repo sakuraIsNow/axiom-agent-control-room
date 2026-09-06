@@ -6,6 +6,8 @@
 
 Current source version: **v2.3.0-rc.5** (bilingual interface and intranet enterprise release candidate)
 
+Unreleased stability work: safer retries for approved MCP actions, recoverable notification delivery, schedule edits that survive in-flight work, complete historical-session operations, and smoother Chat/Nexus interaction. See the [stability upgrade record](docs/stability-upgrade-20260906.md) for validation and remaining work; this is not a new published release.
+
 ![Axiom Control Room](docs/images/overview.png)
 
 ## 🌌 What is Axiom?

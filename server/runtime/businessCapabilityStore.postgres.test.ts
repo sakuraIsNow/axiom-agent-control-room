@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
+import { Pool } from 'pg';
 import {
   BusinessRecordRevisionConflictError,
   PostgresBusinessCapabilityStore,
+  ToolCallQuotaError,
   type BusinessRecord,
   type BusinessRecordKind,
 } from './businessCapabilityStore.js';
@@ -98,5 +100,39 @@ test('PostgreSQL business records preserve CRUD, tenant isolation, revisions, an
     await Promise.all([first.close(), second.close(), credentials.close(), credentialReader.close()]);
     if (previousSecret === undefined) delete process.env.AXIOM_INTEGRATION_SECRET;
     else process.env.AXIOM_INTEGRATION_SECRET = previousSecret;
+  }
+});
+
+test('PostgreSQL tool execution claims deduplicate concurrent workers and retain full quota history', {
+  skip: connectionString ? false : 'AXIOM_TEST_DATABASE_URL is not configured.',
+}, async () => {
+  const first = new PostgresBusinessCapabilityStore(connectionString!);
+  const second = new PostgresBusinessCapabilityStore(connectionString!);
+  const db = new Pool({ connectionString });
+  const tenantId = `tool-claims-${randomUUID()}`;
+  const input = { tenantId, userId: 'user', sourceId: 'source', approvalId: randomUUID(), data: { signature: 'approved-args' }, hourlyQuota: 1000 };
+  await Promise.all([first.initialize(), second.initialize()]);
+  try {
+    const claims = await Promise.all([first.claimToolCall(input), second.claimToolCall(input)]);
+    assert.equal(claims.filter((claim) => claim.claimed).length, 1);
+    assert.equal(claims[0].record.id, claims[1].record.id);
+    const record = claims[0].record;
+    await first.update(record.id, tenantId, { status: 'completed' }, record.revision);
+    for (let index = 0; index < 510; index++) await first.create({ tenantId, userId: 'user', ownerId: 'user', kind: 'task-action', status: 'completed', data: { action: 'tool-call', sourceId: 'other' } });
+    const replay = await second.claimToolCall(input);
+    assert.equal(replay.claimed, false);
+    assert.equal(replay.record.status, 'completed');
+    await assert.rejects(second.claimToolCall({ ...input, approvalId: randomUUID(), hourlyQuota: 1 }), ToolCallQuotaError);
+    const quotaInput = { ...input, sourceId: 'quota-race', approvalId: undefined, hourlyQuota: 1 };
+    const race = await Promise.allSettled([first.claimToolCall(quotaInput), second.claimToolCall(quotaInput)]);
+    assert.equal(race.filter((item) => item.status === 'fulfilled').length, 1);
+    assert.ok(race.some((item) => item.status === 'rejected' && item.reason instanceof ToolCallQuotaError));
+    const unknownInput = { ...input, approvalId: randomUUID() };
+    const unknown = await first.claimToolCall(unknownInput);
+    await first.update(unknown.record.id, tenantId, { status: 'outcome_unknown' }, unknown.record.revision);
+    assert.equal((await second.claimToolCall(unknownInput)).claimed, false);
+  } finally {
+    await db.query('DELETE FROM axiom_business_records WHERE tenant_id=$1', [tenantId]);
+    await Promise.all([first.close(), second.close(), db.end()]);
   }
 });

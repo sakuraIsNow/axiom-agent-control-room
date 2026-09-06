@@ -1115,10 +1115,12 @@ export interface TaskStore {
   close(): Promise<void>;
   createTask(input: CreateTaskInput): Promise<WorkflowTask>;
   getTask(taskId: string, tenantId?: string): Promise<WorkflowTask | null>;
-  deleteTask(taskId: string, tenantId: string): Promise<boolean>;
+  deleteTask(taskId: string, tenantId: string, expectedRevision?: number): Promise<boolean>;
   findTaskByIdempotency(tenantId: string, idempotencyKey: string): Promise<WorkflowTask | null>;
   getModelRoutingStats?: () => Promise<ModelRoutingStats[]>;
   listTasks(tenantId: string, limit?: number): Promise<WorkflowTask[]>;
+  /** Complete, owner-scoped relationship lookup for session administration. */
+  listTasksBySession(tenantId: string, userId: string, sessionId: string): Promise<WorkflowTask[]>;
   /** Tasks with an external Harness event history that may need reconnecting after a restart. */
   listRecoverableHarnessTasks?(limit?: number): Promise<WorkflowTask[]>;
   /** List every task for a workflow when administrative cleanup needs more than the UI page size. */
@@ -1137,6 +1139,7 @@ export interface TaskStore {
   appendEvent(task: Pick<WorkflowTask, 'id' | 'runId'>, event: Omit<RuntimeEvent, 'id' | 'taskId' | 'runId' | 'sequence' | 'timestamp' | 'version'>): Promise<RuntimeEvent>;
   getEvents(taskId: string, afterSequence?: number): Promise<RuntimeEvent[]>;
   listSessions(tenantId: string, userId: string, limit?: number): Promise<PersistedSession[]>;
+  getSession(sessionId: string, tenantId: string, userId: string): Promise<PersistedSession | null>;
   listDeletedSessionIds(tenantId: string, userId: string): Promise<string[]>;
   upsertSession(tenantId: string, userId: string, input: UpsertSessionInput): Promise<PersistedSession>;
   deleteSession(sessionId: string, tenantId: string, userId: string): Promise<boolean>;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { SqliteBusinessCapabilityStore } from './businessCapabilityStore.js';
+import { SqliteBusinessCapabilityStore, ToolCallQuotaError } from './businessCapabilityStore.js';
 
 test('business records persist revisions, tenant isolation, filters, and project reference cleanup', async () => {
   const store = new SqliteBusinessCapabilityStore(':memory:');
@@ -55,4 +55,28 @@ test('business records persist revisions, tenant isolation, filters, and project
   } finally {
     await store.close();
   }
+});
+
+test('tool execution claims are atomic, survive list windows, and count full source usage', async () => {
+  const store = new SqliteBusinessCapabilityStore(':memory:');
+  await store.initialize();
+  const input = { tenantId: 'tenant', userId: 'user', sourceId: 'source', approvalId: 'approval', data: { signature: 'same' }, hourlyQuota: 1000 };
+  try {
+    const claims = await Promise.all([store.claimToolCall(input), store.claimToolCall(input)]);
+    assert.equal(claims.filter((claim) => claim.claimed).length, 1);
+    assert.equal(claims[0].record.id, claims[1].record.id);
+    const record = claims[0].record;
+    await store.update(record.id, 'tenant', { status: 'completed' }, record.revision);
+    for (let index = 0; index < 510; index++) await store.create({ tenantId: 'tenant', userId: 'user', ownerId: 'user', kind: 'task-action', status: 'completed', data: { action: 'tool-call', sourceId: 'unrelated' } });
+    const replay = await store.claimToolCall(input);
+    assert.equal(replay.claimed, false);
+    assert.equal(replay.record.status, 'completed');
+    await assert.rejects(store.claimToolCall({ ...input, approvalId: 'other', hourlyQuota: 1 }), ToolCallQuotaError);
+    const otherTenant = await store.claimToolCall({ ...input, tenantId: 'other', hourlyQuota: 1 });
+    assert.equal(otherTenant.claimed, true);
+    const noApproval = { ...input, approvalId: undefined, sourceId: 'quota-source', hourlyQuota: 1 };
+    const quotaRace = await Promise.allSettled([store.claimToolCall(noApproval), store.claimToolCall(noApproval)]);
+    assert.equal(quotaRace.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.ok(quotaRace.some((result) => result.status === 'rejected' && result.reason instanceof ToolCallQuotaError));
+  } finally { await store.close(); }
 });

@@ -156,6 +156,58 @@ test('deleting an in-flight in-memory schedule does not recreate it', async () =
   assert.deepEqual(await scheduler.list('tenant-a'), []);
 });
 
+for (const outcome of ['success', 'failure'] as const) {
+  test(`an in-flight ${outcome} cannot overwrite an edited in-memory schedule`, async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const scheduler = new InMemoryScheduler(async () => {
+      await gate;
+      if (outcome === 'failure') throw new Error('old failure');
+    });
+    const created = await scheduler.upsert(input());
+    const running = tick(scheduler);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await scheduler.pause(created.id, 'tenant-a');
+    const edited = await scheduler.reschedule(created.id, 'tenant-a', { kind: 'daily', timeOfDay: '11:45', timezone: 'Asia/Shanghai' });
+    release();
+    await running;
+    assert.deepEqual(await scheduler.get(created.id, 'tenant-a'), edited);
+  });
+}
+
+test('replacing a pending schedule while another runs does not execute the stale snapshot', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const calls: string[] = [];
+  const scheduler = new InMemoryScheduler(async (trigger) => {
+    calls.push(trigger.id);
+    if (calls.length === 1) await gate;
+  });
+  const first = await scheduler.upsert(input());
+  const second = await scheduler.upsert(input());
+  const running = tick(scheduler);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const changed = await scheduler.reschedule(second.id, 'tenant-a', { kind: 'daily', timeOfDay: '12:00', timezone: 'Asia/Shanghai' });
+  release();
+  await running;
+  assert.deepEqual(calls, [first.id]);
+  assert.deepEqual(await scheduler.get(second.id, 'tenant-a'), changed);
+});
+
+test('recreating a deleted in-flight schedule with the same id fences its old completion', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const scheduler = new InMemoryScheduler(async () => gate);
+  const created = await scheduler.upsert(input());
+  const running = tick(scheduler);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await scheduler.remove(created.id, 'tenant-a');
+  const replacement = await scheduler.upsert(input({ id: created.id, enabled: false, title: 'Replacement' }));
+  release();
+  await running;
+  assert.deepEqual(await scheduler.get(created.id, 'tenant-a'), replacement);
+});
+
 test('a one-time schedule disables itself after one successful run', async () => {
   let calls = 0;
   const scheduler = new InMemoryScheduler(async () => { calls += 1; });

@@ -1390,8 +1390,7 @@ app.post('/api/chat', async (c) => {
 
   const principal = localPrincipal(c.req.raw.headers);
   const persistedSummary = request.sessionId
-    ? (await taskStore.listSessions(principal.tenantId, principal.userId, 100).catch(() => []))
-      .find((session) => session.id === request.sessionId)?.contextSummary
+    ? (await taskStore.getSession(request.sessionId, principal.tenantId, principal.userId).catch(() => null))?.contextSummary
     : undefined;
   const cleanedMessages = await cleanMessages(request.messages, persistedSummary);
   let messages = cleanedMessages.messages;

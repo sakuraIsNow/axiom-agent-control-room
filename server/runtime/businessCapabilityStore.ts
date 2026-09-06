@@ -46,6 +46,26 @@ export class BusinessRecordRevisionConflictError extends Error {
   }
 }
 
+export class ToolCallQuotaError extends Error {
+  constructor() { super('External tool hourly quota exceeded.'); this.name = 'ToolCallQuotaError'; }
+}
+
+export type ToolCallClaimInput = {
+  tenantId: string;
+  userId: string;
+  sourceId: string;
+  approvalId?: string;
+  hourlyQuota: number;
+  data: Record<string, unknown>;
+};
+
+const toolCallRecord = (input: ToolCallClaimInput): BusinessRecord => {
+  const timestamp = new Date().toISOString();
+  return { id: randomUUID(), tenantId: input.tenantId, userId: input.userId, ownerId: input.userId,
+    kind: 'task-action', status: 'executing', revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    data: { ...input.data, action: 'tool-call', sourceId: input.sourceId, ...(input.approvalId ? { approvalId: input.approvalId } : {}) } };
+};
+
 export interface BusinessCapabilityStore {
   initialize(): Promise<void>;
   close(): Promise<void>;
@@ -53,6 +73,7 @@ export interface BusinessCapabilityStore {
   get(id: string, tenantId: string): Promise<BusinessRecord | null>;
   list(tenantId: string, kind: BusinessRecordKind, options?: { projectId?: string; userId?: string; limit?: number }): Promise<BusinessRecord[]>;
   listAll(kind: BusinessRecordKind, limit?: number): Promise<BusinessRecord[]>;
+  claimToolCall(input: ToolCallClaimInput): Promise<{ claimed: boolean; record: BusinessRecord }>;
   update(id: string, tenantId: string, patch: { status?: string; data?: Record<string, unknown>; projectId?: string | null }, expectedRevision: number): Promise<BusinessRecord>;
   delete(id: string, tenantId: string): Promise<boolean>;
   unlinkProjectResource(tenantId: string, resourceType: string, resourceId: string): Promise<number>;
@@ -104,6 +125,8 @@ export class SqliteBusinessCapabilityStore implements BusinessCapabilityStore {
       );
       CREATE INDEX IF NOT EXISTS idx_axiom_business_records_scope
         ON axiom_business_records(tenant_id, kind, project_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_axiom_business_tool_approval ON axiom_business_records(tenant_id, json_extract(data_json, '$.approvalId')) WHERE kind = 'task-action';
+      CREATE INDEX IF NOT EXISTS idx_axiom_business_tool_usage ON axiom_business_records(tenant_id, user_id, json_extract(data_json, '$.sourceId'), created_at) WHERE kind = 'task-action';
     `);
   }
 
@@ -144,6 +167,27 @@ export class SqliteBusinessCapabilityStore implements BusinessCapabilityStore {
     const rows = this.db.prepare('SELECT * FROM axiom_business_records WHERE kind = ? ORDER BY updated_at DESC LIMIT ?')
       .all(kind, Math.min(10_000, Math.max(1, limit))) as Row[];
     return rows.map(fromRow);
+  }
+
+  async claimToolCall(input: ToolCallClaimInput) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (input.approvalId) {
+        const prior = this.db.prepare(`SELECT * FROM axiom_business_records WHERE tenant_id = ? AND kind = 'task-action'
+          AND json_extract(data_json, '$.action') = 'tool-call' AND json_extract(data_json, '$.approvalId') = ?
+          ORDER BY CASE WHEN status = 'completed' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`).get(input.tenantId, input.approvalId) as Row | undefined;
+        if (prior) { this.db.exec('COMMIT'); return { claimed: false, record: fromRow(prior) }; }
+      }
+      const since = new Date(Date.now() - 3_600_000).toISOString();
+      const usage = this.db.prepare(`SELECT COUNT(*) AS total FROM axiom_business_records WHERE tenant_id = ? AND user_id = ?
+        AND kind = 'task-action' AND json_extract(data_json, '$.action') = 'tool-call'
+        AND json_extract(data_json, '$.sourceId') = ? AND created_at > ?`).get(input.tenantId, input.userId, input.sourceId, since) as { total: number };
+      if (Number(usage.total) >= input.hourlyQuota) throw new ToolCallQuotaError();
+      const record = toolCallRecord(input);
+      this.db.prepare(`INSERT INTO axiom_business_records (id,tenant_id,user_id,kind,owner_id,status,revision,data_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(record.id, record.tenantId, record.userId, record.kind, record.ownerId, record.status, 1, JSON.stringify(record.data), record.createdAt, record.updatedAt);
+      this.db.exec('COMMIT'); return { claimed: true, record };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
   async update(id: string, tenantId: string, patch: { status?: string; data?: Record<string, unknown>; projectId?: string | null }, expectedRevision: number) {
@@ -228,6 +272,8 @@ export class PostgresBusinessCapabilityStore implements BusinessCapabilityStore 
         updated_at TIMESTAMPTZ NOT NULL
       )`);
       await client.query('CREATE INDEX IF NOT EXISTS idx_axiom_business_records_scope ON axiom_business_records(tenant_id, kind, project_id, updated_at DESC)');
+      await client.query("CREATE INDEX IF NOT EXISTS idx_axiom_business_tool_approval ON axiom_business_records(tenant_id, (data_json->>'approvalId')) WHERE kind = 'task-action'");
+      await client.query("CREATE INDEX IF NOT EXISTS idx_axiom_business_tool_usage ON axiom_business_records(tenant_id, user_id, (data_json->>'sourceId'), created_at) WHERE kind = 'task-action'");
     } finally {
       await client.query("SELECT pg_advisory_unlock(hashtext('axiom_business_capability_schema_v1'))").catch(() => undefined);
       client.release();
@@ -271,6 +317,29 @@ export class PostgresBusinessCapabilityStore implements BusinessCapabilityStore 
       [kind, Math.min(10_000, Math.max(1, limit))],
     );
     return result.rows.map(fromRow);
+  }
+
+  async claimToolCall(input: ToolCallClaimInput) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Serialize approval ownership and quota reservation together, across workers.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`axiom-tool-claims:${input.tenantId}`]);
+      if (input.approvalId) {
+        const prior = await client.query<Row>(`SELECT * FROM axiom_business_records WHERE tenant_id = $1 AND kind = 'task-action'
+          AND data_json->>'action' = 'tool-call' AND data_json->>'approvalId' = $2
+          ORDER BY CASE WHEN status = 'completed' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`, [input.tenantId, input.approvalId]);
+        if (prior.rows[0]) { await client.query('COMMIT'); return { claimed: false, record: fromRow(prior.rows[0]) }; }
+      }
+      const usage = await client.query(`SELECT COUNT(*) AS total FROM axiom_business_records WHERE tenant_id = $1 AND user_id = $2
+        AND kind = 'task-action' AND data_json->>'action' = 'tool-call' AND data_json->>'sourceId' = $3 AND created_at > NOW() - INTERVAL '1 hour'`, [input.tenantId, input.userId, input.sourceId]);
+      if (Number(usage.rows[0].total) >= input.hourlyQuota) throw new ToolCallQuotaError();
+      const record = toolCallRecord(input);
+      const inserted = await client.query<Row>(`INSERT INTO axiom_business_records (id,tenant_id,user_id,kind,owner_id,status,revision,data_json,created_at,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,1,$7::jsonb,NOW(),NOW()) RETURNING *`, [record.id, record.tenantId, record.userId, record.kind, record.ownerId, record.status, JSON.stringify(record.data)]);
+      await client.query('COMMIT'); return { claimed: true, record: fromRow(inserted.rows[0]) };
+    } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
+    finally { client.release(); }
   }
 
   async update(id: string, tenantId: string, patch: { status?: string; data?: Record<string, unknown>; projectId?: string | null }, expectedRevision: number) {

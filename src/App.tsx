@@ -94,6 +94,7 @@ import { buildConversationContext } from './lib/conversationContext';
 import { readDashboardUrlState, subscribeDashboardUrlState, writeDashboardUrlState } from './lib/dashboardUrlState';
 import { saveProviderCredential, type ProviderCredentialKind } from './lib/providerCredentials';
 import { downloadReportAttachment, exportConversationReport } from './lib/reportExport';
+import { createSessionCacheWriter, readBrowserSessions, safelyStorePreference, writeBrowserSessions } from './lib/browserSessionCache';
 
 const parseAgentHandoff = (value: unknown): AgentHandoff | undefined => {
   if (!value || typeof value !== 'object') return undefined;
@@ -819,6 +820,7 @@ function App() {
     capabilities: [] as string[],
   });
   const abortRef = useRef<AbortController | null>(null);
+  const sessionCacheWriterRef = useRef<ReturnType<typeof createSessionCacheWriter> | null>(null);
   const pluginAgentAbortRef = useRef<AbortController | null>(null);
   const imageAbortRef = useRef<AbortController | null>(null);
   const sessionRuntimeRevisionRef = useRef(0);
@@ -880,25 +882,38 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const persisted = sessions.filter(isSessionPersistable).map((session) => ({
-      ...session,
-      messages: session.messages.map((message) => ({
-        ...message,
-        attachments: message.attachments?.map((attachment) => attachment.kind === 'video'
-          ? { id: attachment.id, kind: attachment.kind, url: attachment.url, alt: attachment.alt, mimeType: attachment.mimeType, poster: attachment.poster }
-          : attachment.kind === 'file'
-            ? { id: attachment.id, kind: attachment.kind, name: attachment.name, mimeType: attachment.mimeType, size: attachment.size, text: attachment.text }
-            : { id: attachment.id, kind: attachment.kind, url: attachment.url, alt: attachment.alt }),
-      })),
-    }));
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
+    const writer = createSessionCacheWriter(writeBrowserSessions);
+    sessionCacheWriterRef.current = writer;
+    const flush = () => { void writer.flush(); };
+    const onVisibilityChange = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      flush();
+      writer.dispose();
+      sessionCacheWriterRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionsHydratedRef.current) return;
+    sessionCacheWriterRef.current?.schedule(sessions.filter(isSessionPersistable));
   }, [sessions]);
 
   useEffect(() => {
     const controller = new AbortController();
-    void listConversationSessions(50, controller.signal)
-      .then(({ sessions: remoteSessions, deletedSessionIds }) => {
+    void Promise.allSettled([readBrowserSessions(), listConversationSessions(50, controller.signal)])
+      .then(([cachedResult, remoteResult]) => {
         if (controller.signal.aborted) return;
+        const cached = cachedResult.status === 'fulfilled'
+          ? cachedResult.value.map((session) => normalizeRestoredSession(session))
+          : [];
+        const { sessions: remoteSessions, deletedSessionIds } = remoteResult.status === 'fulfilled'
+          ? remoteResult.value
+          : { sessions: [], deletedSessionIds: [] };
+        sessionsHydratedRef.current = true;
         const legacyProjectionIds = remoteSessions.filter(isNexusRunSession).map((session) => session.id);
         if (legacyProjectionIds.length > 0) {
           // These records were created by the short-lived projection behavior;
@@ -907,15 +922,22 @@ function App() {
           void Promise.allSettled(legacyProjectionIds.map((sessionId) => deleteConversationSession(sessionId)));
         }
         setSessions((current) => {
-          const localWasOnlyBlank = current.length === 1 && current[0]?.messages.length === 0;
-          const merged = mergeSessionSnapshots(current, remoteSessions, deletedSessionIds);
+          const localById = new Map(cached.filter(isSessionPersistable).map((session) => [session.id, session]));
+          current.forEach((session) => {
+            const previous = localById.get(session.id);
+            localById.set(session.id, previous ? preferSession(session, previous) : session);
+          });
+          const local = [...localById.values()];
+          const localWasOnlyBlank = local.length === 1 && local[0]?.messages.length === 0;
+          const merged = mergeSessionSnapshots(local, remoteSessions, deletedSessionIds);
           const next = localWasOnlyBlank && remoteSessions.length > 0
             ? merged.filter((session) => remoteSessions.some((remote) => remote.id === session.id))
             : merged;
           const normalized = next.length > 0 ? next : [createSession()];
           return normalized;
         });
-        setSessionsReady(true);
+        if (remoteResult.status === 'fulfilled') setSessionsReady(true);
+        else setError((current) => current ?? userFacingError(remoteResult.reason, '会话同步失败'));
       })
       .catch((caught) => {
         if (controller.signal.aborted) return;
@@ -1009,7 +1031,7 @@ function App() {
   }, [sessions]);
 
   useEffect(() => {
-    localStorage.setItem(
+    safelyStorePreference(() => window.localStorage,
       SETTINGS_KEY,
       JSON.stringify({
         text: { ...providerSettings.text, apiKey: '' },
@@ -1021,7 +1043,7 @@ function App() {
   }, [providerSettings]);
 
   useEffect(() => {
-    localStorage.setItem(THEME_KEY, uiTheme);
+    safelyStorePreference(() => window.localStorage, THEME_KEY, uiTheme);
   }, [uiTheme]);
 
   useEffect(() => {

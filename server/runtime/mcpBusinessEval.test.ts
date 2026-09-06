@@ -12,7 +12,7 @@ import { SqliteArtifactCatalog } from './artifactCatalog.js';
 import { FileArtifactStore } from './artifactStore.js';
 import { createMemoryEnterpriseGovernanceStore, type EnterpriseGovernanceStore } from './enterpriseGovernance.js';
 import { createMemoryIntegrationCredentialStore, type IntegrationCredentialStore } from './integrationCredentialStore.js';
-import { ToolRegistry } from './toolRegistry.js';
+import { ToolApprovalRequiredError, ToolRegistry } from './toolRegistry.js';
 import { signPrincipal } from './principal.js';
 
 const principalSecret = 'mcp-business-eval-principal-secret-32-bytes';
@@ -412,6 +412,72 @@ test('P0-27 rejecting an approval prevents the provider call', async () => {
 test('P0-28 an approved high-risk call is idempotent on retry', async () => {
   fake.reset(); const context = await createContext(fake);
   try { const requested = await call(context, 'feishu.send_message', 'messenger', { recipient: 'team', message: '只发送一次' }); const approval = await json<{ approval: { id: string; revision: number } }>(requested); assert.equal((await context.request(`/tool-sources/${context.sourceId}/approvals/${approval.approval.id}`, { method: 'POST', headers: context.headers(), body: JSON.stringify({ approved: true, revision: approval.approval.revision, note: '批准' }) })).status, 200); const first = await call(context, 'feishu.send_message', 'messenger', { recipient: 'team', message: '只发送一次' }, { approvalId: approval.approval.id }); const second = await call(context, 'feishu.send_message', 'messenger', { recipient: 'team', message: '只发送一次' }, { approvalId: approval.approval.id }); assert.equal(first.status, 200); assert.equal(second.status, 200); assert.equal((await json<{ deduplicated?: boolean }>(second)).deduplicated, true); assert.equal(fake.sideEffects, 1); } finally { await context.close(); }
+});
+
+test('P1-11 concurrent approved calls execute only one provider write', async () => {
+  const fake = await FakeMcp.start(); const context = await createContext(fake);
+  try {
+    const args = { recipient: 'team', message: 'Concurrent approval' };
+    const requested = await json<{ approval: { id: string; revision: number } }>(await call(context, 'feishu.send_message', 'messenger', args));
+    await context.request(`/tool-sources/${context.sourceId}/approvals/${requested.approval.id}`, { method: 'POST', headers: context.headers(), body: JSON.stringify({ approved: true, revision: requested.approval.revision }) });
+    fake.setResponseDelay(150);
+    const responses = await Promise.all([call(context, 'feishu.send_message', 'messenger', args, { approvalId: requested.approval.id }), call(context, 'feishu.send_message', 'messenger', args, { approvalId: requested.approval.id })]);
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+    assert.equal(fake.sideEffects, 1);
+  } finally { await context.close(); await fake.close(); }
+});
+
+test('P1-12 completed approvals remain deduplicated outside recent history windows', async () => {
+  const fake = await FakeMcp.start(); const context = await createContext(fake);
+  try {
+    const args = { recipient: 'team', message: 'Durable approval' };
+    const requested = await json<{ approval: { id: string; revision: number } }>(await call(context, 'feishu.send_message', 'messenger', args));
+    await context.request(`/tool-sources/${context.sourceId}/approvals/${requested.approval.id}`, { method: 'POST', headers: context.headers(), body: JSON.stringify({ approved: true, revision: requested.approval.revision }) });
+    assert.equal((await call(context, 'feishu.send_message', 'messenger', args, { approvalId: requested.approval.id })).status, 200);
+    for (let index = 0; index < 510; index++) await context.records.create({ tenantId: context.tenantId, userId: context.userId, ownerId: context.userId, kind: 'task-action', status: 'completed', data: { action: 'tool-call', sourceId: 'other' } });
+    const replay = await call(context, 'feishu.send_message', 'messenger', args, { approvalId: requested.approval.id });
+    assert.equal(replay.status, 200);
+    assert.equal((await json<{ deduplicated?: boolean }>(replay)).deduplicated, true);
+    assert.equal(fake.sideEffects, 1);
+  } finally { await context.close(); await fake.close(); }
+});
+
+test('P1-13 an unknown write outcome blocks automatic replay of its approval', async () => {
+  const fake = await FakeMcp.start(); const context = await createContext(fake);
+  try {
+    const args = { recipient: 'team', message: 'Unknown write outcome' };
+    const requested = await json<{ approval: { id: string; revision: number } }>(await call(context, 'feishu.send_message', 'messenger', args));
+    await context.request(`/tool-sources/${context.sourceId}/approvals/${requested.approval.id}`, { method: 'POST', headers: context.headers(), body: JSON.stringify({ approved: true, revision: requested.approval.revision }) });
+    fake.setProtocolFault('malformed-call');
+    assert.equal((await call(context, 'feishu.send_message', 'messenger', args, { approvalId: requested.approval.id })).status, 502);
+    const replay = await call(context, 'feishu.send_message', 'messenger', args, { approvalId: requested.approval.id });
+    assert.equal(replay.status, 409);
+    const body = await json<{ executionState?: string }>(replay);
+    assert.equal(body.executionState, 'outcome_unknown');
+    assert.equal(fake.sideEffects, 1);
+  } finally { await context.close(); await fake.close(); }
+});
+
+test('P1-14 the Agent execution path shares durable approval claims and replays its stored result', async () => {
+  const fake = await FakeMcp.start(); const context = await createContext(fake);
+  try {
+    await withEnv({ AXIOM_TOOL_EXECUTOR: 'docker' }, async () => {
+      const task = await context.tasks.createTask({ tenantId: context.tenantId, userId: context.userId, sessionId: 'agent-approval', title: 'Agent write', input: 'Send approved message', mode: 'analyze' });
+      const name = context.tools.catalog().find((tool) => tool.name.endsWith('feishu_send_message'))!.name;
+      const invocation = { name, args: { recipient: 'team', message: 'Agent runtime approval' } };
+      const required = await context.tools.execute(task, 'step-1', invocation).catch((error: unknown) => error);
+      assert.ok(required instanceof ToolApprovalRequiredError);
+      const approved = { ...task, toolApprovals: [{ ...required.approval, status: 'approved' as const }] };
+      fake.setResponseDelay(100);
+      const concurrent = await Promise.all([context.tools.execute(approved, 'step-1', invocation), context.tools.execute(approved, 'step-1', invocation)]);
+      assert.equal(concurrent.filter((item) => item.exitCode === 0).length, 1);
+      assert.equal(fake.sideEffects, 1);
+      const replay = await context.tools.execute(approved, 'step-1', invocation);
+      assert.equal(replay.exitCode, 0);
+      assert.equal(fake.sideEffects, 1);
+      assert.equal((await context.governance.snapshot(context.tenantId)).usage.activeCalls, 0);
+    });
+  } finally { await context.close(); await fake.close(); }
 });
 
 test('P0-29 a successful MCP result creates a cataloged Artifact lineage', async () => {

@@ -30,6 +30,7 @@ export type ScheduledTrigger = {
   lastError?: string;
   lastRunStatus?: ScheduledRunStatus;
   deadLetteredAt?: string;
+  revision?: number;
 };
 
 export type ScheduleArtifactInput = {
@@ -150,6 +151,7 @@ const createTrigger = (input: ScheduledTriggerInput): ScheduledTrigger => {
     lastError: undefined,
     lastRunStatus: undefined,
     deadLetteredAt: undefined,
+    revision: 1,
   };
 };
 const markSuccess = (item: ScheduledTrigger, completedAt = new Date()): ScheduledTrigger => {
@@ -163,13 +165,14 @@ const markSuccess = (item: ScheduledTrigger, completedAt = new Date()): Schedule
     lastRunAt: completedAt.toISOString(),
     deadLetteredAt: undefined,
     nextRunAt: nextRunAt ?? item.nextRunAt,
+    revision: (item.revision ?? 0) + 1,
   };
 };
 const markFailure = (item: ScheduledTrigger, error: unknown): ScheduledTrigger => {
   const failureCount = item.failureCount + 1;
   const deadLettered = failureCount >= MAX_SCHEDULE_FAILURES;
   const now = new Date();
-  return { ...item, failureCount, lastError: errorText(error), lastRunStatus: deadLettered ? 'dead-letter' : 'failed', lastRunAt: now.toISOString(), deadLetteredAt: deadLettered ? now.toISOString() : undefined, enabled: deadLettered ? false : item.enabled, nextRunAt: deadLettered ? now.toISOString() : afterSeconds(backoffSeconds(item.intervalSeconds, failureCount), now) };
+  return { ...item, failureCount, lastError: errorText(error), lastRunStatus: deadLettered ? 'dead-letter' : 'failed', lastRunAt: now.toISOString(), deadLetteredAt: deadLettered ? now.toISOString() : undefined, enabled: deadLettered ? false : item.enabled, nextRunAt: deadLettered ? now.toISOString() : afterSeconds(backoffSeconds(item.intervalSeconds, failureCount), now), revision: (item.revision ?? 0) + 1 };
 };
 
 const resumedTrigger = (item: ScheduledTrigger) => {
@@ -177,7 +180,7 @@ const resumedTrigger = (item: ScheduledTrigger) => {
   // A failed one-time schedule is intentionally run once after manual recovery,
   // even when its original wall-clock deadline has passed.
   const nextRunAt = nextRunAtForCadence(item.cadence, now) ?? afterSeconds(1, now);
-  return { ...item, enabled: true, failureCount: 0, lastError: undefined, lastRunStatus: undefined, deadLetteredAt: undefined, nextRunAt } satisfies ScheduledTrigger;
+  return { ...item, enabled: true, failureCount: 0, lastError: undefined, lastRunStatus: undefined, deadLetteredAt: undefined, nextRunAt, revision: (item.revision ?? 0) + 1 } satisfies ScheduledTrigger;
 };
 
 const rescheduledTrigger = (item: ScheduledTrigger, cadence: ScheduleCadence) => {
@@ -189,6 +192,7 @@ const rescheduledTrigger = (item: ScheduledTrigger, cadence: ScheduleCadence) =>
     cadence: normalized,
     intervalSeconds: cadenceIntervalSeconds(normalized),
     nextRunAt,
+    revision: (item.revision ?? 0) + 1,
   } satisfies ScheduledTrigger;
 };
 
@@ -204,7 +208,7 @@ export const scheduleHealthState = (item: ScheduledTrigger): ScheduleHealthState
 const sameHealthState = (left: ScheduleHealthState, right: ScheduleHealthState) => JSON.stringify(left) === JSON.stringify(right);
 
 const triggerAfterHealthAction = (item: ScheduledTrigger, input: ScheduleHealthActionInput) => {
-  if (input.action === 'pause') return { ...item, enabled: false } satisfies ScheduledTrigger;
+  if (input.action === 'pause') return { ...item, enabled: false, revision: (item.revision ?? 0) + 1 } satisfies ScheduledTrigger;
   if (input.action === 'resume') return resumedTrigger(item);
   if (!input.proposedCadence) throw new Error('A reschedule action requires a proposed cadence.');
   return rescheduledTrigger(item, input.proposedCadence);
@@ -250,6 +254,7 @@ export class InMemoryScheduler implements Scheduler {
 
   async upsert(input: ScheduledTriggerInput) {
     const item = createTrigger(input);
+    item.revision = (this.items.get(item.id)?.revision ?? 0) + 1;
     this.items.set(item.id, item);
     return item;
   }
@@ -272,7 +277,7 @@ export class InMemoryScheduler implements Scheduler {
   async pause(id: string, tenantId: string) {
     const item = this.items.get(id);
     if (!item || item.tenantId !== tenantId) return null;
-    const paused = { ...item, enabled: false };
+    const paused = { ...item, enabled: false, revision: (item.revision ?? 0) + 1 };
     this.items.set(id, paused);
     return paused;
   }
@@ -323,14 +328,14 @@ export class InMemoryScheduler implements Scheduler {
     try {
     const now = Date.now();
     for (const item of [...this.items.values()]) {
-      if (!item.enabled || Date.parse(item.nextRunAt) > now) continue;
+      if (!item.enabled || Date.parse(item.nextRunAt) > now || this.items.get(item.id) !== item) continue;
       try {
         await this.handler({ ...item });
         const current = this.items.get(item.id);
-        if (current) this.items.set(item.id, markSuccess(current));
+        if (current === item) this.items.set(item.id, markSuccess(current));
       } catch (error) {
         const current = this.items.get(item.id);
-        if (current) this.items.set(item.id, markFailure(current, error));
+        if (current === item) this.items.set(item.id, markFailure(current, error));
       }
     }
     } finally {
@@ -344,6 +349,7 @@ const triggerFromRow = (row: {
   mode: ScheduledTrigger['mode']; interval_seconds: number; enabled: boolean; next_run_at: Date | string; created_at: Date | string;
   cadence_json?: unknown; last_run_at?: Date | string | null; failure_count?: number | string; last_error?: string | null;
   last_run_status?: ScheduledRunStatus | null; dead_lettered_at?: Date | string | null; input_artifact_json?: unknown;
+  revision?: number | string;
 }): ScheduledTrigger => {
   let rawCadence = row.cadence_json;
   if (typeof rawCadence === 'string') {
@@ -376,6 +382,7 @@ const triggerFromRow = (row: {
   lastError: row.last_error ?? undefined,
   lastRunStatus: row.last_run_status ?? undefined,
   deadLetteredAt: row.dead_lettered_at instanceof Date ? row.dead_lettered_at.toISOString() : row.dead_lettered_at ?? undefined,
+  revision: Number(row.revision ?? 1),
   });
 };
 
@@ -423,7 +430,9 @@ export class PostgresScheduler implements Scheduler {
 
   ready() {
     if (!this.initialized) {
-      this.initialized = this.pool.query(`
+      this.initialized = this.transaction(async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('axiom:scheduler:schema'))");
+        await client.query(`
         CREATE TABLE IF NOT EXISTS schedules (
           id UUID PRIMARY KEY,
           tenant_id TEXT NOT NULL,
@@ -440,6 +449,8 @@ export class PostgresScheduler implements Scheduler {
           next_run_at TIMESTAMPTZ NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           claimed_until TIMESTAMPTZ,
+          claim_token TEXT,
+          revision BIGINT NOT NULL DEFAULT 1,
           failure_count INTEGER NOT NULL DEFAULT 0,
           last_run_at TIMESTAMPTZ,
           last_error TEXT,
@@ -454,6 +465,8 @@ export class PostgresScheduler implements Scheduler {
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_error TEXT;
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_run_status TEXT;
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS dead_lettered_at TIMESTAMPTZ;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS claim_token TEXT;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
         CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
         CREATE TABLE IF NOT EXISTS schedule_health_actions (
           id UUID PRIMARY KEY,
@@ -474,7 +487,8 @@ export class PostgresScheduler implements Scheduler {
         );
         CREATE INDEX IF NOT EXISTS idx_schedule_health_actions_owner
           ON schedule_health_actions(tenant_id, user_id, confirmed_at DESC);
-      `).then(() => undefined);
+        `);
+      }).catch((error) => { this.initialized = undefined; throw error; });
     }
     return this.initialized;
   }
@@ -500,7 +514,8 @@ export class PostgresScheduler implements Scheduler {
       ON CONFLICT (id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id, user_id=EXCLUDED.user_id, session_id=EXCLUDED.session_id,
         title=EXCLUDED.title, input=EXCLUDED.input, mode=EXCLUDED.mode, model_credential_id=EXCLUDED.model_credential_id, input_artifact_json=EXCLUDED.input_artifact_json, interval_seconds=EXCLUDED.interval_seconds,
         cadence_json=EXCLUDED.cadence_json, enabled=EXCLUDED.enabled, next_run_at=EXCLUDED.next_run_at,
-        failure_count=0, last_run_at=NULL, last_error=NULL, last_run_status=NULL, dead_lettered_at=NULL, claimed_until=NULL
+        failure_count=0, last_run_at=NULL, last_error=NULL, last_run_status=NULL, dead_lettered_at=NULL,
+        claimed_until=NULL, claim_token=NULL, revision=schedules.revision+1
       RETURNING *
     `, [item.id, item.tenantId, item.userId, item.sessionId, item.title, item.input, item.mode, item.modelCredentialId ?? null, item.inputArtifact ? JSON.stringify(item.inputArtifact) : null, item.intervalSeconds, JSON.stringify(item.cadence), item.enabled, item.nextRunAt, item.createdAt]);
     return triggerFromRow(result.rows[0]);
@@ -527,7 +542,7 @@ export class PostgresScheduler implements Scheduler {
   async pause(id: string, tenantId: string) {
     await this.ready();
     const result = await this.pool.query(`
-      UPDATE schedules SET enabled = FALSE, claimed_until = NULL
+      UPDATE schedules SET enabled = FALSE, claimed_until = NULL, claim_token = NULL, revision = revision + 1
       WHERE id = $1 AND tenant_id = $2
       RETURNING *
     `, [id, tenantId]);
@@ -541,7 +556,7 @@ export class PostgresScheduler implements Scheduler {
     const updated = rescheduledTrigger(existing, cadence);
     const result = await this.pool.query(`
       UPDATE schedules
-      SET cadence_json = $3::jsonb, interval_seconds = $4, next_run_at = $5, claimed_until = NULL
+      SET cadence_json = $3::jsonb, interval_seconds = $4, next_run_at = $5, claimed_until = NULL, claim_token = NULL, revision = revision + 1
       WHERE id = $1 AND tenant_id = $2
       RETURNING *
     `, [id, tenantId, JSON.stringify(updated.cadence), updated.intervalSeconds, updated.nextRunAt]);
@@ -556,7 +571,7 @@ export class PostgresScheduler implements Scheduler {
     const result = await this.pool.query(`
       UPDATE schedules
       SET enabled = TRUE, failure_count = 0, last_error = NULL, last_run_status = NULL, dead_lettered_at = NULL,
-          next_run_at = $3, claimed_until = NULL
+          next_run_at = $3, claimed_until = NULL, claim_token = NULL, revision = revision + 1
       WHERE id = $1 AND tenant_id = $2
       RETURNING *
     `, [id, tenantId, resumed.nextRunAt]);
@@ -584,7 +599,7 @@ export class PostgresScheduler implements Scheduler {
         UPDATE schedules
         SET enabled = $4, cadence_json = $5::jsonb, interval_seconds = $6, next_run_at = $7,
             failure_count = $8, last_error = $9, last_run_status = $10, dead_lettered_at = $11,
-            claimed_until = NULL
+            claimed_until = NULL, claim_token = NULL, revision = revision + 1
         WHERE id = $1 AND tenant_id = $2 AND user_id = $3
       `, [schedule.id, schedule.tenantId, schedule.userId, schedule.enabled, JSON.stringify(schedule.cadence), schedule.intervalSeconds, schedule.nextRunAt, schedule.failureCount, schedule.lastError ?? null, schedule.lastRunStatus ?? null, schedule.deadLetteredAt ?? null]);
       const audit = healthActionAudit(input, before, scheduleHealthState(schedule));
@@ -633,9 +648,9 @@ export class PostgresScheduler implements Scheduler {
           WHERE enabled = TRUE AND next_run_at <= NOW() AND (claimed_until IS NULL OR claimed_until < NOW())
           ORDER BY next_run_at ASC FOR UPDATE SKIP LOCKED LIMIT 8
         `);
-        const items = selected.rows.map(triggerFromRow);
-        for (const item of items) {
-          await client.query('UPDATE schedules SET claimed_until = NOW() + INTERVAL \'5 minutes\' WHERE id = $1', [item.id]);
+        const items = selected.rows.map((row) => ({ trigger: triggerFromRow(row), token: randomUUID() }));
+        for (const { trigger, token } of items) {
+          await client.query(`UPDATE schedules SET claimed_until = NOW() + INTERVAL '5 minutes', claim_token = $2 WHERE id = $1`, [trigger.id, token]);
         }
         return items;
       });
@@ -647,24 +662,27 @@ export class PostgresScheduler implements Scheduler {
     }
   }
 
-  private async execute(item: ScheduledTrigger) {
+  private async execute({ trigger: item, token }: { trigger: ScheduledTrigger; token: string }) {
+    const active = await this.pool.query(`SELECT 1 FROM schedules WHERE id = $1 AND revision = $2 AND claim_token = $3
+      AND enabled = TRUE AND claimed_until > clock_timestamp()`, [item.id, item.revision, token]);
+    if (!active.rowCount) return;
     try {
       await this.handler({ ...item });
       const updated = markSuccess(item);
       await this.pool.query(`
         UPDATE schedules
-        SET enabled = $2, next_run_at = $3, claimed_until = NULL, failure_count = 0,
+        SET enabled = $2, next_run_at = $3, claimed_until = NULL, claim_token = NULL, revision = revision + 1, failure_count = 0,
             last_run_at = $4, last_error = NULL, last_run_status = 'success', dead_lettered_at = NULL
-        WHERE id = $1
-      `, [item.id, updated.enabled, updated.nextRunAt, updated.lastRunAt]);
+        WHERE id = $1 AND revision = $5 AND claim_token = $6 AND claimed_until > clock_timestamp()
+      `, [item.id, updated.enabled, updated.nextRunAt, updated.lastRunAt, item.revision, token]);
     } catch (error) {
       const updated = markFailure(item, error);
       await this.pool.query(`
         UPDATE schedules
-        SET enabled = $2, next_run_at = $3, claimed_until = NULL, failure_count = $4,
+        SET enabled = $2, next_run_at = $3, claimed_until = NULL, claim_token = NULL, revision = revision + 1, failure_count = $4,
             last_error = $5, last_run_status = $6, dead_lettered_at = $7, last_run_at = $8
-        WHERE id = $1
-      `, [item.id, updated.enabled, updated.nextRunAt, updated.failureCount, updated.lastError ?? null, updated.lastRunStatus ?? null, updated.deadLetteredAt ?? null, updated.lastRunAt ?? null]);
+        WHERE id = $1 AND revision = $9 AND claim_token = $10 AND claimed_until > clock_timestamp()
+      `, [item.id, updated.enabled, updated.nextRunAt, updated.failureCount, updated.lastError ?? null, updated.lastRunStatus ?? null, updated.deadLetteredAt ?? null, updated.lastRunAt ?? null, item.revision, token]);
     }
   }
 }

@@ -174,6 +174,7 @@ export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId,
   const [stageVisible, setStageVisible] = useState(true);
   const [expanded, setExpanded] = useState(false);
   const [panel, setPanel] = useState<GraphPanel>(null);
+  const focusedSelectionRef = useRef<string | null>(null);
   const stateRef = useRef({
     yaw: -4,
     pitch: 2,
@@ -308,7 +309,12 @@ export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId,
   }, [applyWorldTransform, expanded, nodes.length, reducedMotion, stageVisible]);
 
   useEffect(() => {
-    if (!selectedNodeId || !positionById.has(selectedNodeId)) return;
+    if (!selectedNodeId) {
+      focusedSelectionRef.current = null;
+      return;
+    }
+    if (focusedSelectionRef.current === selectedNodeId || !positionById.has(selectedNodeId)) return;
+    focusedSelectionRef.current = selectedNodeId;
     setPanel('node');
     focusNode(selectedNodeId);
   }, [focusNode, positionById, selectedNodeId]);

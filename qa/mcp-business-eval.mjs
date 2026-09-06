@@ -22,10 +22,10 @@ const p1Failed = (output.match(/^not ok \d+ - P1-/gmu) ?? []).length;
 const report = {
   generatedAt: new Date().toISOString(),
   status: code === 0 ? 'passed' : 'failed',
-  cases: 40,
-  p0: { cases: 30, passed: code === 0 ? 30 : p0Passed, failed: code === 0 ? 0 : p0Failed },
-  p1: { cases: 10, passed: code === 0 ? 10 : p1Passed, failed: code === 0 ? 0 : p1Failed },
-  passed: code === 0 ? 40 : passed,
+  cases: passed + failed,
+  p0: { cases: p0Passed + p0Failed, passed: p0Passed, failed: p0Failed },
+  p1: { cases: p1Passed + p1Failed, passed: p1Passed, failed: p1Failed },
+  passed,
   failed: code === 0 ? 0 : Math.max(1, failed),
   command: `${process.execPath} ${args.join(' ')}`,
 };

@@ -1,11 +1,14 @@
-import { useLayoutEffect, useMemo, useRef } from 'react';
-import { Bot, Check, Copy, FileText, MessageSquareText, Paperclip, Pause, Play, Plus, Route, RotateCcw, Trash2, UserCheck, X } from 'lucide-react';
+import { useMemo } from 'react';
+import { ArrowDown, Bot, Check, Copy, FileText, MessageSquareText, Paperclip, Pause, Play, Plus, Route, RotateCcw, Trash2, UserCheck, X } from 'lucide-react';
 import { MorphIcon } from 'morphicons/react';
 import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, RunEvent, Session, TopologyAgent } from '../../types';
 import type { GuidanceState, ReviewResultState, RouteInsightState } from './dashboardTypes';
 import { AgentSignalGraph } from './AgentSignalGraph';
 import { InferenceOrb } from './InferenceOrb';
 import { ChatFileArtifact, ChatMessageMarkdown } from './ChatArtifact';
+import { isConversationSubmitKey } from '../../lib/conversationInteraction';
+import { useConversationScroll } from '../../lib/useConversationScroll';
+import { useUiLanguage } from '../../lib/uiLanguage';
 
 const modeLabel: Record<AgentMode, string> = { analyze: '分析', build: '构建', decide: '决策' };
 const phaseLabel: Record<AgentPhase, string> = {
@@ -70,7 +73,8 @@ export function DashboardChat(props: Props) {
     onSend, onStop, onPause, onResume, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, onNewTask, onSelectSession, onDeleteSession, attachments, onAddAttachments, onRemoveAttachment,
     agents, graph, events, selectedNodeId, onSelectAgent, reviewResult, reviewNote, reviewBusy, onReviewNoteChange, onRequestApprove, onRequestReject,
   } = props;
-  const messageListRef = useRef<HTMLDivElement>(null);
+  const { t } = useUiLanguage();
+  const { scrollRef: messageListRef, onScroll, showLatest, scrollToLatest } = useConversationScroll(activeSession.id, activeSession.messages);
   const sortedSessions = useMemo(() => {
     const latestById = new Map<string, Session>();
     sessions.forEach((session) => {
@@ -79,11 +83,6 @@ export function DashboardChat(props: Props) {
     });
     return [...latestById.values()].sort((a, b) => b.updatedAt - a.updatedAt);
   }, [sessions]);
-
-  useLayoutEffect(() => {
-    const list = messageListRef.current;
-    if (list) list.scrollTop = list.scrollHeight;
-  }, [activeSession.id, activeSession.messages]);
 
   const runningAgent = agents.find((agent) => agent.status === 'running');
   const pendingActivity = agentActivity || (runningAgent
@@ -107,14 +106,15 @@ export function DashboardChat(props: Props) {
         <div className="dash-chat-session-list">
           {sortedSessions.map((session) => <div key={session.id} data-session-id={session.id} data-updated-at={session.updatedAt} className={`dash-chat-session-item ${session.id === activeSession.id ? 'selected' : ''}`}>
             <button type="button" className="dash-chat-session-main" onClick={() => onSelectSession(session.id)}>
-              <strong>{session.title || '新对话'}</strong>
+              <strong data-i18n-ignore="true">{session.title || t('新对话')}</strong>
               <span>{formatLastConversation(session.updatedAt)}</span>
             </button>
             <button
               type="button"
               className="dash-chat-session-delete"
-              title="删除会话"
-              aria-label={`删除会话 ${session.title || '新对话'}`}
+              data-i18n-ignore="true"
+              title={t('删除会话')}
+              aria-label={`${t('删除会话')} ${session.title || t('新对话')}`}
               onClick={() => onDeleteSession(session.id)}
             ><Trash2 size={13} /></button>
           </div>)}
@@ -125,7 +125,7 @@ export function DashboardChat(props: Props) {
 
     <div className="dash-chat-panel">
       <header className="dash-chat-head">
-        <div><span className={`dash-chat-live ${isRunning ? 'active' : ''}`} /><div><strong>{activeSession.title || '新对话'}</strong><small>{phaseLabel[phase]}</small></div></div>
+        <div><span className={`dash-chat-live ${isRunning ? 'active' : ''}`} /><div><strong data-i18n-ignore="true">{activeSession.title || t('新对话')}</strong><small>{phaseLabel[phase]}</small></div></div>
         <span className="dash-current-model"><Bot size={13} />当前模型 <strong>{provider}</strong></span>
       </header>
 
@@ -139,7 +139,7 @@ export function DashboardChat(props: Props) {
         </>}
       </div>
 
-      <div ref={messageListRef} className="dash-chat-messages">
+      <div ref={messageListRef} onScroll={onScroll} className="dash-chat-messages">
         {activeSession.messages.length === 0 && <div className="dash-chat-empty"><MessageSquareText size={22} /><strong>开始对话</strong></div>}
         {activeSession.messages.map((message) => <article key={message.id} className={`dash-chat-message ${message.role} ${message.pending ? 'pending' : ''}`}>
           <div className="dash-chat-message-meta"><span>{message.role === 'user' ? '你' : provider}</span><time>{new Date(message.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>
@@ -181,6 +181,7 @@ export function DashboardChat(props: Props) {
       </div>
 
       <footer className="dash-chat-composer">
+        {showLatest && <button type="button" className="conversation-latest" data-conversation-latest title={t('回到最新消息')} aria-label={t('回到最新消息')} onClick={scrollToLatest}><ArrowDown size={17} /></button>}
         {attachments.length > 0 && <div className="dash-chat-pending-attachments">{attachments.map((attachment) => <span key={attachment.id}><FileText size={12} />{'url' in attachment ? attachment.alt : attachment.name}<button type="button" title="移除附件" onClick={() => onRemoveAttachment(attachment.id)}><X size={11} /></button></span>)}</div>}
         {isRunning && guidanceState && <span className={`dash-guidance-feedback ${guidanceState.status}`} role="status"><i />{guidanceState.status === 'accepted' ? '补充要求已接收，将在下一步骤应用' : guidanceState.delivery === 'external-harness' ? '补充要求已送达当前执行器' : '补充要求已应用到当前任务'}</span>}
         <textarea
@@ -188,7 +189,7 @@ export function DashboardChat(props: Props) {
           rows={2}
           disabled={(isRunning && !canGuide) || guidanceBusy}
           onChange={(event) => onDraftChange(event.target.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (isRunning) onGuidance(); else onSend(); } }}
+          onKeyDown={(event) => { if (isConversationSubmitKey(event.nativeEvent)) { event.preventDefault(); if (isRunning) onGuidance(); else onSend(); } }}
           placeholder={isRunning ? (canGuide ? '补充要求，将在下一步骤应用' : '当前快速回答完成后可继续提问') : '输入消息，Enter 发送，Shift + Enter 换行'}
         />
         <div className="dash-chat-composer-foot">

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent } from 'react';
 import {
   AlertCircle,
+  ArrowDown,
   Check,
   ChevronRight,
   Circle,
@@ -31,6 +32,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cancelWorkflowTask, getWorkflowTask, listWorkflowTasks, streamWorkflowEvents } from '../../lib/taskRuntime';
 import { userFacingError } from '../../lib/errorPresentation';
+import { isConversationSubmitKey } from '../../lib/conversationInteraction';
+import { useConversationScroll } from '../../lib/useConversationScroll';
 import {
   deleteAgentWorkflow,
   createNexusTest,
@@ -203,7 +206,7 @@ export function WorkflowStudio() {
   const dragMovedRef = useRef(false);
   const runControllerRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef(`workflow-session-${crypto.randomUUID()}`);
-  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  const { scrollRef: messagesScrollRef, onScroll: onMessagesScroll, showLatest, scrollToLatest } = useConversationScroll(workflowId, messages);
 
   const restoreWorkflowHistory = useCallback(async (targetWorkflowId: string, signal: AbortSignal, replace = false) => {
     try {
@@ -293,12 +296,6 @@ export function WorkflowStudio() {
       });
     return () => controller.abort();
   }, []);
-
-  useEffect(() => {
-    const container = messagesScrollRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-  }, [messages, runActivity]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -965,7 +962,7 @@ export function WorkflowStudio() {
 
       <section className="workflow-runner glass-panel">
         <header><div><MessageSquareText size={15} /><strong>运行 Agent Nexus</strong></div><span className={runningTaskId ? 'running' : ''}>{runningTaskId && <LoaderCircle className="spin" size={12} />}{runActivity}</span></header>
-        <div ref={messagesScrollRef} className="workflow-runner-messages">
+        <div ref={messagesScrollRef} onScroll={onMessagesScroll} className="workflow-runner-messages">
            {messages.length === 0 && <div className="workflow-runner-empty"><Workflow size={22} /><strong>输入内容，按当前 Agent 流水线执行</strong><span>Agent 状态、分支和 Loop 轮次会实时显示在画布中。</span></div>}
           {messages.map((message) => <article key={message.id} className={message.role}>
             <span>{message.role === 'user' ? '你' : 'W'}</span>
@@ -973,7 +970,8 @@ export function WorkflowStudio() {
           </article>)}
         </div>
         <footer>
-          <textarea rows={2} value={runnerInput} disabled={Boolean(runningTaskId)} onChange={(event) => setRunnerInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void execute(); } }} placeholder="向 Agent Nexus 输入内容" />
+          {showLatest && <button type="button" className="conversation-latest" data-conversation-latest title="回到最新消息" aria-label="回到最新消息" onClick={scrollToLatest}><ArrowDown size={17} /></button>}
+          <textarea rows={2} value={runnerInput} disabled={Boolean(runningTaskId)} onChange={(event) => setRunnerInput(event.target.value)} onKeyDown={(event) => { if (isConversationSubmitKey(event.nativeEvent)) { event.preventDefault(); void execute(); } }} placeholder="向 Agent Nexus 输入内容" />
           <button type="button" className={runningTaskId ? 'stop' : 'send'} aria-label={runningTaskId ? '停止 Agent Nexus' : '运行 Agent Nexus'} disabled={!runningTaskId && !runnerInput.trim()} onClick={() => runningTaskId ? void stop() : void execute()}>{runningTaskId ? <Square size={15} /> : <Send size={15} />}</button>
         </footer>
       </section>

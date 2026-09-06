@@ -870,7 +870,9 @@
 .dash-chat-review-actions .deliver { border: 1px solid var(--dash-line-strong); color: var(--dash-soft); background: rgb(255 255 255 / 5%); }
 .dash-chat-review-actions button:disabled { opacity: .48; cursor: wait; }
 
-.dash-chat-composer { position: relative; z-index: 2; display: grid; gap: 7px; margin: 0 clamp(14px, 4vw, 54px) 16px; padding: 10px 11px; border-radius: var(--dash-radius-panel); }
+.dash-chat-composer { position: relative; z-index: 2; display: grid; gap: 7px; margin: 0 clamp(14px, 4vw, 54px) 16px; padding: 10px 11px; border-radius: var(--dash-radius-panel); overflow: visible; }
+.conversation-latest, .workflow-runner > footer .conversation-latest { position: absolute; right: 8px; top: -44px; z-index: 4; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 1px solid var(--dash-line-strong); border-radius: 8px; color: var(--dash-ink); background: var(--dash-glass-bg, rgb(25 30 29 / 90%)); backdrop-filter: blur(16px); cursor: pointer; }
+.conversation-latest:hover { border-color: var(--dash-accent); }
 .dash-chat-pending-attachments { display: flex; flex-wrap: wrap; gap: 6px; }
 .dash-chat-pending-attachments > span { padding-right: 5px; }
 .dash-chat-pending-attachments button { display: grid; width: 20px; height: 20px; place-items: center; border: 0; border-radius: 5px; color: var(--dash-muted); background: transparent; cursor: pointer; }
@@ -2029,7 +2031,7 @@
 .workflow-runner-messages article table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .workflow-runner-messages article th, .workflow-runner-messages article td { padding: 5px 7px; border: 1px solid var(--dash-line-strong); text-align: left; }
 .workflow-pending { display: flex; align-items: center; gap: 7px; color: var(--dash-muted); }
-.workflow-runner > footer { display: grid; grid-template-columns: minmax(0, 1fr) 38px; align-items: end; gap: 8px; padding: 9px; border-top: 1px solid var(--dash-line); background: rgb(0 0 0 / 10%); }
+.workflow-runner > footer { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 38px; align-items: end; gap: 8px; padding: 9px; border-top: 1px solid var(--dash-line); background: rgb(0 0 0 / 10%); }
 .workflow-runner > footer textarea { width: 100%; height: 40px; min-height: 40px; padding: 9px 10px; resize: none; border: 1px solid var(--dash-line-strong); border-radius: 7px; outline: 0; color: var(--dash-ink); background: rgb(0 0 0 / 22%); font: inherit; font-size: 12px; line-height: 1.45; }
 .workflow-runner > footer textarea:focus { border-color: rgb(var(--dash-accent-rgb) / 58%); box-shadow: 0 0 0 3px rgb(var(--dash-accent-rgb) / 8%); }
 .workflow-runner > footer button { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid rgb(43 234 120 / 50%); border-radius: 7px; color: #07150d; background: var(--dash-selected); cursor: pointer; }

@@ -204,6 +204,7 @@ export class SqliteTaskStore implements TaskStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_tasks_tenant_updated ON tasks(tenant_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_tasks_session_owner ON tasks(tenant_id, user_id, session_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(status, lease_expires_at, created_at);
       CREATE INDEX IF NOT EXISTS idx_events_task_sequence ON task_events(task_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON task_events(timestamp);
@@ -334,8 +335,10 @@ export class SqliteTaskStore implements TaskStore {
     return row ? taskFromRow(row as TaskRow) : null;
   }
 
-  async deleteTask(taskId: string, tenantId: string) {
-    const result = this.db.prepare('DELETE FROM tasks WHERE id = ? AND tenant_id = ?').run(taskId, tenantId);
+  async deleteTask(taskId: string, tenantId: string, expectedRevision?: number) {
+    const result = this.db.prepare(
+      `DELETE FROM tasks WHERE id = ? AND tenant_id = ?${expectedRevision === undefined ? '' : ' AND revision = ?'}`,
+    ).run(...(expectedRevision === undefined ? [taskId, tenantId] : [taskId, tenantId, expectedRevision]));
     return result.changes > 0;
   }
 
@@ -428,6 +431,13 @@ export class SqliteTaskStore implements TaskStore {
         )
       ORDER BY t.updated_at ASC LIMIT ?
     `).all(Math.min(500, Math.max(1, Math.floor(limit)))) as TaskRow[];
+    return rows.map(taskFromRow);
+  }
+
+  async listTasksBySession(tenantId: string, userId: string, sessionId: string) {
+    const rows = this.db.prepare(
+      'SELECT * FROM tasks WHERE tenant_id = ? AND user_id = ? AND session_id = ? ORDER BY created_at ASC, id ASC',
+    ).all(tenantId, userId, sessionId) as TaskRow[];
     return rows.map(taskFromRow);
   }
 
@@ -700,6 +710,13 @@ export class SqliteTaskStore implements TaskStore {
   async listDeletedSessionIds(tenantId: string, userId: string) {
     const rows = this.db.prepare('SELECT id FROM sessions WHERE tenant_id = ? AND user_id = ? AND deleted_at IS NOT NULL').all(tenantId, userId) as Array<{ id: string }>;
     return rows.map((row) => row.id);
+  }
+
+  async getSession(sessionId: string, tenantId: string, userId: string) {
+    const row = this.db.prepare(
+      'SELECT * FROM sessions WHERE tenant_id = ? AND user_id = ? AND id = ? AND deleted_at IS NULL',
+    ).get(tenantId, userId, sessionId) as SessionRow | undefined;
+    return row ? sessionFromRow(row) : null;
   }
 
   async upsertSession(tenantId: string, userId: string, input: UpsertSessionInput) {

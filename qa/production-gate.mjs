@@ -58,6 +58,7 @@ const checks = [
   ['内网企业治理（配额、熔断、持久指标）', 'qa:governance'],
   ['3D Agent Graph', 'qa:agentgraph3d'],
   ['界面中英文回归', 'qa:i18n'],
+  ['会话缓存、输入和 Graph 交互', 'qa:frontend-stability'],
   ['浏览器视觉回归', 'qa:visual'],
   ['并发性能基线', 'perf:smoke'],
 ];
@@ -118,6 +119,7 @@ if (businessPostgresUrl) {
   const postgresEnv = { ...acceptanceEnv, DATABASE_URL: businessPostgresUrl };
   results.push(await run('PostgreSQL 编译产物迁移', 'db:migrate', postgresEnv));
   results.push(await run('PostgreSQL 业务记录与凭据一致性', 'qa:business-postgres', acceptanceEnv));
+  results.push(await run('PostgreSQL 稳定性与历史边界', 'qa:stability:postgres', acceptanceEnv));
   results.push(await run('PostgreSQL 多 Worker 故障接管', 'qa:postgres-failover', acceptanceEnv));
 } else {
   results.push({
@@ -131,6 +133,12 @@ if (businessPostgresUrl) {
     script: 'qa:business-postgres',
     status: 'skipped',
     reason: 'AXIOM_TEST_DATABASE_URL 未配置；SQLite 回归已执行，但 PostgreSQL 现场验收未执行',
+  });
+  results.push({
+    name: 'PostgreSQL 稳定性与历史边界',
+    script: 'qa:stability:postgres',
+    status: 'skipped',
+    reason: 'AXIOM_TEST_DATABASE_URL 未配置；通知接管、日程修改、工具治理和长历史需隔离 PostgreSQL 验收',
   });
   results.push({
     name: 'PostgreSQL 多 Worker 故障接管',
