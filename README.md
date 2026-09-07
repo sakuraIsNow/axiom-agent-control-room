@@ -2,11 +2,9 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> Give Axiom one goal. It decides how difficult the work is, assigns only the Agents that are needed, shows their progress, and checks the result before delivery.
+> A workspace for asking questions, researching topics, creating content, and building reusable Agent tools. See who is working, follow the result, and step in when a decision is needed.
 
-Current source version: **v2.3.0-rc.6** (execution recovery and human collaboration release candidate)
-
-This update focuses on finishing work reliably: Agents can act on tool results, resume saved work, and ask for your decision when an external action is uncertain. Chat, Agent Nexus, plugins, and schedules keep the model configuration chosen for their task. See the [execution-loop record](docs/execution-loop-upgrade-20260907.md), [cross-entry acceptance record](docs/cross-entry-consistency-20260907.md), and [upgrade guide](docs/migration-v2.3.md) for validation and limits.
+**Version: v2.3.0-rc.6** · [Release notes](CHANGELOG.md) · [Upgrade guide](docs/migration-v2.3.md)
 
 ![Axiom Control Room](docs/images/overview.png)
 
@@ -15,30 +13,22 @@ This update focuses on finishing work reliably: Agents can act on tool results, 
 Axiom is an open-source control room for real Agent work. You do not need to learn workflow diagrams or configure a large team before asking for something. Start with a normal request:
 
 ```text
-Research several open-source Agent projects, compare their strengths and risks,
-then prepare a report I can share with my team.
+Read these documents, check the latest information, compare the options,
+and prepare a report I can share with my team.
 ```
 
-Axiom can turn that request into a tracked execution:
-
-```text
-Understand → Route → Assign Agents → Run in parallel → Review → Deliver
-```
-
-Simple questions stay simple. Research, file analysis, image generation, tool use, or quality review adds the relevant Agent only when the current turn needs it.
+Axiom routes the work, assigns relevant Agents, and keeps the result connected to its sources and execution history. Simple questions stay simple; more involved requests can add research, file analysis, media generation, tools, and quality review.
 
 The interface opens in English by default. Use the language control in the upper-right corner to switch to Simplified Chinese; the selection is remembered after refresh.
 
 ## 🏆 Why use it?
 
-- 🚦 **Work is routed by difficulty.** A short question does not pay the latency and Token cost of a full multi-Agent workflow.
-- 🧭 **Every turn is reconsidered.** A follow-up can skip old Agents, reuse saved work with its evidence, or bring a new Agent into the Graph.
-- ⚡ **Independent work runs in parallel.** Research, analysis, and building do not wait in one long serial queue when they have no dependency.
-- ✅ **Delivery has a gate.** Reviewer findings, evidence gaps, and human approval are part of the durable run, not decorative UI states.
-- 🔄 **Interrupted work can recover.** Tasks, events, leases, checkpoints, approvals, and SSE cursors survive refreshes and Worker restarts.
-- 👀 **The Graph reflects execution.** Agent Graph and runtime events come from the task state that is actually running.
-- 🔌 **Models are replaceable.** DeepSeek is the default; text, vision, image, and video providers can be configured separately.
-- 🛡️ **Risky actions pause first.** File writes, publishing, and other high-impact tool calls can require explicit human approval.
+- 🚦 **Use the team the task needs.** Each turn is routed by difficulty. A follow-up can reuse work, skip unneeded Agents, or add a new specialist.
+- ⚡ **Work in parallel when possible.** Independent research, analysis, and building can run together instead of waiting in one queue.
+- 👀 **See actual progress.** Agent Graph shows the Agents and tools involved in the real execution, with results and review status available to inspect.
+- 🔄 **Continue after an interruption.** Saved task state and execution receipts support recovery after refreshes or Worker restarts without blindly repeating uncertain actions.
+- 🛡️ **Keep important decisions in your hands.** Review results, guide a running task, and approve high-impact actions before they proceed.
+- 🔌 **Choose your own models.** DeepSeek is the default; text, vision, image, and video services can be configured separately, including compatible local APIs.
 
 ## 🧩 What is included?
 
@@ -50,7 +40,7 @@ The interface opens in English by default. Use the language control in the upper
 | Human collaboration | Guide, pause, resume, cancel, review, retry, branch, merge, or rerun an Agent | Built in |
 | Agent Nexus | Build reusable Agent flows with conditions, parallel paths, multiple Loops, nested Loops, and local reruns | Built in |
 | Plugin Mini Apps | Create, edit, preview, review, publish, sign, install, roll back, and withdraw plugins | Built in; external tools follow permissions |
-| Media and reports | Generate or edit images; reserve a video Agent; export Markdown, Word, LaTeX, or PDF reports | Configure the matching provider |
+| Media and reports | Generate or edit images, request videos, and export Markdown, Word, LaTeX, or PDF reports | Configure the matching provider for media generation |
 | Projects and schedules | Organize work, members, reviews, decisions, memory, and Agent-powered schedules | Built in |
 | Tools and capability packs | Use custom Agents, templates, MCP/OpenAPI tools, and seven scoped capability packs | Credentials required for authenticated services |
 | Feishu collaboration | Read documents, calendars, and group messages; send messages after approval | Feishu custom app |
@@ -78,7 +68,7 @@ Final answer, report, Artifact, or follow-up action
 
 Long tasks use structured handoffs and Artifact references instead of repeatedly placing every intermediate result into the model context. A user can add guidance while work is running; Axiom applies it at the next safe execution point without creating a duplicate task.
 
-### What changed in the execution loop?
+### Reliable execution
 
 - **One request can use several inputs.** An image and a document add the required capabilities without replacing the rest of the Agent plan. Tasks keep an immutable copy of the exact turn's attachments.
 - **Agents can take a useful next step.** A tool result can lead to another lookup or action. Decisions and results are checkpointed, with limits that stop repeated calls and stalled work.
@@ -94,17 +84,13 @@ Long tasks use structured handoffs and Artifact references instead of repeatedly
 - **Plugins follow real routing.** Simple Mini App questions stay lightweight; complex requests use durable tasks and keep their original request while waiting for your decision.
 - **Status stays honest.** A pause is not a successful delivery, a truncated answer is not complete, and missing provider usage is not presented as measured zero.
 
-The attention list uses the same glass surface, restrained colors, and readable rows as the rest of the workspace. Ordinary Chat, Nexus, and Mini App histories remain separate; the task board shows their actual execution records.
+Ordinary Chat, Nexus, and Mini App histories remain separate; the task board brings their execution records together. Pending decisions are available beside the work that needs your attention.
 
 Inline Base64 media is saved as an Artifact. Provider-hosted links can still expire, and deleted completed Artifacts require a storage backup. Existing API clients should review the [HTTP 202 media contract](docs/migration-v2.3.md) before upgrading.
 
 ## 🪟 Product views
 
-### 🛰️ Control Room
-
-![Task overview](docs/images/overview.png)
-
-See active work, daily progress, real task dependencies, delivery state, Token trends, and the current 3D Agent scene in one workspace.
+The Control Room shown above brings together active work, daily progress, task dependencies, delivery state, Token trends, and the live 3D Agent scene.
 
 ### 💬 Chat and Agent Graph
 
@@ -129,6 +115,14 @@ Create a small tool with an Agent, keep editable versions, review requested perm
 ![Model settings](docs/images/settings.png)
 
 Use the default DeepSeek service or configure OpenAI-compatible local and Internet APIs. Text, vision, image, and video services are independent.
+
+## 🏗️ Frontend and backend
+
+| Part | Location | Stack |
+| --- | --- | --- |
+| Frontend | [`src/`](src/) | React 19, TypeScript/TSX, Vite, and Three.js |
+| Backend | [`server/`](server/) | Node.js, Hono, and TypeScript |
+| Database | Managed by the backend | SQLite for local development; PostgreSQL for multi-Worker deployments |
 
 ## 🚀 Quick start
 
@@ -220,8 +214,6 @@ The Projects → Capabilities view groups external tools into Development, Resea
 
 To connect Feishu, create an enterprise custom app and provide its `App ID` and `App Secret`. Grant only the document, calendar, group-message, and send permissions the deployment needs. Read operations can run directly; sending a message remains a high-risk action that waits for approval.
 
-Public GitHub pages and files can be read without a key, but anonymous API limits are low. Prefer a read-only GitHub App for stable team use and for private repositories. Write permissions should be separate and continue through human approval.
-
 ## 🧪 Quality gates
 
 ```bash
@@ -231,7 +223,7 @@ npm run build                 # Production web and server build
 npm run qa:i18n               # English default and Chinese switch regression
 npm run qa:visual             # Desktop and mobile visual regression
 npm run qa:business           # Segmented business-flow evaluation
-npm run qa:mcp-business       # 30 P0 + 10 P1 Fake MCP cases
+npm run qa:mcp-business       # 30 P0 + 14 P1 Fake MCP cases
 npm run qa:object-storage:local
 npm run qa:postgres:local
 npm run qa:all:local          # PostgreSQL + MinIO local release gate
@@ -302,6 +294,7 @@ See [Launch readiness](docs/launch-readiness.md) for the exact remaining checks.
 ## 📚 Documentation
 
 - [Execution loop](docs/execution-loop.md)
+- [Cross-entry execution and human collaboration](docs/cross-entry-consistency-20260907.md)
 - [Agent Nexus control flow](docs/agent-nexus-control-flow.md)
 - [Tool Registry and MCP safety](docs/tool-registry.md)
 - [Business capabilities V2](docs/business-capabilities-v2.md)
