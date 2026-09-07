@@ -29,7 +29,7 @@ const fakeTools = [
   { name: 'data.query', description: '查询业务数据', risk: 'low', inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1 } }, required: ['query'], additionalProperties: false } },
   { name: 'feishu.read_document', description: '读取飞书文档', risk: 'low', inputSchema: { type: 'object', properties: { documentId: { type: 'string', minLength: 1 } }, required: ['documentId'], additionalProperties: false } },
   { name: 'feishu.send_message', description: '向飞书发送消息', risk: 'high', inputSchema: { type: 'object', properties: { recipient: { type: 'string', minLength: 1 }, message: { type: 'string', minLength: 1 } }, required: ['recipient', 'message'], additionalProperties: false } },
-  { name: 'unstable.call', description: '验证熔断的故障工具', risk: 'low', inputSchema: { type: 'object', properties: { mode: { type: 'string', enum: ['fail', 'ok'] } }, required: ['mode'], additionalProperties: false } },
+  { name: 'unstable.call', description: '验证熔断的故障工具', risk: 'low', annotations: { readOnlyHint: true }, inputSchema: { type: 'object', properties: { mode: { type: 'string', enum: ['fail', 'ok'] } }, required: ['mode'], additionalProperties: false } },
   { name: 'secret.echo', description: '用于验证敏感内容脱敏', risk: 'low', inputSchema: { type: 'object', properties: { secret: { type: 'string', minLength: 4 } }, required: ['secret'], additionalProperties: false } },
   { name: 'artifact.large_result', description: '返回可归档的大型结果', risk: 'low', inputSchema: { type: 'object', properties: { label: { type: 'string', minLength: 1 } }, required: ['label'], additionalProperties: false } },
 ];

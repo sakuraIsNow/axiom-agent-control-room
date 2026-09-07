@@ -1102,8 +1102,8 @@ describe('WorkflowOrchestrator', () => {
       assert.ok(model.requestedModels.includes('fast-model'));
       assert.ok(model.requestedModels.includes('deep-model'));
       const modelEvents = (await store.getEvents(task.id)).filter((event) => event.type === 'model.completed');
-      assert.equal(modelEvents.find((event) => event.payload.stage === 'agent:research:attempt:2')?.payload.model, 'fast-model');
-      assert.equal(modelEvents.find((event) => event.payload.stage === 'agent:analysis:attempt:1')?.payload.model, 'deep-model');
+      assert.equal(modelEvents.find((event) => event.payload.stage === 'agent:research:round:1:attempt:2')?.payload.model, 'fast-model');
+      assert.equal(modelEvents.find((event) => event.payload.stage === 'agent:analysis:round:1:attempt:1')?.payload.model, 'deep-model');
     } finally {
       await store.close();
     }
@@ -1312,7 +1312,7 @@ describe('WorkflowOrchestrator', () => {
       assert.equal(completed.status, 'completed', `${completed.error ?? 'workflow did not complete'} :: ${JSON.stringify(completed.stepResults)}`);
       assert.equal(await readFile(join(workspace, 'release.md'), 'utf8'), '# Release\n');
       assert.ok((await store.getEvents(task.id)).some((event) => event.type === 'tool.completed'));
-      assert.equal(model.builderCalls, 2);
+      assert.equal(model.builderCalls, 1, 'Approval resume reuses the persisted Agent decision.');
     } finally {
       if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR;
       else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor;

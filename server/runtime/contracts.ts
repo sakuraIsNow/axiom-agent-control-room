@@ -192,6 +192,9 @@ export type WorkflowPlan = {
   routingVersion?: string;
   routerModel?: string;
   routerConfidence?: number;
+  /** Immutable exact-turn input artifacts, persisted before queue admission. */
+  inputAttachments?: import('./taskInputAttachments.js').TaskInputAttachmentSnapshot[];
+  mediaRequest?: { mode?: 'generate' | 'edit'; size?: string; count?: number; quality?: 'low' | 'medium' | 'high' | 'auto' };
 };
 
 export type WorkflowTemplateStatus = 'draft' | 'published' | 'archived';
@@ -564,6 +567,17 @@ export type EvidenceItem = {
   title?: string;
   locator?: string;
   artifactId?: string;
+  auditId?: string;
+  validation?: {
+    version: 1;
+    taskId: string;
+    stepId: string;
+    basis: 'tool-receipt' | 'artifact' | 'none';
+    sourceStatus: 'available' | 'failed' | 'missing';
+    toolCallId?: string;
+    auditId?: string;
+    artifactId?: string;
+  };
   publishedAt?: string;
   retrievedAt?: string;
 };
@@ -578,6 +592,8 @@ export type AgentHandoff = {
 };
 
 export type ExecutionPolicy = {
+  /** Server-owned entry capability restriction, including an explicit empty allowlist. */
+  toolAllowlist?: string[];
   requirePlanApproval: boolean;
   maxTokens?: number;
   maxCostUsd?: number;
@@ -667,6 +683,8 @@ export type WorkflowTask = {
   model?: string;
   /** Tenant-scoped encrypted text-provider reference used by resumable workers. */
   modelCredentialId?: string;
+  /** Immutable encrypted provider bundle; API keys never enter Task/Event records. */
+  providerBindingId?: string;
   status: TaskStatus;
   plan?: WorkflowPlan;
   stepResults: StepResult[];
@@ -762,6 +780,7 @@ export type RuntimeEventType =
   | 'agent.assigned'
   | 'agent.started'
   | 'agent.retrying'
+  | 'agent.tool_loop'
   | 'agent.completed'
   | 'agent.failed'
   | 'agent.message'
@@ -779,6 +798,8 @@ export type RuntimeEventType =
   | 'tool.approval_requested'
   | 'tool.approved'
   | 'tool.rejected'
+  | 'tool.outcome_unknown'
+  | 'tool.outcome_resolved'
   | 'node.retry_requested'
   | 'node.skip_requested'
   | 'node.completed_manually'
@@ -848,7 +869,11 @@ export type RuntimeExecutionContext = {
 export type RuntimeEventSource = 'builtin' | 'harness' | 'plugin' | 'agent-nexus' | 'schedule' | 'webhook' | 'conversation' | 'api';
 
 export type CompletionEvidenceSummary = {
+  schemaVersion?: 2;
   status: 'verified' | 'partial' | 'unverified' | 'not-required';
+  execution?: 'completed' | 'partial' | 'unverified';
+  acceptance?: 'accepted' | 'not-recorded';
+  evidenceStatus?: 'supported' | 'unverified';
   totalSteps: number;
   completedSteps: number;
   failedSteps: number;
@@ -918,6 +943,7 @@ export type CreateTaskInput = Pick<WorkflowTask, 'tenantId' | 'userId' | 'sessio
   templateId?: string;
   model?: string;
   modelCredentialId?: string;
+  providerBindingId?: string;
   plan?: WorkflowPlan;
 };
 

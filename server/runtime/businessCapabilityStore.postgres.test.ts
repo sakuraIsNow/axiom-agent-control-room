@@ -13,6 +13,42 @@ import { PostgresIntegrationCredentialStore } from './integrationCredentialStore
 
 const connectionString = process.env.AXIOM_TEST_DATABASE_URL?.trim();
 
+test('PostgreSQL external receipt review is idempotent, preserves approval identity and fences late callbacks', {
+  skip: connectionString ? false : 'AXIOM_TEST_DATABASE_URL is not configured.', timeout: 20_000,
+}, async () => {
+  const tenantId = `tool-review-pg-${randomUUID()}`;
+  const first = new PostgresBusinessCapabilityStore(connectionString!);
+  const second = new PostgresBusinessCapabilityStore(connectionString!);
+  const pool = new Pool({ connectionString, max: 1 });
+  try {
+    await Promise.all([first.initialize(), second.initialize()]);
+    const claimInput = { tenantId, userId: 'owner', sourceId: 'source', approvalId: 'approval', executionId: 'execution', hourlyQuota: 5,
+      data: { taskId: 'task', stepId: 'step' } };
+    const firstAttempt = (await first.claimToolCall(claimInput)).record;
+    const failed = await first.update(firstAttempt.id, tenantId, { status: 'outcome_unknown' }, firstAttempt.revision);
+    const resolution = { tenantId, sourceId: 'source', approvalId: 'approval', executionId: 'execution', taskId: 'task', stepId: 'step',
+      resolutionId: 'execution:revision-2', operatorId: 'reviewer', decision: 'confirmed-not-executed' as const, note: 'Checked the destination audit.' };
+    await Promise.all([first.resolveToolCallUnknown(resolution), second.resolveToolCallUnknown(resolution)]);
+    const reviewed = (await first.get(firstAttempt.id, tenantId))!;
+    assert.equal(reviewed.status, 'verified_not_executed');
+    assert.equal((reviewed.data.outcomeResolutions as unknown[]).length, 1);
+    await assert.rejects(first.update(failed.id, tenantId, { status: 'completed' }, failed.revision), BusinessRecordRevisionConflictError);
+    await assert.rejects(second.resolveToolCallUnknown({ ...resolution, decision: 'confirmed-completed' }), /different decision/);
+    const claims = await Promise.all([first.claimToolCall(claimInput), second.claimToolCall(claimInput)]);
+    assert.equal(claims.filter((claim) => claim.claimed).length, 1);
+    const retry = claims.find((claim) => claim.claimed)!.record;
+    assert.notEqual(retry.id, firstAttempt.id);
+    assert.equal(retry.data.approvalId, firstAttempt.data.approvalId);
+    assert.equal((await first.list(tenantId, 'task-action')).length, 2);
+    await first.update(retry.id, tenantId, { status: 'completed', data: { ...retry.data, responseContent: 'actual result' } }, retry.revision);
+    await assert.rejects(first.resolveToolCallUnknown({ ...resolution, resolutionId: 'execution:revision-4' }), /already confirms completion/);
+    assert.equal((await second.claimToolCall(claimInput)).record.status, 'completed');
+  } finally {
+    try { await pool.query('DELETE FROM axiom_business_records WHERE tenant_id=$1', [tenantId]); }
+    finally { await Promise.all([first.close(), second.close(), pool.end()]); }
+  }
+});
+
 test('PostgreSQL business records preserve CRUD, tenant isolation, revisions, and multi-worker cleanup', {
   skip: connectionString ? false : 'AXIOM_TEST_DATABASE_URL is not configured.',
 }, async () => {

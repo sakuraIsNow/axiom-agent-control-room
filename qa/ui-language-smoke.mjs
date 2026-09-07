@@ -101,7 +101,35 @@ await page.locator('.language-trigger').click();
 await page.locator('.language-popover button[lang="en"]').click();
 await page.waitForFunction(() => document.documentElement.lang === 'en');
 if (!(await page.locator('.dash-nav-rail').innerText()).includes('Tasks')) throw new Error('English UI selection did not reapply.');
+
+// Exercise blocked system states even when the real provider is healthy.
+const readinessResponse = await context.request.get(`${baseUrl}/api/runtime/readiness`);
+if (!readinessResponse.ok()) throw new Error(`Readiness API returned ${readinessResponse.status()}.`);
+const readinessFixture = await readinessResponse.json();
+const baseChecks = readinessFixture.checks.filter((check) => !['model-provider', 'provider-bindings'].includes(check.id));
+for (const secretConfigured of [true, false]) {
+  const checks = [
+    ...baseChecks,
+    { id: 'model-provider', label: '文本模型服务', state: 'blocked', detail: '文本模型服务健康检查失败。', required: true },
+    { id: 'provider-bindings', label: '任务模型配置保护', state: secretConfigured ? 'ready' : 'blocked', required: true,
+      detail: secretConfigured ? '任务模型配置可加密保存并在重启后恢复。' : '请配置并备份 AXIOM_PROVIDER_SECRET；任务入队需要加密保存模型配置，所有 Worker 必须使用同一密钥。' },
+  ];
+  const blockedFixture = { ...readinessFixture, state: 'blocked', checks, blockers: checks.filter((check) => check.state === 'blocked').map((check) => check.label) };
+  const readinessRoute = (route) => route.fulfill({ json: blockedFixture });
+  await page.route('**/api/runtime/readiness', readinessRoute);
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.locator('button[title="Production readiness"]').click();
+  await page.locator('.readiness-technical summary').click();
+  await page.waitForFunction(() => document.querySelector('.readiness-grid')?.textContent?.includes('The text model service failed its health check.'));
+  const blockedCopy = await visibleChinese();
+  if (blockedCopy.length) throw new Error(`Untranslated blocked Readiness copy: ${blockedCopy.join(' | ')}`);
+  const panel = page.locator('.readiness-panel');
+  if (!(await panel.innerText()).includes('Model services are temporarily unavailable')) throw new Error('The blocked model service warning was lost.');
+  if (!(await panel.innerText()).includes('Task model configuration protection')) throw new Error('The task provider protection check was lost.');
+  await page.locator('button[aria-label="Close system status"]').click();
+  await page.unroute('**/api/runtime/readiness', readinessRoute);
+}
 if (consoleErrors.length) throw new Error(`Browser console errors: ${consoleErrors.join(' | ')}`);
 
-console.log(JSON.stringify({ status: 'passed', defaultLanguage: 'en', persistedLanguage: 'zh-CN', workspaces: navButtons.map(([name]) => name) }, null, 2));
+console.log(JSON.stringify({ status: 'passed', defaultLanguage: 'en', persistedLanguage: 'zh-CN', workspaces: navButtons.map(([name]) => name), blockedReadinessScenarios: 2 }, null, 2));
 await browser.close();

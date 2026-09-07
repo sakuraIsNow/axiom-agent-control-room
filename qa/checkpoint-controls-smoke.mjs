@@ -84,9 +84,15 @@ page.on('dialog', (dialog) => { nativeDialogOpened = true; void dialog.dismiss()
 await page.route('**/api/tasks?limit=30', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tasks: [summary] }) }));
 await page.route('**/api/sessions?limit=50', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: [session], deletedSessionIds: [] }) }));
 await page.route(`**/api/sessions/${sessionId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session }) }));
-await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task }) }));
+await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task, actionPermissions: { canManage: true } }) }));
 await page.route(`**/api/capabilities/tasks/${taskId}/actions`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ actions: [] }) }));
-await page.route(`**/api/tasks/${branchTaskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task: branchTask }) }));
+await page.route(`**/api/tasks/${branchTaskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task: branchTask, actionPermissions: { canManage: true } }) }));
+for (const fixtureTaskId of [taskId, branchTaskId]) {
+  await page.route(`**/api/tasks/${fixtureTaskId}/tools/executions`, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: true, executions: [], canResume: false }) });
+  });
+}
 await page.route(`**/api/tasks/${taskId}/checkpoints`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(checkpointState) }));
 await page.route(`**/api/tasks/${taskId}/checkpoints/${checkpointId}/diff**`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ diff }) }));
 await page.route(`**/api/tasks/${taskId}/checkpoints/${checkpointId}/merge`, async (route) => {

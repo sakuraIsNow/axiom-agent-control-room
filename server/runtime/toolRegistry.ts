@@ -16,6 +16,7 @@ import type {
 import type { ArtifactStore } from './artifactStore.js';
 import type { ArtifactCatalog } from './artifactCatalog.js';
 import { DockerSandboxExecutor, type SandboxResult } from './toolExecutor.js';
+import type { ToolExecutionRecord, ToolExecutionStore, ToolExecutionOwner, ToolExecutionResolveInput, ToolSideEffect } from './toolExecutionStore.js';
 
 const invocationSchema = z.object({
   name: z.string().min(1).max(80),
@@ -40,6 +41,9 @@ export type ToolContext = {
   callId: string;
   auditId: string;
   approvalId?: string;
+  invocationId?: string;
+  executionId?: string;
+  signal?: AbortSignal;
 };
 
 export type RegisteredTool = {
@@ -49,10 +53,12 @@ export type RegisteredTool = {
   parameters: ToolParameterSchema;
   schema: z.ZodType<Record<string, unknown>>;
   timeoutMs: number;
+  sideEffect?: ToolSideEffect;
   executionBoundary?: 'sandbox' | 'host-bounded';
   command?: string;
   buildArgs?: (input: Record<string, unknown>) => string[];
   handler?: (input: Record<string, unknown>, context: ToolContext) => Promise<SandboxResult>;
+  resolveUnknown?: (record: ToolExecutionRecord, resolution: ToolExecutionResolveInput) => Promise<void>;
   routing?: {
     sourceId: string;
     tenantId: string;
@@ -96,7 +102,32 @@ export type ToolExecution = {
   signature: string;
   artifact?: ArtifactRef;
   artifactError?: string;
+  replayed?: boolean;
+  receiptSource?: 'tool' | 'human-confirmed';
+  humanConfirmation?: { operatorId: string; note: string; resolvedAt: string };
 };
+
+export class ToolExecutionPendingError extends Error {
+  constructor(readonly record: ToolExecutionRecord) {
+    super('This tool invocation is already running or its execution lease could not be confirmed.');
+    this.name = 'ToolExecutionPendingError';
+  }
+}
+
+export class ToolExecutionUnknownError extends Error {
+  constructor(readonly record: ToolExecutionRecord) {
+    super(record.unknownReason || 'The external outcome is unknown. Verify the execution record before retrying.');
+    this.name = 'ToolExecutionUnknownError';
+  }
+}
+
+export class ToolExecutionResolutionConflictError extends Error {
+  readonly code = 'TOOL_EXECUTION_RESOLUTION_CONFLICT';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ToolExecutionResolutionConflictError';
+  }
+}
 
 export class ToolApprovalRequiredError extends Error {
   constructor(readonly approval: ToolApproval) {
@@ -197,8 +228,8 @@ const canonicalize = (value: unknown): unknown => {
   return value;
 };
 
-const signatureFor = (taskId: string, stepId: string, name: string, args: Record<string, unknown>) => createHash('sha256')
-  .update(JSON.stringify(canonicalize({ taskId, stepId, name, args })))
+const signatureFor = (taskId: string, stepId: string, name: string, args: Record<string, unknown>, identity?: { tenantId: string; runId: string; invocationId: string }) => createHash('sha256')
+  .update(JSON.stringify(canonicalize({ taskId, stepId, name, args, ...(identity ? { identity } : {}) })))
   .digest('hex')
   .slice(0, 32);
 
@@ -208,12 +239,14 @@ export class ToolRegistry {
   private readonly workspaceRoot = resolve(process.env.AXIOM_AGENT_WORKSPACE_ROOT?.trim() || process.cwd());
   private readonly usage = new Map<string, { calls: number; windowStartedAt: number }>();
   private readonly auditLog: ToolAuditRecord[] = [];
+  private readonly workerId = randomUUID();
 
   constructor(
     private readonly executor = new DockerSandboxExecutor(),
     private readonly artifactStore: ArtifactStore | null = null,
     private readonly agentStore: AgentStore | null = null,
     private readonly artifactCatalog: ArtifactCatalog | null = null,
+    public readonly executionStore: ToolExecutionStore | null = null,
   ) {
     this.register({
       name: 'agent.propose',
@@ -248,6 +281,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'workspace.search',
+      sideEffect: 'read-only',
       description: '使用 ripgrep 搜索已挂载的任务工作区；只读且与网络隔离。',
       risk: 'low',
       executionBoundary: 'sandbox',
@@ -259,6 +293,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'workspace.read',
+      sideEffect: 'read-only',
       description: '从已挂载的任务工作区读取 UTF-8 文本文件。',
       risk: 'low',
       executionBoundary: 'sandbox',
@@ -270,6 +305,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'document.read',
+      sideEffect: 'read-only',
       description: '从已挂载的工作区读取大小受限的文本文档，支持 Markdown、JSON、YAML、XML 和纯文本。',
       risk: 'low',
       executionBoundary: 'host-bounded',
@@ -285,6 +321,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'table.read',
+      sideEffect: 'read-only',
       description: '读取大小受限的 CSV 或 JSON 表格并返回规范化数据行，不修改工作区。',
       risk: 'low',
       executionBoundary: 'host-bounded',
@@ -311,6 +348,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'http.fetch',
+      sideEffect: 'read-only',
       description: '仅使用 GET/HEAD 获取 JSON 或文本 API 响应；目标主机必须位于 AXIOM_HTTP_ALLOWLIST。',
       risk: 'medium',
       executionBoundary: 'host-bounded',
@@ -327,6 +365,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'browser.open',
+      sideEffect: 'read-only',
       description: '通过只读浏览器适配器打开白名单中的公开 URL，并返回页面文本。',
       risk: 'medium',
       executionBoundary: 'host-bounded',
@@ -344,6 +383,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'database.query',
+      sideEffect: 'read-only',
       description: '通过 AXIOM_READONLY_DATABASE_URL 或 DATABASE_URL 执行一条受限的只读 SQL 查询。',
       risk: 'medium',
       executionBoundary: 'host-bounded',
@@ -375,6 +415,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'workspace.git-status',
+      sideEffect: 'read-only',
       description: '检查仓库状态，不修改文件。',
       risk: 'low',
       executionBoundary: 'sandbox',
@@ -386,6 +427,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'workspace.git-diff',
+      sideEffect: 'read-only',
       description: '读取当前 Git 差异，不修改文件。',
       risk: 'low',
       executionBoundary: 'sandbox',
@@ -397,6 +439,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'workspace.git-branch',
+      sideEffect: 'read-only',
       description: '读取当前 Git 分支和本地分支列表。',
       risk: 'low',
       executionBoundary: 'sandbox',
@@ -408,6 +451,7 @@ export class ToolRegistry {
     });
     this.register({
       name: 'workspace.git-commits',
+      sideEffect: 'read-only',
       description: '读取近期本地 Git 提交，不修改仓库。',
       risk: 'low',
       executionBoundary: 'sandbox',
@@ -478,6 +522,10 @@ export class ToolRegistry {
 
   upsert(tool: RegisteredTool) {
     this.tools.set(tool.name, tool);
+  }
+
+  isReadOnly(name: string) {
+    return this.tools.get(name)?.sideEffect === 'read-only';
   }
 
   unregister(name: string) {
@@ -583,32 +631,37 @@ export class ToolRegistry {
     this.usage.set(taskId, usage);
   }
 
-  private withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
+  private withTimeout<T>(promise: Promise<T>, timeoutMs: number, signal?: AbortSignal) {
     const boundedTimeout = Math.min(120_000, Math.max(1_000, timeoutMs));
     return new Promise<T>((resolvePromise, rejectPromise) => {
-      const timer = setTimeout(() => rejectPromise(new Error(`Tool timed out after ${boundedTimeout}ms.`)), boundedTimeout);
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', aborted); };
+      const aborted = () => { cleanup(); rejectPromise(new Error('Tool execution was interrupted.')); };
+      const timer = setTimeout(() => { cleanup(); rejectPromise(new Error(`Tool timed out after ${boundedTimeout}ms.`)); }, boundedTimeout);
+      signal?.addEventListener('abort', aborted, { once: true });
+      if (signal?.aborted) aborted();
       promise.then(
         (value) => {
-          clearTimeout(timer);
+          cleanup();
           resolvePromise(value);
         },
         (error) => {
-          clearTimeout(timer);
+          cleanup();
           rejectPromise(error);
         },
       );
     });
   }
 
-  async execute(task: WorkflowTask, stepId: string, invocation: unknown): Promise<ToolExecution> {
+  async execute(task: WorkflowTask, stepId: string, invocation: unknown, options: { invocationId?: string; signal?: AbortSignal } = {}): Promise<ToolExecution> {
     const input = invocationSchema.parse(invocation);
     const tool = this.tools.get(input.name);
     if (!tool) throw new Error(`Unknown tool: ${input.name}`);
     if (process.env.AXIOM_TOOL_EXECUTOR !== 'docker') throw new Error('Tool execution is disabled until the Docker sandbox is enabled.');
     const parsedArgs = tool.schema.parse(input.args);
-    const callId = randomUUID();
-    const auditId = randomUUID();
-    const signature = signatureFor(task.id, stepId, input.name, parsedArgs);
+    let callId: string = randomUUID();
+    let auditId: string = randomUUID();
+    const invocationId = options.invocationId ?? randomUUID();
+    const signature = signatureFor(task.id, stepId, input.name, parsedArgs, options.invocationId ? { tenantId: task.tenantId, runId: task.runId, invocationId } : undefined);
     const existingApproval = task.toolApprovals?.find((approval) => approval.signature === signature);
     if ((tool.risk === 'high' || tool.risk === 'critical') && existingApproval?.status !== 'approved') {
       const approval: ToolApproval = existingApproval ?? {
@@ -625,27 +678,94 @@ export class ToolRegistry {
       if (existingApproval?.status === 'rejected') throw new Error(`Tool approval was rejected: ${input.name}.`);
       throw new ToolApprovalRequiredError(approval);
     }
-    this.checkQuota(task.id);
-    const startedAt = Date.now();
-    const context = { task, stepId, callId, auditId, ...(existingApproval?.status === 'approved' ? { approvalId: existingApproval.id } : {}) };
     const commandArgs = tool.handler ? undefined : tool.buildArgs!(parsedArgs);
+    let executionRecord: ToolExecutionRecord | undefined;
+    let owner: ToolExecutionOwner | undefined;
+    const leaseMs = Math.min(300_000, Math.max(1_000, Number(process.env.AXIOM_TOOL_EXECUTION_LEASE_MS) || 30_000));
+    const sideEffect = tool.sideEffect ?? 'write';
+    if (this.executionStore) {
+      const claim = await this.executionStore.claim({ tenantId: task.tenantId, taskId: task.id, runId: task.runId, stepId, invocationId,
+        signature, toolName: input.name, sideEffect, callId, auditId, approvalId: existingApproval?.status === 'approved' ? existingApproval.id : undefined, workerId: this.workerId, leaseMs });
+      executionRecord = claim.record;
+      callId = executionRecord.callId;
+      auditId = executionRecord.auditId;
+      if (claim.kind === 'pending') throw new ToolExecutionPendingError(executionRecord);
+      if (claim.kind === 'outcome_unknown') throw new ToolExecutionUnknownError(executionRecord);
+      if (claim.kind === 'replay') {
+        if (executionRecord.receiptSource === 'tool' && executionRecord.receipt) return { ...executionRecord.receipt, replayed: true, receiptSource: 'tool' };
+        const confirmation = executionRecord.resolutions.at(-1);
+        if (!confirmation) throw new ToolExecutionUnknownError(executionRecord);
+        return { call: { id: callId, name: input.name, args: parsedArgs }, output: `Human-confirmed outcome: ${confirmation.note}`, stderr: '',
+          exitCode: 0, durationMs: 0, auditId, risk: tool.risk, signature, replayed: true, receiptSource: 'human-confirmed',
+          humanConfirmation: { operatorId: confirmation.operatorId, note: confirmation.note, resolvedAt: confirmation.resolvedAt } };
+      }
+      if (claim.kind !== 'claimed') throw new ToolExecutionPendingError(executionRecord);
+      owner = { tenantId: task.tenantId, id: executionRecord.id, leaseToken: claim.leaseToken };
+    }
+    try {
+      options.signal?.throwIfAborted();
+      this.checkQuota(`${task.tenantId}:${task.id}`);
+    } catch (error) {
+      if (this.executionStore && owner) await this.executionStore.releaseUnstarted(owner);
+      throw error;
+    }
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) controller.abort();
+    const context: ToolContext = { task, stepId, callId, auditId, invocationId, executionId: executionRecord?.id, signal: controller.signal, ...(existingApproval?.status === 'approved' ? { approvalId: existingApproval.id } : {}) };
+    let leaseLost = false;
+    let heartbeat: Promise<void> | undefined;
+    const timer = this.executionStore && owner ? setInterval(() => {
+      if (heartbeat) return;
+      heartbeat = this.executionStore!.renew(owner!, leaseMs).then((renewed) => {
+        if (!renewed) { leaseLost = true; controller.abort(); }
+      }).catch(() => { leaseLost = true; controller.abort(); }).finally(() => { heartbeat = undefined; });
+    }, Math.max(100, Math.floor(leaseMs / 3))) : undefined;
+    timer?.unref();
+    const unknown = async (reason: string) => {
+      if (!this.executionStore || !owner || !executionRecord) throw new Error(reason);
+      await this.executionStore.markUnknown(owner, reason).catch(() => false);
+      const latest = await this.executionStore.get(task.tenantId, executionRecord.id).catch(() => null);
+      return new ToolExecutionUnknownError(latest ?? { ...executionRecord, status: 'outcome_unknown', unknownReason: reason });
+    };
     let result: SandboxResult;
     try {
       if (tool.handler) {
-        result = await this.withTimeout(tool.handler(parsedArgs, context), tool.timeoutMs);
+        result = await this.withTimeout(tool.handler(parsedArgs, context), tool.timeoutMs, controller.signal);
       } else {
-        result = await this.executor.execute({
+        result = await this.withTimeout(this.executor.execute({
           workspaceRoot: this.workspaceRoot,
           command: tool.command!,
           args: commandArgs,
           timeoutMs: Math.min(tool.timeoutMs, Math.max(1_000, Number(process.env.AXIOM_TOOL_TIMEOUT_MS ?? tool.timeoutMs))),
-        });
+        }), tool.timeoutMs, controller.signal);
       }
     } catch (error) {
+      controller.abort();
       result = { stdout: '', stderr: error instanceof Error ? error.message : 'Tool execution failed.', exitCode: 1, durationMs: Date.now() - startedAt, auditId };
+    } finally {
+      if (timer) clearInterval(timer);
+      options.signal?.removeEventListener('abort', abort);
+      await heartbeat;
     }
     const output = result.stdout.slice(0, 48_000);
     const stderr = result.stderr.slice(0, 12_000);
+    const receipt: ToolExecution = { call: { id: callId, name: input.name, args: parsedArgs }, output, stderr, exitCode: result.exitCode,
+      durationMs: result.durationMs, auditId: result.auditId, risk: tool.risk, signature, receiptSource: 'tool' };
+    if (this.executionStore && owner && executionRecord) {
+      if (sideEffect === 'write' && (result.exitCode !== 0 || leaseLost)) throw await unknown(stderr || 'Execution ownership was lost after dispatch.');
+      let saved = false;
+      try { saved = !leaseLost && await this.executionStore.complete(owner, receipt); }
+      catch { /* A commit may have succeeded before its acknowledgement was lost. */ }
+      if (!saved) {
+        const latest = await this.executionStore.get(task.tenantId, executionRecord.id).catch(() => null);
+        if (latest?.status === 'completed' && latest.receiptSource === 'tool' && latest.receipt) return { ...latest.receipt, replayed: true, receiptSource: 'tool' };
+        if (sideEffect === 'write') throw await unknown('The tool returned, but its durable receipt could not be confirmed.');
+        throw new ToolExecutionPendingError(latest ?? executionRecord);
+      }
+    }
     let artifact: ArtifactRef | undefined;
     let artifactError: string | undefined;
     if (this.artifactStore) {
@@ -723,6 +843,28 @@ export class ToolRegistry {
       ...(artifactError ? { error: `Artifact storage failed: ${artifactError}` } : {}),
       createdAt: new Date().toISOString(),
     });
-    return { call: { id: callId, name: input.name, args: parsedArgs }, output, stderr, exitCode: result.exitCode, durationMs: result.durationMs, auditId: result.auditId, risk: tool.risk, signature, artifact, artifactError };
+    if (this.executionStore && executionRecord && (artifact || artifactError)) {
+      await this.executionStore.annotateReceipt(task.tenantId, executionRecord.id, callId, { artifact, artifactError }).catch(() => false);
+    }
+    return { ...receipt, artifact, artifactError };
+  }
+
+  async resolveExecutionUnknown(input: ToolExecutionResolveInput) {
+    if (!this.executionStore) throw new Error('Durable tool execution storage is unavailable.');
+    const record = await this.executionStore.get(input.tenantId, input.id);
+    if (!record || record.status !== 'outcome_unknown' || record.revision !== input.expectedRevision) return null;
+    if (!input.note.trim() || !input.operatorId.trim()) throw new Error('Record the reviewer and how the external outcome was verified.');
+    const tool = this.tools.get(record.toolName);
+    if (record.toolName.startsWith('external_') && !tool?.resolveUnknown) throw new ToolExecutionResolutionConflictError('The external tool must be available for coordinated outcome verification before recovery.');
+    // Resolve nested receipts first. A failed second phase leaves the outer
+    // ledger closed to replay; repeating the same review safely completes it.
+    try { await tool?.resolveUnknown?.(record, input); }
+    catch (error) {
+      throw new ToolExecutionResolutionConflictError(error instanceof Error && /different decision|already confirms completion|identity does not match/u.test(error.message)
+        ? error.message
+        : 'External outcome verification could not be completed. No retry has been authorized; retry this same review after the tool records are available.');
+    }
+    try { return await this.executionStore.resolveUnknown(input); }
+    catch { throw new ToolExecutionResolutionConflictError('The outcome review acknowledgement could not be confirmed. Refresh the execution record before repeating the same review.'); }
   }
 }

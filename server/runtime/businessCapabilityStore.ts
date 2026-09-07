@@ -55,6 +55,7 @@ export type ToolCallClaimInput = {
   userId: string;
   sourceId: string;
   approvalId?: string;
+  executionId?: string;
   hourlyQuota: number;
   data: Record<string, unknown>;
 };
@@ -63,7 +64,31 @@ const toolCallRecord = (input: ToolCallClaimInput): BusinessRecord => {
   const timestamp = new Date().toISOString();
   return { id: randomUUID(), tenantId: input.tenantId, userId: input.userId, ownerId: input.userId,
     kind: 'task-action', status: 'executing', revision: 1, createdAt: timestamp, updatedAt: timestamp,
-    data: { ...input.data, action: 'tool-call', sourceId: input.sourceId, ...(input.approvalId ? { approvalId: input.approvalId } : {}) } };
+    data: { ...input.data, action: 'tool-call', sourceId: input.sourceId, ...(input.approvalId ? { approvalId: input.approvalId } : {}), ...(input.executionId ? { executionId: input.executionId } : {}) } };
+};
+
+export type ToolCallResolutionInput = {
+  tenantId: string; sourceId: string; taskId: string; stepId: string; executionId: string; approvalId?: string;
+  resolutionId: string; operatorId: string; decision: 'confirmed-completed' | 'confirmed-not-executed'; note: string;
+};
+
+const resolveToolCallRecord = (record: BusinessRecord, input: ToolCallResolutionInput, timestamp: string): BusinessRecord | null => {
+  if (record.data.sourceId !== input.sourceId || record.data.taskId !== input.taskId || record.data.stepId !== input.stepId
+    || (record.data.executionId && record.data.executionId !== input.executionId)) throw new Error('External execution identity does not match the reviewed invocation.');
+  if (!input.operatorId.trim() || !input.note.trim() || !input.resolutionId.trim()) throw new Error('External outcome verification requires a reviewer, note, and stable resolution id.');
+  const resolutions = Array.isArray(record.data.outcomeResolutions) ? record.data.outcomeResolutions as Array<Record<string, unknown>> : [];
+  const existing = resolutions.find((item) => item.resolutionId === input.resolutionId);
+  const note = input.note.slice(0, 2_000);
+  if (existing) {
+    if (existing.decision !== input.decision || existing.operatorId !== input.operatorId || existing.note !== note) throw new Error('This outcome review is already bound to a different decision.');
+    return null;
+  }
+  if (record.status === 'verified_not_executed') return null;
+  if (input.decision === 'confirmed-not-executed' && ['completed', 'human_confirmed'].includes(record.status)) throw new Error('The external record already confirms completion. It cannot be released as not executed.');
+  return { ...record, status: record.status === 'completed' ? 'completed' : input.decision === 'confirmed-completed' ? 'human_confirmed' : 'verified_not_executed',
+    revision: record.revision + 1, updatedAt: timestamp,
+    data: { ...record.data, outcomeResolutions: [...resolutions, { resolutionId: input.resolutionId, executionId: input.executionId,
+      operatorId: input.operatorId, decision: input.decision, note, resolvedAt: timestamp }] } };
 };
 
 export interface BusinessCapabilityStore {
@@ -74,6 +99,7 @@ export interface BusinessCapabilityStore {
   list(tenantId: string, kind: BusinessRecordKind, options?: { projectId?: string; userId?: string; limit?: number }): Promise<BusinessRecord[]>;
   listAll(kind: BusinessRecordKind, limit?: number): Promise<BusinessRecord[]>;
   claimToolCall(input: ToolCallClaimInput): Promise<{ claimed: boolean; record: BusinessRecord }>;
+  resolveToolCallUnknown(input: ToolCallResolutionInput): Promise<void>;
   update(id: string, tenantId: string, patch: { status?: string; data?: Record<string, unknown>; projectId?: string | null }, expectedRevision: number): Promise<BusinessRecord>;
   delete(id: string, tenantId: string): Promise<boolean>;
   unlinkProjectResource(tenantId: string, resourceType: string, resourceId: string): Promise<number>;
@@ -172,10 +198,11 @@ export class SqliteBusinessCapabilityStore implements BusinessCapabilityStore {
   async claimToolCall(input: ToolCallClaimInput) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      if (input.approvalId) {
+      if (input.approvalId || input.executionId) {
+        const field = input.approvalId ? 'approvalId' : 'executionId';
         const prior = this.db.prepare(`SELECT * FROM axiom_business_records WHERE tenant_id = ? AND kind = 'task-action'
-          AND json_extract(data_json, '$.action') = 'tool-call' AND json_extract(data_json, '$.approvalId') = ?
-          ORDER BY CASE WHEN status = 'completed' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`).get(input.tenantId, input.approvalId) as Row | undefined;
+          AND json_extract(data_json, '$.action') = 'tool-call' AND json_extract(data_json, '$.${field}') = ? AND status <> 'verified_not_executed'
+          ORDER BY CASE WHEN status = 'completed' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`).get(input.tenantId, input.approvalId ?? input.executionId!) as Row | undefined;
         if (prior) { this.db.exec('COMMIT'); return { claimed: false, record: fromRow(prior) }; }
       }
       const since = new Date(Date.now() - 3_600_000).toISOString();
@@ -187,6 +214,24 @@ export class SqliteBusinessCapabilityStore implements BusinessCapabilityStore {
       this.db.prepare(`INSERT INTO axiom_business_records (id,tenant_id,user_id,kind,owner_id,status,revision,data_json,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(record.id, record.tenantId, record.userId, record.kind, record.ownerId, record.status, 1, JSON.stringify(record.data), record.createdAt, record.updatedAt);
       this.db.exec('COMMIT'); return { claimed: true, record };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  async resolveToolCallUnknown(input: ToolCallResolutionInput) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const field = input.approvalId ? 'approvalId' : 'executionId';
+      const rows = this.db.prepare(`SELECT * FROM axiom_business_records WHERE tenant_id=? AND kind='task-action'
+        AND json_extract(data_json,'$.action')='tool-call' AND json_extract(data_json,'$.${field}')=? ORDER BY created_at`).all(input.tenantId, input.approvalId ?? input.executionId) as Row[];
+      for (const row of rows) {
+        const current = fromRow(row);
+        const next = resolveToolCallRecord(current, input, new Date().toISOString());
+        if (!next) continue;
+        const updated = this.db.prepare('UPDATE axiom_business_records SET status=?,revision=?,data_json=?,updated_at=? WHERE tenant_id=? AND id=? AND revision=?')
+          .run(next.status, next.revision, JSON.stringify(next.data), next.updatedAt, input.tenantId, current.id, current.revision);
+        if (updated.changes !== 1) throw new BusinessRecordRevisionConflictError(current.revision, current.revision + 1);
+      }
+      this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
@@ -325,10 +370,11 @@ export class PostgresBusinessCapabilityStore implements BusinessCapabilityStore 
       await client.query('BEGIN');
       // Serialize approval ownership and quota reservation together, across workers.
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`axiom-tool-claims:${input.tenantId}`]);
-      if (input.approvalId) {
+      if (input.approvalId || input.executionId) {
+        const field = input.approvalId ? 'approvalId' : 'executionId';
         const prior = await client.query<Row>(`SELECT * FROM axiom_business_records WHERE tenant_id = $1 AND kind = 'task-action'
-          AND data_json->>'action' = 'tool-call' AND data_json->>'approvalId' = $2
-          ORDER BY CASE WHEN status = 'completed' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`, [input.tenantId, input.approvalId]);
+          AND data_json->>'action' = 'tool-call' AND data_json->>'${field}' = $2 AND status <> 'verified_not_executed'
+          ORDER BY CASE WHEN status = 'completed' THEN 0 ELSE 1 END, created_at ASC LIMIT 1`, [input.tenantId, input.approvalId ?? input.executionId]);
         if (prior.rows[0]) { await client.query('COMMIT'); return { claimed: false, record: fromRow(prior.rows[0]) }; }
       }
       const usage = await client.query(`SELECT COUNT(*) AS total FROM axiom_business_records WHERE tenant_id = $1 AND user_id = $2
@@ -338,6 +384,28 @@ export class PostgresBusinessCapabilityStore implements BusinessCapabilityStore 
       const inserted = await client.query<Row>(`INSERT INTO axiom_business_records (id,tenant_id,user_id,kind,owner_id,status,revision,data_json,created_at,updated_at)
         VALUES ($1,$2,$3,$4,$5,$6,1,$7::jsonb,NOW(),NOW()) RETURNING *`, [record.id, record.tenantId, record.userId, record.kind, record.ownerId, record.status, JSON.stringify(record.data)]);
       await client.query('COMMIT'); return { claimed: true, record: fromRow(inserted.rows[0]) };
+    } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
+    finally { client.release(); }
+  }
+
+  async resolveToolCallUnknown(input: ToolCallResolutionInput) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`axiom-tool-claims:${input.tenantId}`]);
+      const field = input.approvalId ? 'approvalId' : 'executionId';
+      const selected = await client.query<Row>(`SELECT * FROM axiom_business_records WHERE tenant_id=$1 AND kind='task-action'
+        AND data_json->>'action'='tool-call' AND data_json->>'${field}'=$2 ORDER BY created_at FOR UPDATE`, [input.tenantId, input.approvalId ?? input.executionId]);
+      const clock = await client.query<{ timestamp: Date }>('SELECT clock_timestamp() AS timestamp');
+      for (const row of selected.rows) {
+        const current = fromRow(row);
+        const next = resolveToolCallRecord(current, input, clock.rows[0]!.timestamp.toISOString());
+        if (!next) continue;
+        const updated = await client.query('UPDATE axiom_business_records SET status=$1,revision=$2,data_json=$3::jsonb,updated_at=$4 WHERE tenant_id=$5 AND id=$6 AND revision=$7',
+          [next.status, next.revision, JSON.stringify(next.data), next.updatedAt, input.tenantId, current.id, current.revision]);
+        if (updated.rowCount !== 1) throw new BusinessRecordRevisionConflictError(current.revision, current.revision + 1);
+      }
+      await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
     finally { client.release(); }
   }

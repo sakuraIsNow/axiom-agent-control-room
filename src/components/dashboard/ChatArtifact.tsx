@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import { Check, Code2, Copy, Download, FileText, MonitorPlay } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { TaskMedia } from './TaskMedia';
+import { taskMediaPath } from '../../lib/taskMedia';
 import type { FileAttachment } from '../../types';
 import {
   artifactFileName,
@@ -28,7 +30,8 @@ const BasicMarkdown = ({ content }: { content: string }) => <ReactMarkdown
   remarkPlugins={[remarkGfm]}
   components={{
     table: ({ children }) => <div className="dash-chat-table-wrap"><table>{children}</table></div>,
-    a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+    img: ({ src, alt }) => <TaskMedia src={src} alt={alt} />,
+    a: ({ children, ...props }) => taskMediaPath(props.href, window.location.origin) ? <TaskMedia src={props.href}>{children}</TaskMedia> : <a {...props} target="_blank" rel="noreferrer">{children}</a>,
   }}
 >{content}</ReactMarkdown>;
 
@@ -74,7 +77,8 @@ export function ChatMessageMarkdown({ content }: { content: string }) {
     remarkPlugins={[remarkGfm]}
     components={{
       table: ({ children }) => <div className="dash-chat-table-wrap"><table>{children}</table></div>,
-      a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+      img: ({ src, alt }) => <TaskMedia src={src} alt={alt} />,
+      a: ({ children, ...props }) => taskMediaPath(props.href, window.location.origin) ? <TaskMedia src={props.href}>{children}</TaskMedia> : <a {...props} target="_blank" rel="noreferrer">{children}</a>,
       pre: ({ children }) => <>{children}</>,
       code: ({ className, children, ...props }) => {
         const language = /language-([^\s]+)/.exec(className ?? '')?.[1];

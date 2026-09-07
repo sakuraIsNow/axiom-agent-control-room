@@ -48,7 +48,7 @@ const plan = {
   approvalStatus: 'approved',
 };
 const summary = {
-  id: taskId, runId, sessionId, userId: 'qa-live-guidance', title: '执行中追加要求回归', input: '设计一个可上线的平台。',
+  id: taskId, revision: 1, runId, sessionId, userId: 'qa-live-guidance', title: '执行中追加要求回归', input: '设计一个可上线的平台。',
   mode: 'build', model: 'qa-model', status: 'running', profile, cancelRequested: false, createdAt: now, updatedAt: now,
   currentStage: 'agent:analysis', durationMs: 1200, tokens: { prompt: 100, completion: 30, total: 130 }, estimatedCostUsd: 0,
   modelCalls: 1, queueWaitMs: 10, attempts: 1, toolCalls: 0, completedSteps: 0, totalSteps: 2, pendingToolApprovals: 0,
@@ -104,7 +104,8 @@ await page.route(`**/api/sessions/${sessionId}`, async (route) => {
   if (route.request().method() === 'PUT') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session }) });
   return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session }) });
 });
-await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task }) }));
+await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task, actionPermissions: { canManage: true } }) }));
+await page.route(`**/api/tasks/${taskId}/tools/executions`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: true, executions: [], canResume: false }) }));
 await page.route(`**/api/tasks/${taskId}/guidance`, async (route) => {
   guidanceRequests += 1;
   guidancePosted = true;

@@ -20,14 +20,14 @@ const schedule = (id: string, overrides: Partial<ScheduledTrigger> = {}): Schedu
   ...overrides,
 });
 
-const run = (id: string, tokens: number, status: NonNullable<ScheduleRunInsight['evidenceSummary']>['status'] = 'verified'): ScheduleRunInsight => ({
+const run = (id: string, tokens: number, status: NonNullable<ScheduleRunInsight['evidenceSummary']>['status'] = 'unverified', sourced = true): ScheduleRunInsight => ({
   id,
   status: 'completed',
   createdAt: '2026-09-02T00:00:00.000Z',
   updatedAt: '2026-09-02T00:10:00.000Z',
   durationMs: 600_000,
   tokens: { total: tokens },
-  evidenceSummary: { status },
+  evidenceSummary: { schemaVersion: 2, status, execution: status === 'partial' ? 'partial' : 'completed', acceptance: 'not-recorded', evidenceStatus: sourced ? 'supported' : 'unverified' },
 });
 
 test('builds bounded future occurrences and identifies overloaded windows', () => {
@@ -48,8 +48,8 @@ test('builds bounded future occurrences and identifies overloaded windows', () =
 test('health suggestions are evidence based and have stable confirmation ids', () => {
   const target = schedule('health');
   const runs = [
-    run('new-2', 30_000, 'partial'),
-    run('new-1', 28_000, 'unverified'),
+    run('new-2', 30_000, 'partial', false),
+    run('new-1', 28_000, 'unverified', false),
     run('old-2', 5_000),
     run('old-1', 6_000),
   ];
@@ -58,6 +58,47 @@ test('health suggestions are evidence based and have stable confirmation ids', (
   assert.ok(first.suggestions.some((item) => item.kind === 'cost_spike' && item.recommendedAction === 'reschedule'));
   assert.ok(first.suggestions.some((item) => item.kind === 'quality_decline' && item.recommendedAction === 'pause'));
   assert.deepEqual(first.suggestions.map((item) => item.id), second.suggestions.map((item) => item.id));
+});
+
+test('legacy verification labels and missing data never create a trustworthy quality baseline', () => {
+  const target = schedule('legacy');
+  for (const evidenceSummary of [{ status: 'verified' as const }, undefined]) {
+    const insights = buildScheduleInsights({
+      schedules: [target], runsBySchedule: { legacy: [
+        run('new-2', 2_000, 'partial', false), run('new-1', 2_000, 'unverified', false),
+        { ...run('old-2', 2_000), evidenceSummary }, { ...run('old-1', 2_000), evidenceSummary },
+      ] }, now: new Date('2026-09-03T00:00:00.000Z'),
+    });
+    assert.equal(insights.suggestions.some((item) => item.kind === 'quality_decline'), false);
+  }
+});
+
+test('traceable or explicitly accepted completed results retain the current delivery baseline', () => {
+  const target = schedule('current');
+  for (const evidenceSummary of [
+    run('source', 2_000).evidenceSummary,
+    { ...run('acceptance', 2_000, 'unverified', false).evidenceSummary!, acceptance: 'accepted' as const },
+  ]) {
+    const insights = buildScheduleInsights({
+      schedules: [target], runsBySchedule: { current: [
+        { ...run('new-2', 2_000), evidenceSummary }, { ...run('new-1', 2_000), evidenceSummary },
+        run('old-2', 2_000), run('old-1', 2_000),
+      ] }, now: new Date('2026-09-03T00:00:00.000Z'),
+    });
+    assert.equal(insights.suggestions.some((item) => item.kind === 'quality_decline'), false);
+  }
+});
+
+test('acceptance cannot turn incomplete execution into a reusable quality baseline', () => {
+  const target = schedule('incomplete');
+  const acceptedPartial = { ...run('old-2', 2_000, 'partial').evidenceSummary!, acceptance: 'accepted' as const };
+  const insights = buildScheduleInsights({
+    schedules: [target], runsBySchedule: { incomplete: [
+      run('new-2', 2_000, 'partial', false), run('new-1', 2_000, 'unverified', false),
+      { ...run('old-2', 2_000), evidenceSummary: acceptedPartial }, { ...run('old-1', 2_000), evidenceSummary: acceptedPartial },
+    ] }, now: new Date('2026-09-03T00:00:00.000Z'),
+  });
+  assert.equal(insights.suggestions.some((item) => item.kind === 'quality_decline'), false);
 });
 
 test('dead-letter recovery is proposed but never applied by the analyzer', () => {

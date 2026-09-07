@@ -55,6 +55,7 @@ const summary = {
 };
 const task = {
   id: taskId,
+  revision: 1,
   runId: summary.runId,
   sessionId,
   title: summary.title,
@@ -152,8 +153,12 @@ await page.route(`**/api/tasks/${taskId}/checkpoints`, async (route) => {
     body: JSON.stringify({ taskId, currentRevision: 1, checkpoints: [], branches: [] }),
   });
 });
+await page.route(`**/api/tasks/${taskId}/tools/executions`, async (route) => {
+  if (route.request().method() !== 'GET') return route.fallback();
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: true, executions: [], canResume: false }) });
+});
 await page.route(`**/api/tasks/${taskId}`, async (route) => {
-  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task }) });
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task, actionPermissions: { canManage: true } }) });
 });
 await page.route(`**/api/capabilities/tasks/${taskId}/actions`, async (route) => {
   await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ actions: [] }) });
@@ -185,25 +190,49 @@ try {
   const chatReviseCopyCorrect = await chatReviseDialog.getByText('确认让 Agent 重新整改？', { exact: true }).count() === 1;
   await chatReviseDialog.getByRole('button', { name: '取消' }).click();
 
+  const detailResponses = Promise.all([
+    `/api/tasks/${taskId}/checkpoints`, `/api/tasks/${taskId}/tools/executions`, `/api/capabilities/tasks/${taskId}/actions`,
+  ].map((pathname) => page.waitForResponse((response) => new URL(response.url()).pathname === pathname && response.request().method() === 'GET' && response.status() === 200)));
   await page.getByRole('button', { name: '任务管理', exact: true }).click();
+  await detailResponses;
   const controls = page.getByTestId('human-review-controls');
   await controls.waitFor({ state: 'visible', timeout: 20_000 });
 
   const note = controls.getByRole('textbox', { name: '审核意见' });
   await note.fill('QA：确认审批入口可用，但不提交真实操作。');
   const noteUsable = await note.inputValue() === 'QA：确认审批入口可用，但不提交真实操作。';
+  await page.locator('.dash-detail-panel').evaluate(async (element) => {
+    await document.fonts.ready;
+    let previous = '';
+    let stableFrames = 0;
+    const startedAt = performance.now();
+    await new Promise((resolve, reject) => {
+      const sample = () => {
+        const bounds = element.getBoundingClientRect();
+        const current = [element.scrollHeight, element.clientHeight, bounds.width, bounds.height].join(':');
+        stableFrames = current === previous ? stableFrames + 1 : 0;
+        previous = current;
+        if (stableFrames >= 4) return resolve();
+        if (performance.now() - startedAt > 5000) return reject(new Error('Task detail layout did not stabilize.'));
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+  });
   const panelStyle = await page.locator('.dash-detail-panel').evaluate((element) => {
     const style = getComputedStyle(element);
     return { overflowY: style.overflowY, scrollHeight: element.scrollHeight, clientHeight: element.clientHeight };
   });
   const detailText = await page.locator('.dash-detail-panel').innerText();
+  const fieldText = (await page.locator('.dash-detail-fields, .dash-detail-pills').allInnerTexts()).join('\n');
   const rightPanelChinese = detailText.includes('实现任务')
     && detailText.includes('完整工作流')
     && detailText.includes('复杂')
     && detailText.includes('包含多项约束')
-    && detailText.includes('步骤 1 至 5 的证据树缺少具体产物')
-    && detailText.includes('为每个步骤提供具体证据产物')
-    && !/(?:implementation|full-workflow|complex|multiple constraints|system-level scope|operational constraints|Evidence tree lacks|Step 6 and 7 claim|Provide concrete evidence)/iu.test(detailText);
+    && !/(?:implementation|full-workflow|complex)/iu.test(fieldText)
+    && detailText.includes(review.summary)
+    && review.gaps.every((gap) => detailText.includes(gap))
+    && review.requiredCorrections.every((correction) => detailText.includes(correction));
   const detailPanel = page.locator('.dash-detail-panel');
   await detailPanel.hover();
   await page.mouse.wheel(0, 420);
@@ -244,7 +273,7 @@ try {
     rightDetailPanelScrollable: ['auto', 'scroll'].includes(panelStyle.overflowY)
       && panelStyle.scrollHeight > panelStyle.clientHeight
       && panelScrollTop > 0,
-    reviewActionsSticky: controlsStyle.position === 'sticky' && controlsStyle.visibleInPanel,
+    reviewActionsReachable: await controls.getByRole('button', { name: '批准交付' }).isVisible(),
     approveConfirmationWorks: approveCopyCorrect,
     rejectConfirmationWorks: rejectCopyCorrect,
     cancellingDoesNotMutateTask: reviewMutationRequests === 0,

@@ -13,27 +13,34 @@ import { OpenAICompatibleModelClient } from './runtime/modelClient.js';
 import { WorkflowOrchestrator } from './runtime/orchestrator.js';
 import { createTaskApi } from './runtime/taskApi.js';
 import { createTaskStore } from './runtime/taskStore.js';
+import { createContextReadTool } from './runtime/contextReadTool.js';
 import { RuntimeMetrics } from './runtime/metrics.js';
 import { verifyPrincipal } from './runtime/principal.js';
 import { createArtifactStore } from './runtime/artifactStore.js';
 import { createArtifactCatalog } from './runtime/artifactCatalog.js';
 import { attachmentPdfVisualPages, extractAttachmentText } from './runtime/attachmentContent.js';
 import { ToolRegistry } from './runtime/toolRegistry.js';
+import { createToolExecutionStore } from './runtime/toolExecutionStore.js';
 import { createTemplateStore } from './runtime/templateStore.js';
 import { createPluginStore } from './runtime/pluginStore.js';
 import { createAgentStore } from './runtime/agentStore.js';
 import { agentCatalog, appendMissingAgentDirectory, supplementAgentDirectoryResponse } from './runtime/agentCatalog.js';
 import { deepSeekCapabilityInfo } from './runtime/providerCapabilities.js';
 import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
-import { chatRouteDecisionSchema, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision } from './runtime/chatRouter.js';
+import { chatRouteDecisionSchema, durableMediaRoute, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision } from './runtime/chatRouter.js';
 import { isOriginAllowed } from './runtime/originPolicy.js';
-import { normalizeProviderBaseUrl } from './runtime/providerLocation.js';
-import { buildContextWindow, validatePersistedContextSummary, type DurableContextSourceMessage, type PersistedContextSummary } from './runtime/contextSummary.js';
+import { defaultProviderLocation, normalizeProviderBaseUrl } from './runtime/providerLocation.js';
+import { buildContextWindow, estimateTokens, validatePersistedContextSummary, type DurableContextSourceMessage, type PersistedContextSummary } from './runtime/contextSummary.js';
+import { boundPinnedContext, renderStructuredContext, retrieveContextSources, validateStructuredContext } from './runtime/structuredContext.js';
+import { prepareSelectedChatSummary } from './runtime/selectedChatContext.js';
 import { runtimeSkillCatalog, skillInstructions } from './runtime/skillCatalog.js';
 import { workflowSpecialistCatalog } from './runtime/workflowSpecialists.js';
 import type { AgentGraph } from './runtime/contracts.js';
 import { ModelRoutingPolicy, parseModelCostCatalog } from './runtime/modelRouting.js';
 import { createProviderCredentialStore, type ProviderCredentialKind } from './runtime/providerCredentialStore.js';
+import { createProviderBindingStore, providerBindingReference, type ProviderConfig, type BoundProviderBundle, type ProviderBindingOwner, type BoundProviderKind } from './runtime/providerBindings.js';
+import { createBoundTextModel } from './runtime/boundProviderModel.js';
+import { mediaGatewayTaskInput } from './runtime/mediaGatewayTask.js';
 import { consumeSseBlocks } from './runtime/sse.js';
 import { resolveTraceContext } from './runtime/trace.js';
 import { CodexHarnessAdapter, DeepSeekHarnessAdapter } from './runtime/harnessClient.js';
@@ -172,6 +179,8 @@ const taskStore = createTaskStore();
 await taskStore.initialize();
 const providerCredentialStore = createProviderCredentialStore();
 await providerCredentialStore.initialize();
+const providerBindingStore = createProviderBindingStore();
+await providerBindingStore.initialize();
 const templateStore = createTemplateStore();
 await templateStore.initialize();
 const pluginStore = createPluginStore();
@@ -247,7 +256,10 @@ try {
 } catch (error) {
   logger.warn({ error }, 'Artifact catalog reconciliation skipped; runtime results remain durable');
 }
-const runtimeTools = new ToolRegistry(undefined, runtimeArtifactStore, agentStore, runtimeArtifactCatalog);
+const toolExecutionStore = createToolExecutionStore();
+await toolExecutionStore.initialize();
+const runtimeTools = new ToolRegistry(undefined, runtimeArtifactStore, agentStore, runtimeArtifactCatalog, toolExecutionStore);
+runtimeTools.upsert(createContextReadTool(taskStore));
 try {
   const registeredExternalTools = await registerPersistedExternalTools(businessCapabilityStore, runtimeTools, integrationCredentialStore, fetch, enterpriseGovernanceStore);
   if (registeredExternalTools > 0) logger.info({ count: registeredExternalTools }, 'restored external MCP/OpenAPI tools');
@@ -266,7 +278,10 @@ const harnessAdapter = hasCodexSidecar
   : hasDeepSeekSidecar
     ? new DeepSeekHarnessAdapter()
     : undefined;
-const resolveTaskModel = async (task: { modelCredentialId?: string; tenantId: string; userId: string }) => {
+const resolveTaskModel = async (task: ProviderBindingOwner & { modelCredentialId?: string }) => {
+  if (task.providerBindingId) {
+    return createBoundTextModel(providerBindingStore, task, (usage) => metrics.recordUsage(usage));
+  }
   if (!task.modelCredentialId) return runtimeModel;
   const credential = await providerCredentialStore.get(task.modelCredentialId, task.tenantId, task.userId);
   if (!credential || credential.kind !== 'text') throw new Error('Task text model credential is unavailable or not owned by the current user.');
@@ -279,7 +294,11 @@ const resolveTaskModel = async (task: { modelCredentialId?: string; tenantId: st
     onUsage: (usage) => metrics.recordUsage(usage),
   });
 };
-const orchestrator = new WorkflowOrchestrator(taskStore, eventHub, runtimeModel, runtimeMemory, logger, runtimeTools, agentStore, resolveTaskModel, modelRoutingPolicy, runtimeArtifactStore, runtimeArtifactCatalog, businessCapabilityStore);
+const resolveTaskSpecialist = async (task: ProviderBindingOwner, kind: BoundProviderKind) => {
+  if (task.providerBindingId) return providerBindingStore.resolve(task, kind);
+  return (await resolveProviderBundle(undefined, task.tenantId, task.userId))[kind];
+};
+const orchestrator = new WorkflowOrchestrator(taskStore, eventHub, runtimeModel, runtimeMemory, logger, runtimeTools, agentStore, resolveTaskModel, modelRoutingPolicy, runtimeArtifactStore, runtimeArtifactCatalog, businessCapabilityStore, resolveTaskSpecialist);
 const coordinator = new TaskCoordinator(taskStore, orchestrator, logger);
 coordinator.start();
 
@@ -355,7 +374,7 @@ type CleanMessagesResult = {
   durableSummaryId?: string;
 };
 
-const cleanMessages = async (messages: unknown, persistedSummary?: PersistedContextSummary): Promise<CleanMessagesResult> => {
+const cleanMessages = async (messages: unknown, persistedSummary?: PersistedContextSummary, attachmentCache = new Map<object, Promise<ClientMessage>>()): Promise<CleanMessagesResult> => {
   if (!Array.isArray(messages)) return {
     messages: [], summaryApplied: false, summarizedMessages: 0, estimatedTokens: 0, summaryVersion: null, summaryCoverage: null,
   };
@@ -375,39 +394,55 @@ const cleanMessages = async (messages: unknown, persistedSummary?: PersistedCont
   const coveredMessageIds = durableSummaryUsed ? new Set(persistedSummary!.coveredMessageIds) : new Set<string>();
   const cleaned = candidates
     .filter((message) => !message.id || !coveredMessageIds.has(message.id))
-    .map(async (message) => {
-      const rawContent = typeof message.content === 'string' ? message.content.trim().slice(0, 24_000) : '';
-      const attachments = message.role === 'user' && Array.isArray(message.attachments)
-        ? message.attachments.filter((attachment): attachment is ClientAttachment => typeof attachment === 'object' && attachment !== null).slice(0, 6)
-        : [];
-      const parts: ClientContentPart[] = [];
-      if (rawContent) parts.push({ type: 'text', text: rawContent });
-      for (const attachment of attachments) {
-        if (attachment.url?.startsWith('data:image/')) parts.push({ type: 'image_url', image_url: { url: attachment.url.slice(0, 12 * 1024 * 1024) } });
-        const extracted = await extractAttachmentText(attachment);
-        if (extracted) parts.push({ type: 'text', text: `[附件：${attachment.name ?? '未命名文件'}]\n${extracted}` });
-        if (/\.pdf$/i.test(attachment.name ?? '')) parts.push(...await attachmentPdfVisualPages(attachment, extracted));
-      }
-      return { role: message.role, content: parts.length === 1 && parts[0]?.type === 'text' ? parts[0].text : parts };
+    .map((message) => {
+      const cached = attachmentCache.get(message);
+      if (cached) return cached;
+      const normalized = (async (): Promise<ClientMessage> => {
+        const rawContent = typeof message.content === 'string' ? message.content.trim().slice(0, 24_000) : '';
+        const attachments = message.role === 'user' && Array.isArray(message.attachments)
+          ? message.attachments.filter((attachment): attachment is ClientAttachment => typeof attachment === 'object' && attachment !== null).slice(0, 6)
+          : [];
+        const parts: ClientContentPart[] = [];
+        if (rawContent) parts.push({ type: 'text', text: rawContent });
+        for (const attachment of attachments) {
+          if (attachment.url?.startsWith('data:image/')) parts.push({ type: 'image_url', image_url: { url: attachment.url.slice(0, 12 * 1024 * 1024) } });
+          const extracted = await extractAttachmentText(attachment);
+          if (extracted) parts.push({ type: 'text', text: `[附件：${attachment.name ?? '未命名文件'}]\n${extracted}` });
+          if (/\.pdf$/i.test(attachment.name ?? '')) parts.push(...await attachmentPdfVisualPages(attachment, extracted));
+        }
+        return { role: message.role, content: parts.length === 1 && parts[0]?.type === 'text' ? parts[0].text : parts };
+      })();
+      attachmentCache.set(message, normalized);
+      return normalized;
     });
   const recent = (await Promise.all(cleaned))
     .filter((message) => Array.isArray(message.content) ? message.content.length > 0 : message.content.length > 0);
   const normalized = durableSummaryUsed
     ? [{ role: 'assistant' as const, content: persistedSummary!.content }, ...recent]
     : recent;
+  const structured = durableSummaryUsed && validateStructuredContext(persistedSummary?.structuredContext, durableSources) ? persistedSummary!.structuredContext : undefined;
+  const ledger = renderStructuredContext(structured, 6_000);
+  const latestRawText = typeof candidates.at(-1)?.content === 'string' ? candidates.at(-1)!.content as string : '';
+  const originalSources = durableSummaryUsed ? retrieveContextSources(durableSources, structured, {
+    directiveIds: structured?.entries.filter((entry) => latestRawText.includes(`[${entry.id}]`)).map((entry) => entry.id),
+    messageIds: persistedSummary!.coveredMessageIds.filter((id) => latestRawText.includes(`[source:${id}]`)),
+    maxCharacters: 4_000,
+  }).sources : [];
+  const contextTokenBudget = Math.max(512, Number(process.env.AXIOM_CONTEXT_MAX_TOKENS ?? 12_000));
+  const pinnedContext = boundPinnedContext([ledger, ...originalSources.map((source) => `[Original message ${source.messageId}, sha256 ${source.digest}]\n${source.content}`)].filter(Boolean).join('\n\n'), 10_000, Math.floor(contextTokenBudget / 3), estimateTokens);
   const bounded = buildContextWindow<ClientMessage>(normalized, {
     recentMessages: 12,
     triggerMessages: 16,
-    maxMessages: 24,
-    maxCharacters: 48_000,
+    maxMessages: pinnedContext ? 23 : 24,
+    maxCharacters: 48_000 - pinnedContext.length,
     maxSummaryCharacters: 8_000,
-    maxTokens: Math.max(512, Number(process.env.AXIOM_CONTEXT_MAX_TOKENS ?? 12_000)),
+    maxTokens: contextTokenBudget - estimateTokens(pinnedContext),
   });
   return {
-    messages: bounded.messages,
+    messages: pinnedContext ? [{ role: 'assistant', content: pinnedContext }, ...bounded.messages] : bounded.messages,
     summaryApplied: durableSummaryUsed || bounded.summaryApplied,
     summarizedMessages: (durableSummaryUsed ? persistedSummary!.coveredMessageIds.length : 0) + bounded.summarizedMessages,
-    estimatedTokens: bounded.estimatedTokens,
+    estimatedTokens: bounded.estimatedTokens + estimateTokens(pinnedContext),
     summaryVersion: durableSummaryUsed ? `${persistedSummary!.algorithm}@${persistedSummary!.version}` : bounded.summaryVersion,
     summaryCoverage: durableSummaryUsed
       ? { start: 0, end: persistedSummary!.coveredMessageIds.length - 1, total: candidates.length }
@@ -484,7 +519,7 @@ const resolveProvider = (
   options: { apiKeyOptional?: boolean } = {},
 ): ResolvedProvider => {
   const hasOverride = Boolean(override);
-  const location = hasOverride ? override?.location ?? 'internet' : 'internet';
+  const location = hasOverride ? override?.location ?? 'internet' : defaultProviderLocation(defaults.baseUrl);
   const apiKey = (hasOverride ? override?.apiKey : defaults.apiKey)?.trim() ?? '';
   if (!apiKey && !options.apiKeyOptional && location !== 'local') throw new Error(`${label} API key is not configured.`);
   const rawBaseUrl = hasOverride ? override?.apiUrl ?? defaults.baseUrl : defaults.baseUrl;
@@ -526,6 +561,35 @@ const resolveProviderForRequest = async (
   }, defaults, label, options);
 };
 
+const resolveProviderBundle = async (config: ProviderConfig | undefined, tenantId: string, userId: string): Promise<BoundProviderBundle> => {
+  const defaults = { text: defaultTextProvider, vision: defaultVisionProvider, image: defaultImageProvider, video: defaultVideoProvider };
+  const bundle = {} as BoundProviderBundle;
+  for (const kind of ['text', 'vision', 'image', 'video'] as const) {
+    try {
+      bundle[kind] = await resolveProviderForRequest(config?.[kind], defaults[kind], `${kind} model`, tenantId, userId, kind,
+        { apiKeyOptional: kind === 'video' });
+    } catch (error) {
+      // An absent optional server capability stays absent in the snapshot.
+      // Explicit user configuration must never silently become a default.
+      if (config?.[kind]) throw error;
+      bundle[kind] = null;
+    }
+  }
+  const searchText = bundle.text ?? { ...defaultTextProvider, location: 'internet' as const };
+  const search = nativeSearchEnabled ? nativeSearchProvider(searchText) : null;
+  bundle.search = search ? { ...search, location: search.location ?? 'internet' } : null;
+  return bundle;
+};
+
+const bindProviders = async (input: { providerConfig?: ProviderConfig; modelCredentialId?: string; providerBindingId?: string }, tenantId: string, userId: string) => {
+  if (input.providerBindingId) {
+    const bundle = await providerBindingStore.get({ tenantId, userId, providerBindingId: input.providerBindingId });
+    return providerBindingReference(input.providerBindingId, bundle);
+  }
+  const config = { ...input.providerConfig, ...(input.providerConfig?.text ? {} : input.modelCredentialId ? { text: { credentialId: input.modelCredentialId } } : {}) };
+  return providerBindingStore.create({ tenantId, userId }, await resolveProviderBundle(config, tenantId, userId));
+};
+
 const pluginModelFactory = async (override?: ProviderOverride, tenantId = 'local', userId = 'local-user') => {
   if (!override) return runtimeModel;
   const provider = await resolveProviderForRequest(override, defaultTextProvider, '插件设计 Agent 文本模型', tenantId, userId, 'text');
@@ -559,6 +623,8 @@ app.route('/api', createTaskApi({
   reportModelFactory,
   scheduleModelFactory: reportModelFactory,
   pluginModelFactory,
+  bindProviders,
+  boundModelFactory: resolveTaskModel,
   toolRegistry: runtimeTools,
   artifactStore: runtimeArtifactStore,
   artifactCatalog: runtimeArtifactCatalog,
@@ -578,26 +644,6 @@ app.route('/api', createTaskApi({
   modelRouting: modelRoutingPolicy,
 }));
 
-const parseImageData = (imageData: string) => {
-  const match = imageData.match(/^data:([^;]+);base64,(.+)$/s);
-  if (!match) throw new Error('Edited images must be sent as a base64 data URL.');
-  const [, contentType, encoded] = match;
-  const bytes = Buffer.from(encoded, 'base64');
-  if (bytes.byteLength > 15 * 1024 * 1024) throw new Error('Edited image is larger than 15 MB.');
-  return { bytes, contentType };
-};
-
-const readImageResponse = (payload: unknown, prompt: string) => {
-  const data = (payload as { data?: Array<{ url?: string; b64_json?: string }> })?.data;
-  if (!Array.isArray(data)) return [];
-
-  return data.flatMap((item, index) => {
-    const url = item.url || (item.b64_json ? `data:image/png;base64,${item.b64_json}` : '');
-    return url
-      ? [{ id: randomUUID(), url, alt: `${prompt.slice(0, 100)}${index > 0 ? ` ${index + 1}` : ''}` }]
-      : [];
-  });
-};
 
 const extractSearchQuery = (message: string) => {
   const cleaned = message
@@ -1047,89 +1093,6 @@ const performSearchRows = async (query: string, signal: AbortSignal) => {
   return enrichedRows;
 };
 
-const generateChatImages = async (prompt: string, provider: ResolvedProvider, signal: AbortSignal) => {
-  const response = await fetch(endpoint(provider.baseUrl, '/v1/images/generations'), {
-    method: 'POST',
-    headers: providerHeaders(provider),
-    body: JSON.stringify({ model: provider.model, prompt: prompt.slice(0, 8_000), size: '1024x1024', n: 1, quality: 'auto' }),
-    signal: requestSignal(signal, 600_000),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(`绘图 Agent 请求失败 (${response.status})：${JSON.stringify(payload ?? {}).slice(0, 260)}`);
-  const images = readImageResponse(payload, prompt);
-  if (images.length === 0) throw new Error('绘图 Agent 没有返回图片。');
-  return images;
-};
-
-const videoGenerationEndpoint = (baseUrl: string) => {
-  const pathname = new URL(baseUrl).pathname.replace(/\/$/, '');
-  if (/(?:videos?\/(?:generations?|create)|generate[-_/]?video|video[-_/]?generate)$/i.test(pathname)) return baseUrl;
-  return endpoint(baseUrl, '/v1/videos/generations');
-};
-
-const videoUrlFromPayload = (payload: unknown) => {
-  if (!payload || typeof payload !== 'object') return '';
-  const root = payload as Record<string, unknown>;
-  const data = Array.isArray(root.data) ? root.data[0] as Record<string, unknown> | undefined : undefined;
-  const output = Array.isArray(root.output) ? root.output[0] as Record<string, unknown> | undefined : undefined;
-  const result = root.result && typeof root.result === 'object' ? root.result as Record<string, unknown> : undefined;
-  const video = root.video && typeof root.video === 'object' ? root.video as Record<string, unknown> : undefined;
-  const candidate = root.url ?? root.video_url ?? data?.url ?? data?.video_url ?? output?.url ?? result?.url ?? result?.video_url ?? video?.url;
-  if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
-  const encoded = data?.b64_json ?? root.b64_json;
-  return typeof encoded === 'string' && encoded ? `data:video/mp4;base64,${encoded}` : '';
-};
-
-const videoStatusFromPayload = (payload: unknown) => {
-  if (!payload || typeof payload !== 'object') return '';
-  const root = payload as Record<string, unknown>;
-  return String(root.status ?? (root.data && typeof root.data === 'object' ? (root.data as Record<string, unknown>).status : '') ?? '').toLowerCase();
-};
-
-const waitForVideoPoll = (signal: AbortSignal, delayMs: number) => new Promise<void>((resolveWait, reject) => {
-  const timer = setTimeout(() => {
-    signal.removeEventListener('abort', onAbort);
-    resolveWait();
-  }, delayMs);
-  const onAbort = () => {
-    clearTimeout(timer);
-    reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-  };
-  signal.addEventListener('abort', onAbort, { once: true });
-});
-
-const generateChatVideo = async (prompt: string, provider: ResolvedProvider, signal: AbortSignal) => {
-  const generationUrl = videoGenerationEndpoint(provider.baseUrl);
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
-  const response = await fetch(generationUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ model: provider.model, prompt: prompt.slice(0, 8_000), response_format: 'url' }),
-    signal: requestSignal(signal, 600_000),
-  });
-  let payload = await response.json().catch(() => null) as unknown;
-  if (!response.ok) throw new Error(`视频制作 Agent 请求失败 (${response.status})：${JSON.stringify(payload ?? {}).slice(0, 260)}`);
-
-  let videoUrl = videoUrlFromPayload(payload);
-  const root = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
-  const taskId = String(root.id ?? root.task_id ?? '').trim();
-  const explicitPollUrl = typeof root.status_url === 'string' ? root.status_url.trim() : '';
-  if (!videoUrl && (taskId || explicitPollUrl)) {
-    const pollUrl = explicitPollUrl || `${generationUrl.replace(/\/$/, '')}/${encodeURIComponent(taskId)}`;
-    for (let attempt = 0; attempt < 90 && !videoUrl; attempt += 1) {
-      await waitForVideoPoll(signal, 2_000);
-      const pollResponse = await fetch(pollUrl, { headers: provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : undefined, signal: requestSignal(signal, 30_000) });
-      payload = await pollResponse.json().catch(() => null) as unknown;
-      if (!pollResponse.ok) throw new Error(`视频任务查询失败 (${pollResponse.status})：${JSON.stringify(payload ?? {}).slice(0, 260)}`);
-      videoUrl = videoUrlFromPayload(payload);
-      if (['failed', 'error', 'cancelled', 'canceled'].includes(videoStatusFromPayload(payload))) throw new Error('本地视频服务报告生成失败。');
-    }
-  }
-  if (!videoUrl) throw new Error('视频服务未返回可播放地址；请在提供 API 后确认响应字段或异步查询协议。');
-  if (!videoUrl.startsWith('data:')) videoUrl = new URL(videoUrl, generationUrl).toString();
-  return { id: randomUUID(), kind: 'video' as const, url: videoUrl, alt: prompt.slice(0, 120) || '生成的视频', mimeType: 'video/mp4' };
-};
 
 const localPrincipal = (headers: Headers) => verifyPrincipal(headers) ?? {
   tenantId: headers.get('x-axiom-tenant-id')?.trim().slice(0, 120) || 'local',
@@ -1389,10 +1352,25 @@ app.post('/api/chat', async (c) => {
   }
 
   const principal = localPrincipal(c.req.raw.headers);
+  const requestedRouting = request.routing ? chatRouteDecisionSchema.safeParse(request.routing) : null;
+  const latestRaw = request.messages?.at(-1);
+  const preliminaryRoute = requestedRouting?.success ? requestedRouting.data : fallbackChatRoute({ message: latestRaw ? messageText(latestRaw) : '', mode: request.mode ?? 'analyze' });
+  const forwardMediaTask = () => {
+    const headers = new Headers(c.req.raw.headers);
+    headers.delete('content-length'); headers.set('content-type', 'application/json');
+    if (!headers.has('idempotency-key') && request.sessionId && latestRaw?.id) headers.set('idempotency-key', `media:${request.sessionId}:${latestRaw.id}`.slice(0, 160));
+    return app.request(new Request(new URL('/api/tasks', c.req.url), { method: 'POST', headers, signal: c.req.raw.signal,
+      body: JSON.stringify(mediaGatewayTaskInput(request, preliminaryRoute)) }));
+  };
+  if (preliminaryRoute.intent === 'image-generation' || preliminaryRoute.intent === 'video-generation') {
+    try { return await forwardMediaTask(); }
+    catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Invalid media request.' }, 400); }
+  }
   const persistedSummary = request.sessionId
     ? (await taskStore.getSession(request.sessionId, principal.tenantId, principal.userId).catch(() => null))?.contextSummary
     : undefined;
-  const cleanedMessages = await cleanMessages(request.messages, persistedSummary);
+  const attachmentCache = new Map<object, Promise<ClientMessage>>();
+  let cleanedMessages = await cleanMessages(request.messages, persistedSummary, attachmentCache);
   let messages = cleanedMessages.messages;
   if (messages.length === 0 || messages[messages.length - 1]?.role !== 'user') {
     return c.json({ error: 'A user message is required.' }, 400);
@@ -1415,6 +1393,18 @@ app.post('/api/chat', async (c) => {
     }
   }
 
+  const contextSources = Array.isArray(request.messages) ? request.messages.filter((message): message is ClientMessage & { id: string } =>
+    Boolean(message) && typeof message.id === 'string' && message.id.length > 0
+    && (message.role === 'user' || message.role === 'assistant')
+    && (typeof message.content === 'string' || Array.isArray(message.content))) : [];
+  if (contextSources.length === request.messages?.length && contextSources.length > 0) {
+    const selectedSummary = await prepareSelectedChatSummary(request.sessionId ?? `chat-${randomUUID()}`, contextSources, persistedSummary, provider, c.req.raw.signal);
+    if (selectedSummary) {
+      cleanedMessages = await cleanMessages(request.messages, selectedSummary, attachmentCache);
+      messages = cleanedMessages.messages;
+    }
+  }
+
   let uploadedImageFiles = 0;
   if (messages.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url'))) {
     const prepared = await prepareDeepSeekImageFiles(messages, provider, c.req.raw.signal, process.env.DEEPSEEK_FILES_API !== 'false').catch(() => ({ messages, uploaded: 0 }));
@@ -1423,7 +1413,6 @@ app.post('/api/chat', async (c) => {
   }
 
   const latestUserMessage = messageText([...messages].reverse().find((message) => message.role === 'user') ?? { role: 'user', content: '' });
-  const requestedRouting = request.routing ? chatRouteDecisionSchema.safeParse(request.routing) : null;
   const latestRawUser = [...(request.messages ?? [])].reverse().find((message) => message.role === 'user');
   const latestRawAttachments = latestRawUser?.attachments ?? [];
   const hasDocumentAttachment = latestRawAttachments.some((attachment) => attachment.kind === 'file'
@@ -1474,6 +1463,16 @@ app.post('/api/chat', async (c) => {
   const knownSkillIds = new Set(runtimeSkillCatalog.map((skill) => skill.id));
   routing = { ...routing, skillIds: routing.skillIds.filter((id) => knownSkillIds.has(id)) };
 
+  if (routing.intent === 'image-generation' || routing.intent === 'video-generation') {
+    const headers = new Headers(c.req.raw.headers);
+    headers.delete('content-length');
+    headers.set('content-type', 'application/json');
+    return app.request(new Request(new URL('/api/tasks', c.req.url), {
+      method: 'POST', headers, signal: c.req.raw.signal,
+      body: JSON.stringify(mediaGatewayTaskInput(request, routing)),
+    }));
+  }
+
   const startedAt = Date.now();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -1492,32 +1491,6 @@ app.post('/api/chat', async (c) => {
               ? `已恢复持久上下文摘要，覆盖最早的 ${cleanedMessages.summarizedMessages} 条消息。`
               : `已自动整理最早的 ${cleanedMessages.summarizedMessages} 条消息为上下文摘要。`,
           });
-        }
-
-        if (routing.intent === 'image-generation') {
-          const imageProvider = await resolveProviderForRequest(request.imageProvider, defaultImageProvider, 'Image model', principal.tenantId, principal.userId, 'image');
-          push('status', { phase: 'inference', message: `绘图 Agent 使用 ${imageProvider.model}` });
-          const images = await generateChatImages(latestUserMessage, imageProvider, c.req.raw.signal);
-          images.forEach((attachment) => push('attachment', { attachment }));
-          push('token', { content: `绘图 Agent 已完成，共返回 ${images.length} 张图片。` });
-          push('complete', { durationMs: Date.now() - startedAt, outputCharacters: 0, model: imageProvider.model, route: 'image-generation', agentRole: 'drawing-agent', intent: routing.intent });
-          return;
-        }
-
-        if (routing.intent === 'video-generation') {
-          let videoProvider: ResolvedProvider;
-          try {
-            videoProvider = await resolveProviderForRequest(request.videoProvider, defaultVideoProvider, 'Video model', principal.tenantId, principal.userId, 'video', { apiKeyOptional: true });
-          } catch {
-            throw new Error('视频制作 Agent 尚未配置本地视频服务，请先在模型配置中填写 API URL 和模型名称。');
-          }
-          push('status', { phase: 'inference', message: `视频制作 Agent 正在使用 ${videoProvider.model}` });
-          const attachment = await generateChatVideo(latestUserMessage, videoProvider, c.req.raw.signal);
-          push('attachment', { attachment });
-          const content = '视频制作 Agent 已完成，视频可在当前对话中播放或下载。';
-          push('token', { content });
-          push('complete', { durationMs: Date.now() - startedAt, outputCharacters: content.length, model: videoProvider.model, route: 'video-generation', agentRole: 'video-agent', intent: routing.intent });
-          return;
         }
 
         let specialistContext = '';
@@ -1760,63 +1733,19 @@ app.post('/api/images', async (c) => {
     return c.json({ error: 'An input image is required for edit mode.' }, 400);
   }
 
-  const principal = localPrincipal(c.req.raw.headers);
-  let provider: ResolvedProvider;
-  try {
-    provider = await resolveProviderForRequest(request.provider, defaultImageProvider, 'Image model', principal.tenantId, principal.userId, 'image');
-  } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : 'Invalid image provider.' }, 400);
-  }
-
-  const startedAt = Date.now();
-  metrics.recordImage('requested');
-  try {
-    let response: Response;
-    const size = /^\d{2,5}x\d{2,5}$/.test(request.size ?? '') ? request.size : '1024x1024';
-    const count = Math.min(4, Math.max(1, Math.floor(request.n ?? 1)));
-    const quality = request.quality ?? 'auto';
-
-    if (imageMode === 'edit') {
-      const { bytes, contentType } = parseImageData(request.imageData!);
-      const form = new FormData();
-      form.append('model', provider.model);
-      form.append('prompt', prompt);
-      form.append('size', size!);
-      form.append('n', String(count));
-      form.append('quality', quality);
-      form.append('image', new Blob([bytes], { type: contentType }), 'source.png');
-      response = await fetch(endpoint(provider.baseUrl, '/v1/images/edits'), {
-        method: 'POST',
-        headers: providerHeaders(provider, false),
-        body: form,
-        signal: requestSignal(c.req.raw.signal, 600_000),
-      });
-    } else {
-      response = await fetch(endpoint(provider.baseUrl, '/v1/images/generations'), {
-        method: 'POST',
-        headers: providerHeaders(provider),
-        body: JSON.stringify({ model: provider.model, prompt, size, n: count, quality }),
-        signal: requestSignal(c.req.raw.signal, 600_000),
-      });
-    }
-
-    const payload = (await response.json().catch(() => null)) as unknown;
-    if (!response.ok) {
-      const detail = JSON.stringify(payload ?? {}).slice(0, 300);
-      throw new Error(`Image request failed (${response.status}): ${detail}`);
-    }
-
-    const images = readImageResponse(payload, prompt);
-    if (!images.length) throw new Error('Image provider returned no usable image data.');
-
-    return c.json({ images, model: provider.model, durationMs: Date.now() - startedAt });
-  } catch (error) {
-    metrics.recordImage('failed');
-    return c.json(
-      { error: redactSecrets(error instanceof Error ? error.message : 'Image generation failed.') },
-      502,
-    );
-  }
+  const size = /^\d{2,5}x\d{2,5}$/.test(request.size ?? '') ? request.size : '1024x1024';
+  const count = Math.min(4, Math.max(1, Math.floor(request.n ?? 1)));
+  const messageId = randomUUID();
+  const initial = fallbackChatRoute({ message: 'Generate an image', mode: 'build' });
+  const routing = durableMediaRoute(initial, prompt);
+  const input = mediaGatewayTaskInput({ sessionId: `image-${randomUUID()}`, mode: 'build',
+    messages: [{ id: messageId, role: 'user', content: prompt,
+      ...(imageMode === 'edit' ? { attachments: [{ id: randomUUID(), kind: 'image', url: request.imageData, name: 'source.png' }] } : {}) }],
+    imageProvider: request.provider }, routing);
+  const headers = new Headers(c.req.raw.headers);
+  headers.delete('content-length'); headers.set('content-type', 'application/json');
+  return app.request(new Request(new URL('/api/tasks', c.req.url), { method: 'POST', headers, signal: c.req.raw.signal,
+    body: JSON.stringify({ ...input, mediaRequest: { mode: imageMode, size, count, quality: request.quality ?? 'auto' } }) }));
 });
 
 const serveFrontend = !process.argv.includes('--api-only') && process.env.AXIOM_SERVE_FRONTEND !== 'false';
@@ -1857,9 +1786,11 @@ const shutdown = async (signal: string) => {
   await businessCapabilityStore.close();
   await integrationCredentialStore.close();
   await enterpriseGovernanceStore.close();
+  await toolExecutionStore.close();
   await templateStore.close();
   await taskStore.close();
   await providerCredentialStore.close?.();
+  await providerBindingStore.close();
   await outboundNotifications.stop();
   await outboundNotificationStore.close();
   memoryCompensationWorker.stop();

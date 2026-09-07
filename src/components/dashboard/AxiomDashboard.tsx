@@ -41,7 +41,7 @@ export function AxiomDashboard(props: DashboardProps) {
     selectedNodeId, onSelectAgent, taskProfile, reviewResult, reviewApprovalTaskId, reviewNote, reviewActionBusy,
     onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, onRefreshTasks, sessionId,
     sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, textModelCredentialId, theme, onThemeChange, principalUserId: principalUserIdProp,
-    attachments, onAddAttachments, onRemoveAttachment, onboardingReady,
+    attachments, onAddAttachments, onRemoveAttachment, onboardingReady, onTaskActionChanged, providerConfig,
   } = props;
   const nav = useDashboardStore((state) => state.nav);
   const selectedTaskId = useDashboardStore((state) => state.selectedTaskId);
@@ -133,6 +133,10 @@ export function AxiomDashboard(props: DashboardProps) {
 
   const focusedTaskId = selectedTaskId ?? taskCatalog[0]?.id ?? null;
   const focusedTask = taskCatalog.find((task) => task.id === focusedTaskId) ?? null;
+  const conversationTaskId = activeSession.activeTaskId
+    ?? taskCatalog.filter((task) => task.sessionId === activeSession.id && ['paused', 'awaiting_approval', 'waiting_for_human'].includes(task.status)).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]?.id
+    ?? [...activeSession.messages].reverse().find((message) => Boolean(message.taskId))?.taskId;
+  const conversationTask = taskCatalog.find((task) => task.id === conversationTaskId);
   const focusedTaskRunIds = focusedTask
     ? (groupTaskRuns(taskCatalog).find((group) => group.taskIds.includes(focusedTask.id))?.taskIds ?? [focusedTask.id]).filter((id) => {
       const run = taskCatalog.find((candidate) => candidate.id === id);
@@ -219,9 +223,9 @@ export function AxiomDashboard(props: DashboardProps) {
       {nav === 'templates' ? <section className="dash-main dash-main-templates">{templateWorkspace}</section>
         : nav === 'plugins' ? <section className="dash-main dash-main-plugins">{pluginWorkspace}</section>
         : nav === 'projects' ? <section className="dash-main dash-main-projects"><ProjectWorkspace onUseSolution={(input, solutionMode) => { onDraftChange(input); onModeChange(solutionMode); setNav('chat'); }} /></section>
-        : nav === 'workflows' ? <section ref={workflowMainRef} className="dash-main dash-main-workflows"><WorkflowStudio /></section>
+        : nav === 'workflows' ? <section ref={workflowMainRef} className="dash-main dash-main-workflows"><WorkflowStudio providerConfig={providerConfig} /></section>
         : nav === 'agent-studio' ? <section className="dash-main"><AgentStudio /></section>
-        : nav === 'schedules' ? <section className="dash-main"><ScheduleBoard sessionId={sessionId} modelCredentialId={textModelCredentialId} /></section>
+        : nav === 'schedules' ? <section className="dash-main"><ScheduleBoard sessionId={sessionId} modelCredentialId={textModelCredentialId} providerConfig={providerConfig} /></section>
         : nav === 'operations' ? <section className="dash-main dash-main-operations"><OperationsConsole /></section>
         : nav === 'chat' ? <section className="dash-main dash-main-chat"><DashboardChat key={activeSession.id}
           sessions={sessions}
@@ -261,6 +265,10 @@ export function AxiomDashboard(props: DashboardProps) {
           onReviewNoteChange={onReviewNoteChange}
           onRequestApprove={() => setPendingReviewAction('approve')}
           onRequestReject={() => setPendingReviewAction('reject')}
+          actionTaskId={conversationTaskId}
+          actionTaskStatus={conversationTask?.status}
+          actionRefreshKey={conversationTask?.revision ?? `${phase}:${reviewApprovalTaskId ?? ''}`}
+          onTaskActionChanged={onTaskActionChanged ?? (async () => { await onRefreshTasks(); })}
         /></section>
         : <>
         <section className="dash-main">
@@ -296,6 +304,14 @@ export function AxiomDashboard(props: DashboardProps) {
           onDeleteTask={(id) => setPendingDelete({ kind: 'task', id, taskIds: focusedTaskRunIds.length > 0 ? focusedTaskRunIds : [id] })}
           onCheckpointTaskCreated={async (id) => {
             await onRefreshTasks();
+            useDashboardStore.getState().selectTask(id);
+            onOpenTask(id);
+          }}
+          onRecoveryChanged={async (id, afterSequence) => {
+            if (onTaskActionChanged) { await onTaskActionChanged(id, afterSequence); return; }
+            const selectedBeforeRefresh = useDashboardStore.getState().selectedTaskId;
+            await onRefreshTasks();
+            if (useDashboardStore.getState().selectedTaskId !== selectedBeforeRefresh || focusedTaskId !== id) return;
             useDashboardStore.getState().selectTask(id);
             onOpenTask(id);
           }}

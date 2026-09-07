@@ -514,3 +514,53 @@ test('open-source project lookup remains a GitHub specialist request', () => {
   assert.equal(decision.intent, 'github-research');
   assert.equal(decision.agentRole, 'github-research-agent');
 });
+
+test('mixed attachments preserve the semantic multi-agent plan through server validation', async () => {
+  const input = { message: 'Compare the diagram and design document, then implement the agreed changes.', mode: 'build' as const, attachments: [{ name: 'diagram.png' }, { name: 'design.pdf', mimeType: 'application/pdf' }] };
+  const steps = [
+    { id: 'diagram', title: 'Inspect diagram', agentId: 'vision-agent', objective: 'Read the supplied architecture image.', dependsOn: [], skillIds: [] },
+    { id: 'document', title: 'Read design', agentId: 'document-agent', objective: 'Read the design document.', dependsOn: [], skillIds: [] },
+    { id: 'build', title: 'Implement changes', agentId: 'builder', objective: 'Implement the agreed changes with tests.', dependsOn: ['diagram', 'document'], skillIds: ['implementation'] },
+  ];
+  const decision = await routeChatIntent(input, new RouteModel([
+    routerOutput({ candidateAgentIds: ['vision-agent', 'document-agent', 'builder'], candidateSkillIds: ['implementation'] }),
+    schedulerOutput({ activeAgentIds: ['vision-agent', 'document-agent', 'builder'], appendAgentIds: [], selectedSkillIds: ['implementation'], steps }),
+  ]), new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(decision.intent, 'task');
+  assert.deepEqual(decision.scheduler.steps, steps);
+  assert.ok(decision.router.requiredCapabilities.includes('image-analysis'));
+  assert.ok(decision.router.requiredCapabilities.includes('document-analysis'));
+  const guarded = enforceChatRouteSafety(decision, input);
+  assert.deepEqual(guarded.scheduler.steps, steps);
+  assert.equal(guarded.execution, 'workflow');
+  assert.deepEqual(workflowPlanFromChatRoute(guarded)?.steps.slice(0, 2).map((step) => step.agentContract?.agentId), ['vision-agent', 'document-agent']);
+});
+
+test('missing attachment stages supplement the chosen task instead of discarding its work', async () => {
+  const input = { message: 'Implement this design.', mode: 'build' as const, attachments: [{ kind: 'image', name: 'sketch' }, { kind: 'file', name: 'requirements.txt' }] };
+  const decision = await routeChatIntent(input, new RouteModel([
+    routerOutput({ candidateAgentIds: ['builder'], candidateSkillIds: ['implementation'] }),
+    schedulerOutput({ route: 'single-agent', activeAgentIds: ['builder'], appendAgentIds: [], selectedSkillIds: ['implementation'], steps: [{ id: 'implement', title: 'Implement', agentId: 'builder', objective: 'Keep the model-selected implementation objective.', dependsOn: [], skillIds: ['implementation'] }] }),
+  ]), new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.deepEqual(decision.scheduler.activeAgentIds, ['vision-agent', 'document-agent', 'builder']);
+  assert.equal(decision.scheduler.steps.at(-1)?.id, 'implement');
+  assert.equal(decision.scheduler.steps.at(-1)?.objective, 'Keep the model-selected implementation objective.');
+  assert.deepEqual(decision.scheduler.executionWaves, [['attachment-image-analysis', 'attachment-document-analysis'], ['implement']]);
+});
+
+test('mixed fallback needs only attachment capabilities and old graph roles do not become new requirements', async () => {
+  const mixed = fallbackChatRoute({ message: 'Analyze these inputs.', mode: 'analyze', attachments: [{ name: 'photo.jpg' }, { name: 'report.pdf' }] });
+  assert.equal(mixed.intent, 'task');
+  assert.equal(mixed.workflowRoute, 'team');
+  assert.deepEqual(mixed.scheduler.activeAgentIds, ['vision-agent', 'document-agent']);
+  assert.equal(mixed.requiresSearch, false);
+  const followup = await routeChatIntent({ message: 'Summarize the result in one sentence.', mode: 'analyze', currentGraph: workflowPlanFromChatRoute(mixed)?.graph }, new RouteModel([
+    routerOutput({ taskKind: 'question', difficulty: 'easy', candidateAgentIds: ['direct-responder'], candidateSkillIds: [] }),
+    schedulerOutput({ route: 'direct', activeAgentIds: ['direct-responder'], appendAgentIds: ['direct-responder'], selectedSkillIds: [], steps: [] }),
+  ]), new AbortController().signal);
+  assert.equal(followup.source, 'router-agent');
+  assert.equal(followup.workflowRoute, 'direct');
+  assert.deepEqual(followup.scheduler.activeAgentIds, ['direct-responder']);
+});

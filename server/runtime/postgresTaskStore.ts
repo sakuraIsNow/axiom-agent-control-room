@@ -36,6 +36,7 @@ type PostgresTaskRow = {
   mode: WorkflowTask['mode'];
   model: string | null;
   model_credential_id: string | null;
+  provider_binding_id: string | null;
   status: WorkflowTask['status'];
   plan_json: WorkflowTask['plan'] | null;
   step_results_json: WorkflowTask['stepResults'];
@@ -82,6 +83,7 @@ const taskFromRow = (row: PostgresTaskRow): WorkflowTask => ({
   mode: row.mode,
   model: row.model ?? undefined,
   modelCredentialId: row.model_credential_id ?? undefined,
+  providerBindingId: row.provider_binding_id ?? undefined,
   status: row.status,
   plan: row.plan_json ?? undefined,
   stepResults: row.step_results_json ?? [],
@@ -136,11 +138,8 @@ export class PostgresTaskStore implements TaskStore {
         )
       `);
       const currentSchema = await client.query('SELECT 1 FROM schema_migrations WHERE version = 3');
-      if (currentSchema.rows[0]) {
-        await client.query('COMMIT');
-        return;
-      }
-      await client.query(`
+      if (!currentSchema.rows[0]) {
+        await client.query(`
       CREATE TABLE IF NOT EXISTS tasks (
         id UUID PRIMARY KEY,
         run_id UUID NOT NULL UNIQUE,
@@ -237,6 +236,14 @@ export class PostgresTaskStore implements TaskStore {
       INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING;
       INSERT INTO schema_migrations (version) VALUES (3) ON CONFLICT (version) DO NOTHING;
       `);
+      }
+      const providerBindingSchema = await client.query('SELECT 1 FROM schema_migrations WHERE version = 4');
+      if (!providerBindingSchema.rows[0]) {
+        await client.query(`
+          ALTER TABLE tasks ADD COLUMN IF NOT EXISTS provider_binding_id UUID;
+          INSERT INTO schema_migrations (version) VALUES (4) ON CONFLICT (version) DO NOTHING;
+        `);
+      }
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -269,12 +276,12 @@ export class PostgresTaskStore implements TaskStore {
     };
     await this.pool.query(`
       INSERT INTO tasks (
-        id, run_id, tenant_id, user_id, session_id, template_id, title, input, mode, model, model_credential_id, status,
+        id, run_id, tenant_id, user_id, session_id, template_id, title, input, mode, model, model_credential_id, provider_binding_id, status,
         plan_json, step_results_json, cancel_requested, plan_version, policy_json, idempotency_key, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, '[]'::jsonb, FALSE, 0, $14, $15, $16, $17)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, '[]'::jsonb, FALSE, 0, $15, $16, $17, $18)
     `, [
       task.id, task.runId, task.tenantId, task.userId, task.sessionId, task.templateId ?? null, task.title,
-      task.input, task.mode, task.model ?? null, task.modelCredentialId ?? null, task.status, task.plan ?? null, JSON.stringify(task.policy), task.idempotencyKey ?? null, task.createdAt, task.updatedAt,
+      task.input, task.mode, task.model ?? null, task.modelCredentialId ?? null, task.providerBindingId ?? null, task.status, task.plan ?? null, JSON.stringify(task.policy), task.idempotencyKey ?? null, task.createdAt, task.updatedAt,
     ]);
     return task;
   }

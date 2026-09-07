@@ -220,6 +220,7 @@ let qaMarketPluginId = null;
 let qaWorkflowId = null;
 const qaScheduleIds = [];
 let qaArtifactSessionId = null;
+let releaseVisualChatResponse = () => {};
 page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
 page.on('pageerror', (error) => consoleErrors.push(error.message));
 page.on('dialog', (dialog) => { nativeDialogOpened = true; void dialog.dismiss(); });
@@ -835,6 +836,41 @@ await page.locator('.dash-nav-new').click();
 await page.locator('.dash-chat-workspace').waitFor({ state: 'visible', timeout: 5_000 });
 const input = page.locator('.dash-chat-composer textarea');
 const qaPrompt = '请用一句话确认当前对话可以实时返回。';
+const qaAnswer = '对话已收到，Agent 可以返回消息。';
+const visualChatResponseReady = new Promise((resolveResponse) => { releaseVisualChatResponse = resolveResponse; });
+// This case verifies the real UI's routing/SSE/graph contract. Provider routing
+// has its own runtime gate; network latency must not decide a visual assertion.
+await page.route('**/api/chat/route', async (route) => {
+  if (route.request().method() !== 'POST' || route.request().postDataJSON()?.message !== qaPrompt) return route.continue();
+  await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ decision: {
+    intent: 'conversation', execution: 'gateway', agentRole: 'direct-responder', workflowRoute: 'direct', requiresSearch: false,
+    reason: 'Visual contract fixture: direct conversation.', source: 'router-agent', skillIds: [], routingVersion: 'visual-contract-v1',
+    router: {
+      intent: 'conversation', taskKind: 'conversation', difficulty: 'trivial', requiresExternalFacts: false,
+      requiredCapabilities: ['direct-responder'], candidateAgentIds: ['direct-responder'], candidateSkillIds: [], confidence: 1,
+      rationale: 'Visual contract fixture: direct conversation.',
+    },
+    scheduler: {
+      route: 'direct', activeAgentIds: ['direct-responder'], skippedAgentIds: [], appendAgentIds: ['direct-responder'],
+      selectedSkillIds: [], executionWaves: [], steps: [], requiresReview: false, synthesisAgentId: 'synthesizer',
+      reason: 'Visual contract fixture: direct conversation.',
+    },
+  } }) });
+});
+await page.route('**/api/chat', async (route) => {
+  const body = route.request().postDataJSON();
+  if (route.request().method() !== 'POST' || body?.messages?.at(-1)?.content !== qaPrompt) return route.continue();
+  await visualChatResponseReady;
+  const events = [
+    ['status', { phase: 'inference', message: '对话 Agent 正在组织回答' }],
+    ['token', { content: qaAnswer }],
+    ['complete', { durationMs: 25, route: 'direct', agentRole: 'direct-responder', model: currentModel, usage: { promptTokens: 12, completionTokens: 10, totalTokens: 22 } }],
+  ];
+  await route.fulfill({ status: 200, contentType: 'text/event-stream', body: events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('') });
+});
+const directGatewayRequest = page.waitForRequest((request) => request.method() === 'POST'
+  && new URL(request.url()).pathname === '/api/chat'
+  && request.postDataJSON()?.messages?.at(-1)?.content === qaPrompt, { timeout: 5_000 });
 await input.fill(qaPrompt);
 await page.locator('.dash-chat-controls .send').click();
 await page.locator('.dash-chat-workspace').waitFor({ state: 'visible', timeout: 5_000 });
@@ -852,11 +888,16 @@ const activityText = await activityIndicator.count() > 0
 const pendingActivityUsesAgentAction = activityText.length > 0
   && /Agent/u.test(activityText)
   && !/模型生成中|持续生成|模型正在/u.test(activityText);
-await page.waitForFunction(() => document.querySelectorAll('.dash-agent-signal-node').length > 0, undefined, { timeout: 10_000 }).catch(() => undefined);
-for (let attempt = 0; attempt < 40 && !qaTaskId; attempt += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 100));
-}
+const directResponseUsesRoutedAgent = (await directGatewayRequest).postDataJSON()?.routing?.agentRole === 'direct-responder';
+await page.waitForFunction(() => document.querySelectorAll('.dash-agent-signal-node').length > 0, undefined, { timeout: 5_000 });
 const agentBallCount = await page.locator('.dash-agent-signal-node').count();
+const completedSessionSaved = page.waitForResponse((response) => response.request().method() === 'PUT'
+  && new URL(response.url()).pathname === `/api/sessions/${qaSessionId}`
+  && response.request().postDataJSON()?.messages?.some((message) => message.role === 'assistant' && message.content === qaAnswer && !message.pending), { timeout: 8_000 });
+releaseVisualChatResponse();
+await page.waitForFunction((answer) => [...document.querySelectorAll('.dash-chat-message.assistant')].some((element) => element.textContent?.includes(answer))
+  && !document.querySelector('.dash-chat-thinking, .dash-chat-error'), qaAnswer, { timeout: 5_000 });
+const directResponsePersistsCompletedAnswer = (await completedSessionSaved).ok();
 const chatModel = (await page.locator('.dash-current-model strong').textContent())?.trim() ?? '';
 const graphBeforeSessionSwitch = await page.locator('.dash-agent-signal-node').evaluateAll((elements) => elements.map((element) => element.textContent?.trim() ?? ''));
 let graphClearsForNewSession = false;
@@ -1351,6 +1392,8 @@ const assertions = {
   assistantReaction,
   pendingActivityUsesAgentAction,
   directResponseShowsAgentBall: agentBallCount > 0,
+  directResponseUsesRoutedAgent,
+  directResponsePersistsCompletedAnswer,
   newSessionClearsPreviousGraph: graphClearsForNewSession,
   selectingPreviousSessionRestoresGraph: graphRestoresForPreviousSession,
   historySessionOpensAtBottomWithoutAnimation: historySessionOpensAtBottom,
@@ -1504,6 +1547,7 @@ const result = {
   taskRailShare: Number(rightRailShare.toFixed(3)),
   selectedFocusOffset: Number(selectedFocusOffset.toFixed(2)),
   agentBallCount,
+  directChatVerification: 'deterministic-route-and-sse-with-real-session-persistence',
   activityText,
   taskDeleteAvailableAtSnapshot: taskDeleteAvailable,
   timelineScroll: timelineBefore,
@@ -1518,6 +1562,7 @@ const result = {
 process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 if (Object.values(assertions).some((passed) => !passed)) process.exitCode = 1;
 } finally {
+  releaseVisualChatResponse();
   if (qaTaskId) {
     for (let attempt = 0; attempt < 12; attempt += 1) {
       const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(qaTaskId)}`, { headers: qaHeaders }).catch(() => null);

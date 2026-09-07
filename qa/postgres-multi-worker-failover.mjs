@@ -16,9 +16,16 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = resolve(root, 'qa', 'fixtures', 'postgres-lease-worker.mjs');
 const leaseMs = 1_500;
 const tenantId = `qa-failover-${randomUUID()}`;
-const firstStore = new PostgresTaskStore(connectionString);
-const secondStore = new PostgresTaskStore(connectionString);
-const inspectionPool = new Pool({ connectionString, max: 2 });
+// Claiming workers intentionally scan all tenants. Give this acceptance run its
+// own schema so earlier fixtures cannot become accidental worker inputs.
+const schemaName = `axiom_qa_failover_${randomUUID().replaceAll('-', '')}`;
+const isolatedUrl = new URL(connectionString);
+isolatedUrl.searchParams.set('options', `${isolatedUrl.searchParams.get('options') ?? ''} -c search_path=${schemaName}`.trim());
+const isolatedConnectionString = isolatedUrl.toString();
+const setupPool = new Pool({ connectionString, max: 1 });
+const firstStore = new PostgresTaskStore(isolatedConnectionString);
+const secondStore = new PostgresTaskStore(isolatedConnectionString);
+const inspectionPool = new Pool({ connectionString: isolatedConnectionString, max: 2 });
 const children = new Set();
 let task;
 
@@ -49,7 +56,7 @@ const waitForMessage = (child, acceptedTypes, timeoutMs = 10_000) => new Promise
 const spawnWorker = (workerId) => {
   const child = fork(fixture, [workerId, String(leaseMs)], {
     cwd: root,
-    env: { ...process.env, AXIOM_TEST_DATABASE_URL: connectionString },
+    env: { ...process.env, AXIOM_TEST_DATABASE_URL: isolatedConnectionString },
     execArgv: ['--import', 'tsx'],
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     windowsHide: true,
@@ -69,8 +76,9 @@ const waitForExit = (child, timeoutMs = 10_000) => new Promise((resolveExit, rej
   });
 });
 
-await Promise.all([firstStore.initialize(), secondStore.initialize()]);
 try {
+  await setupPool.query(`CREATE SCHEMA "${schemaName}"`);
+  await Promise.all([firstStore.initialize(), secondStore.initialize()]);
   task = await firstStore.createTask({
     tenantId,
     userId: 'qa-owner',
@@ -161,5 +169,11 @@ try {
   for (const child of children) child.kill();
   await Promise.all([...children].map((child) => waitForExit(child).catch(() => undefined)));
   if (task) await firstStore.deleteTask(task.id, tenantId).catch(() => false);
-  await Promise.all([firstStore.close(), secondStore.close(), inspectionPool.end()]);
+  try { await Promise.all([firstStore.close(), secondStore.close(), inspectionPool.end()]); }
+  finally {
+    try {
+      assert.match(schemaName, /^axiom_qa_failover_[0-9a-f]{32}$/u);
+      await setupPool.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+    } finally { await setupPool.end(); }
+  }
 }

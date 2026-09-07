@@ -4,9 +4,9 @@
 
 > Give Axiom one goal. It decides how difficult the work is, assigns only the Agents that are needed, shows their progress, and checks the result before delivery.
 
-Current source version: **v2.3.0-rc.5** (bilingual interface and intranet enterprise release candidate)
+Current source version: **v2.3.0-rc.6** (execution recovery and human collaboration release candidate)
 
-Unreleased stability work: safer retries for approved MCP actions, recoverable notification delivery, schedule edits that survive in-flight work, complete historical-session operations, and smoother Chat/Nexus interaction. See the [stability upgrade record](docs/stability-upgrade-20260906.md) for validation and remaining work; this is not a new published release.
+This update focuses on finishing work reliably: Agents can act on tool results, resume saved work, and ask for your decision when an external action is uncertain. Chat, Agent Nexus, plugins, and schedules keep the model configuration chosen for their task. See the [execution-loop record](docs/execution-loop-upgrade-20260907.md), [cross-entry acceptance record](docs/cross-entry-consistency-20260907.md), and [upgrade guide](docs/migration-v2.3.md) for validation and limits.
 
 ![Axiom Control Room](docs/images/overview.png)
 
@@ -32,7 +32,7 @@ The interface opens in English by default. Use the language control in the upper
 ## 🏆 Why use it?
 
 - 🚦 **Work is routed by difficulty.** A short question does not pay the latency and Token cost of a full multi-Agent workflow.
-- 🧭 **Every turn is reconsidered.** A follow-up can skip old Agents, reuse verified work, or bring a new Agent into the Graph.
+- 🧭 **Every turn is reconsidered.** A follow-up can skip old Agents, reuse saved work with its evidence, or bring a new Agent into the Graph.
 - ⚡ **Independent work runs in parallel.** Research, analysis, and building do not wait in one long serial queue when they have no dependency.
 - ✅ **Delivery has a gate.** Reviewer findings, evidence gaps, and human approval are part of the durable run, not decorative UI states.
 - 🔄 **Interrupted work can recover.** Tasks, events, leases, checkpoints, approvals, and SSE cursors survive refreshes and Worker restarts.
@@ -71,12 +71,32 @@ Researcher / Analyst / Builder / controlled tools
   ↓
 Reviewer: evidence, consistency, risk, and acceptance criteria
   ↓
-Synthesizer: verified results only
+Synthesizer: results, source references, and unresolved gaps
   ↓
 Final answer, report, Artifact, or follow-up action
 ```
 
 Long tasks use structured handoffs and Artifact references instead of repeatedly placing every intermediate result into the model context. A user can add guidance while work is running; Axiom applies it at the next safe execution point without creating a duplicate task.
+
+### What changed in the execution loop?
+
+- **One request can use several inputs.** An image and a document add the required capabilities without replacing the rest of the Agent plan. Tasks keep an immutable copy of the exact turn's attachments.
+- **Agents can take a useful next step.** A tool result can lead to another lookup or action. Decisions and results are checkpointed, with limits that stop repeated calls and stalled work.
+- **Recovery does not blindly repeat actions.** Successful tool receipts can be reused after an interruption. When a write may have happened but its result is unknown, task details let you record what you checked, then explicitly continue.
+- **Your decisions remain traceable.** Long conversations retain sourced constraints and decisions, including later changes or cancellations. Task Agents with `context.read` can retrieve the original messages when tool execution is enabled; incomplete extraction is not treated as complete memory.
+- **Completion is not proof of truth.** Execution, human acceptance, and source traceability are separate. Neither a successful tool call nor a model's “verified” label establishes that every claim is correct.
+
+### Work stays consistent across entry points
+
+- **Your model choice follows the task.** Text, vision, image, video, and native-search settings are captured securely when work is created. Resuming a task does not silently switch providers.
+- **Generated media is recoverable work.** Image generation, editing, and video requests use saved execution receipts. An uncertain write pauses for inspection instead of blindly submitting another paid request.
+- **Your next action is close to the work.** Plans, tool permissions, quality reviews, and uncertain results use a shared action panel in task details, Chat, Agent Nexus, and Mini Apps.
+- **Plugins follow real routing.** Simple Mini App questions stay lightweight; complex requests use durable tasks and keep their original request while waiting for your decision.
+- **Status stays honest.** A pause is not a successful delivery, a truncated answer is not complete, and missing provider usage is not presented as measured zero.
+
+The attention list uses the same glass surface, restrained colors, and readable rows as the rest of the workspace. Ordinary Chat, Nexus, and Mini App histories remain separate; the task board shows their actual execution records.
+
+Inline Base64 media is saved as an Artifact. Provider-hosted links can still expire, and deleted completed Artifacts require a storage backup. Existing API clients should review the [HTTP 202 media contract](docs/migration-v2.3.md) before upgrading.
 
 ## 🪟 Product views
 
@@ -151,6 +171,14 @@ DEEPSEEK_API_KEY=replace-with-your-key
 
 No working model key is committed to this repository. `.env.local` is ignored by Git.
 
+Create the stable encryption key used for resumable tasks:
+
+```bash
+node scripts/setup-local-provider-secret.mjs
+```
+
+The script preserves an existing key and never prints it. Back up `.env.local` securely. For multiple Workers, supply the same `AXIOM_PROVIDER_SECRET` through your deployment secret manager instead of generating one per machine.
+
 ### 3. Run
 
 ```bash
@@ -209,22 +237,26 @@ npm run qa:postgres:local
 npm run qa:all:local          # PostgreSQL + MinIO local release gate
 ```
 
-Latest `v2.3.0-rc.5` baseline on 2026-09-04:
+Latest `v2.3.0-rc.6` acceptance on 2026-09-07:
 
 ```text
 npm run check          passed
-npm test               433 tests / 432 passed / 0 failed / 1 skipped
+npm test               611 tests / 597 passed / 0 failed / 14 PostgreSQL skipped
 npm run build          passed
-npm run qa:mcp-business
-                       40 passed / 0 failed
-npm run qa:all:local   33 passed / 0 failed / 3 skipped
+PostgreSQL isolation   16 passed / 0 failed / 0 skipped
+Human-action UI        13 passed / 0 failed
+npm run qa:visual      172 assertions passed
+npm run qa:mcp-business 44 passed / 0 failed
+npm run qa:all:local   35 passed / 0 failed / 3 skipped
 ```
 
-All 33 runnable gates passed on their first attempt. The three skipped live checks require deployment-specific TencentDB MemoryCore and Harness/Codex sidecar configuration. A skipped external check is not reported as passed.
+The 14 PostgreSQL cases skipped by the default test command were rerun in an isolated database. The final full gate passed, but was not a first-attempt clean run: one online-routing case fell back on its first attempt, then passed on retry. Earlier migration, UI-fixture, translation, and timeout failures are recorded in the [acceptance log](docs/cross-entry-consistency-20260907.md).
+
+The three skipped live checks require deployment-specific TencentDB MemoryCore and Harness/Codex sidecar configuration. A skipped check is not a pass. Compound research requests can still lose their intended Agent division when the routing model is unavailable; that fallback boundary remains a P0 follow-up, not a completed feature.
 
 ## 📈 Local API baseline
 
-Measured on one Windows node with 25 concurrent clients and 200 requests per endpoint. These figures measure Axiom's API, scheduler, and database path; they do not include model generation or Internet latency.
+Historical baseline from 2026-09-04, measured on one Windows node with 25 concurrent clients and 200 requests per endpoint. These figures measure Axiom's API, scheduler, and database path; they do not include model generation or Internet latency. The smaller rc.6 smoke test is recorded separately in the acceptance log and is not a capacity guarantee.
 
 | Endpoint | Throughput | P95 latency |
 | --- | ---: | ---: |

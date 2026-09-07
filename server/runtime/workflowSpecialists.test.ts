@@ -12,6 +12,8 @@ import type { ModelClient } from './modelClient.js';
 import { SqliteBusinessCapabilityStore } from './businessCapabilityStore.js';
 import type { ArtifactStore } from './artifactStore.js';
 import { nexusArtifactSetDigest, type NexusArtifactSnapshot } from './nexusArtifacts.js';
+import { SqliteToolExecutionStore } from './toolExecutionStore.js';
+import { ToolRegistry } from './toolRegistry.js';
 
 const envKeys = ['DMX_API_KEY', 'DMX_BASE_URL', 'DMX_MODEL', 'DEEPSEEK_API_KEY', 'DEEPSEEK_API_BASE', 'DEEPSEEK_NATIVE_SEARCH_MODEL', 'DEEPSEEK_NATIVE_SEARCH', 'DEEPSEEK_VISION_API_KEY', 'DEEPSEEK_VISION_API_BASE', 'DEEPSEEK_VISION_MODEL', 'VIDEO_API_BASE', 'VIDEO_API_KEY', 'VIDEO_MODEL'] as const;
 
@@ -96,17 +98,25 @@ test('document specialist extracts text bytes and never injects base64 into the 
 test('drawing specialist returns a renderable Markdown image from the configured provider', async () => {
   const originalFetch = globalThis.fetch;
   await withEnvironment({ DMX_API_KEY: 'image-key', DMX_BASE_URL: 'https://image.example/v1', DMX_MODEL: 'image-model' }, async () => {
+    const store = new SqliteTaskStore(':memory:');
+    const ledger = new SqliteToolExecutionStore(':memory:');
+    await store.initialize();
+    await ledger.initialize();
+    const task = await store.createTask({ tenantId: 'media', userId: 'owner', sessionId: 'media-session', title: 'Image', input: 'Draw', mode: 'build' });
     globalThis.fetch = async (input, init) => {
       assert.equal(String(input), 'https://image.example/v1/images/generations');
       assert.match(String(init?.headers && JSON.stringify(init.headers)), /image-key/);
       return new Response(JSON.stringify({ data: [{ url: 'https://cdn.example/generated.png' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     };
     try {
-      const result = await executeWorkflowSpecialist('drawing-agent', '雨夜未来城市', new AbortController().signal);
+      const result = await executeWorkflowSpecialist('drawing-agent', '雨夜未来城市', new AbortController().signal, [], undefined,
+        { execution: { store: ledger, task, stepId: 'draw', invocationId: 'generation-1' } });
       assert.equal(result.model, 'image-model');
       assert.match(result.output, /!\[工作流生成图片 1\]\(https:\/\/cdn\.example\/generated\.png\)/);
     } finally {
       globalThis.fetch = originalFetch;
+      await store.close();
+      await ledger.close();
     }
   });
 });
@@ -134,7 +144,7 @@ test('search specialist forces native web_search and preserves source URLs', asy
 test('search specialist distinguishes a completed zero-result search from a transport failure', async () => {
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async () => new Response(JSON.stringify({ output_text: '' }), {
+    globalThis.fetch = async () => new Response(JSON.stringify({ output_text: '', status: 'completed' }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
@@ -148,7 +158,7 @@ test('search specialist distinguishes a completed zero-result search from a tran
   }
 });
 
-test('workflow compilation rejects an unavailable service Agent before execution', async () => {
+test('workflow compilation retains implemented service Agents independently of global provider keys', async () => {
   await withEnvironment({}, async () => {
     const compiled = compileAgentWorkflow({
       schemaVersion: 1,
@@ -163,8 +173,9 @@ test('workflow compilation rejects an unavailable service Agent before execution
       ],
       scopedAgents: [],
     }, [], []);
-    assert.ok(compiled.issues.some((issue) => issue.code === 'specialist-unavailable'));
-    assert.equal(compiled.plan.steps.length, 0);
+    assert.equal(compiled.issues.length, 0);
+    assert.equal(compiled.plan.steps.length, 1);
+    assert.equal(compiled.plan.steps[0]?.maxDurationMs, 600_000);
   });
 });
 
@@ -173,7 +184,9 @@ test('orchestrator executes a snapshotted drawing Agent as a real workflow step'
   await withEnvironment({ DMX_API_KEY: 'image-key', DMX_BASE_URL: 'https://image.example/v1', DMX_MODEL: 'image-model' }, async () => {
     globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ url: 'https://cdn.example/workflow.png' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     const store = new SqliteTaskStore(':memory:');
+    const ledger = new SqliteToolExecutionStore(':memory:');
     await store.initialize();
+    await ledger.initialize();
     const memory: AgentMemory = {
       async recall() {
         return {
@@ -207,7 +220,7 @@ test('orchestrator executes a snapshotted drawing Agent as a real workflow step'
           }],
         },
       });
-      const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' })).run(task, new AbortController().signal);
+      const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }), new ToolRegistry(undefined, undefined, undefined, undefined, ledger)).run(task, new AbortController().signal);
       assert.equal(result.status, 'completed', result.error);
       assert.match(result.stepResults[0]?.output ?? '', /https:\/\/cdn\.example\/workflow\.png/);
       assert.match(synthesisInput, /https:\/\/cdn\.example\/workflow\.png/);
@@ -216,6 +229,7 @@ test('orchestrator executes a snapshotted drawing Agent as a real workflow step'
       assert.ok(events.some((event) => event.type === 'model.completed' && event.payload.serviceAgent === 'drawing-agent'));
     } finally {
       await store.close();
+      await ledger.close();
       globalThis.fetch = originalFetch;
     }
   });

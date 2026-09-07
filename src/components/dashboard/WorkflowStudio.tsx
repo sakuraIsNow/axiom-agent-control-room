@@ -16,6 +16,7 @@ import {
   Plus,
   PackageCheck,
   RotateCcw,
+  RefreshCw,
   Rocket,
   Save,
   Send,
@@ -28,14 +29,13 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { cancelWorkflowTask, getWorkflowTask, listWorkflowTasks, streamWorkflowEvents } from '../../lib/taskRuntime';
+import { cancelWorkflowTask, getWorkflowTask, streamWorkflowEvents, type TaskProviderConfig } from '../../lib/taskRuntime';
 import { userFacingError } from '../../lib/errorPresentation';
 import { isConversationSubmitKey } from '../../lib/conversationInteraction';
 import { useConversationScroll } from '../../lib/useConversationScroll';
 import {
   deleteAgentWorkflow,
+  getAgentWorkflowHistory,
   createNexusTest,
   createNexusWorkflowPlugin,
   compareNexusReleases,
@@ -66,8 +66,12 @@ import {
   type WorkflowScopedAgent,
   type WorkflowValidationIssue,
 } from '../../lib/workflowRuntime';
-import type { UserDefinedAgent } from '../../types';
+import type { UserDefinedAgent, WorkflowTask } from '../../types';
 import { buildConversationContext } from '../../lib/conversationContext';
+import { isNexusTaskExecuting, isNexusTaskTerminal, nexusTaskActivity } from '../../lib/nexusRunPresentation';
+import { TaskActionPanel } from './TaskActionPanel';
+import { ChatMessageMarkdown } from './ChatArtifact';
+import { taskHasPartialDelivery } from '../../lib/taskDelivery';
 import '../../styles/workflow-release.css';
 
 type CanvasSelection = { type: 'node'; id: string } | { type: 'edge'; id: string } | null;
@@ -104,10 +108,6 @@ const defaultCanvas = (): WorkflowCanvas => ({
 });
 
 const baseStepId = (stepId: string) => stepId.replace(/-loop-\d+$/, '');
-const latestUserInput = (input: string) => {
-  const matches = [...input.matchAll(/(?:^|\n\n)USER:\n([\s\S]*?)(?=\n\n(?:USER|ASSISTANT):\n|$)/gi)];
-  return (matches.at(-1)?.[1] ?? input).trim();
-};
 const nodeTone: Record<WorkflowCanvasNode['type'], string> = { input: '输入', agent: 'Agent', output: '输出' };
 const statusLabel: Record<NodeRunStatus, string> = { queued: '等待', running: '执行中', completed: '完成', failed: '失败' };
 
@@ -162,7 +162,7 @@ const edgePath = (source: WorkflowCanvasNode, target: WorkflowCanvasNode, kind: 
   return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
 };
 
-export function WorkflowStudio() {
+export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProviderConfig }) {
   const [workflows, setWorkflows] = useState<SavedAgentWorkflow[]>([]);
   const [workflowId, setWorkflowId] = useState<string | null>(null);
   const [name, setName] = useState('新的 Agent Nexus');
@@ -200,41 +200,53 @@ export function WorkflowStudio() {
   const [messages, setMessages] = useState<RunnerMessage[]>([]);
   const [runnerInput, setRunnerInput] = useState('');
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
+  const [startingRun, setStartingRun] = useState(false);
+  const [historyReadyId, setHistoryReadyId] = useState<string | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [activeRunTask, setActiveRunTask] = useState<WorkflowTask | null>(null);
+  const [streamTarget, setStreamTarget] = useState<{ taskId: string; workflowId: string; assistantId: string } | null>(null);
   const [runActivity, setRunActivity] = useState('Agent Nexus 待命');
   const [nodeStatuses, setNodeStatuses] = useState<Record<string, NodeRunStatus>>({});
   const dragRef = useRef<{ kind: 'node' | 'pan'; id?: string; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const dragMovedRef = useRef(false);
   const runControllerRef = useRef<AbortController | null>(null);
+  const createRunLock = useRef(false);
+  const workflowScope = useRef(workflowId);
+  workflowScope.current = workflowId;
+  const taskSequences = useRef(new Map<string, number>());
   const sessionIdRef = useRef(`workflow-session-${crypto.randomUUID()}`);
   const { scrollRef: messagesScrollRef, onScroll: onMessagesScroll, showLatest, scrollToLatest } = useConversationScroll(workflowId, messages);
 
   const restoreWorkflowHistory = useCallback(async (targetWorkflowId: string, signal: AbortSignal, replace = false) => {
     try {
-      const summaries = await listWorkflowTasks(100, signal);
-      const candidates = summaries
-        .filter((task) => task.templateId === targetWorkflowId && !task.sessionId.startsWith('agent-nexus-test-'))
-        .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
-      if (!candidates.length) {
-        if (replace && !signal.aborted) setMessages([]);
-        return;
-      }
-      const details = await Promise.all(candidates.map((task) => getWorkflowTask(task.id, signal)));
+      const history = await getAgentWorkflowHistory(targetWorkflowId, signal);
       if (signal.aborted) return;
-      const restored = details.flatMap((task) => {
-        const userContent = latestUserInput(task.input ?? '');
-        const assistantContent = task.result || (task.error ? `Agent Nexus 执行失败：${task.error}` : task.status === 'cancelled' ? '本次 Agent Nexus 已停止。' : '');
-        const restoredMessages: RunnerMessage[] = userContent ? [{ id: `${task.id}-user`, role: 'user', content: userContent }] : [];
-        if (assistantContent.trim()) restoredMessages.push({ id: `${task.id}-assistant`, role: 'assistant', content: assistantContent, pending: false });
-        return restoredMessages;
-      });
+      const restored: RunnerMessage[] = history.messages.map((message) => ({ ...message, pending: false }));
       if (restored.length) {
         setMessages((current) => replace ? restored : current.length ? current : restored);
       } else if (replace) {
         setMessages([]);
       }
+      const activeId = history.activeTaskId ?? null;
+      if (activeId && !createRunLock.current) {
+        const task = await getWorkflowTask(activeId, signal);
+        if (signal.aborted || workflowScope.current !== targetWorkflowId) return;
+        setActiveRunTask(task);
+        setRunActivity(nexusTaskActivity(task.status, taskHasPartialDelivery(task)));
+        setNodeStatuses(Object.fromEntries(task.stepResults.map((result) => [baseStepId(result.stepId), result.status])));
+        if (isNexusTaskExecuting(task.status)) {
+          const assistantId = `${task.id}-assistant`;
+          setMessages((current) => current.some((message) => message.id === assistantId) ? current : [...current, { id: assistantId, role: 'assistant', content: '', pending: true }]);
+          setStreamTarget({ workflowId: targetWorkflowId, taskId: task.id, assistantId });
+        }
+      } else if (replace) {
+        setActiveRunTask(null); setStreamTarget(null);
+      }
     } catch (caught) {
       if (!signal.aborted) setError((current) => current ?? userFacingError(caught, 'Agent Nexus 历史读取失败。'));
+      return;
     }
+    if (!signal.aborted && workflowScope.current === targetWorkflowId) setHistoryReadyId(targetWorkflowId);
   }, []);
 
   useEffect(() => {
@@ -254,7 +266,7 @@ export function WorkflowStudio() {
       controller.abort();
       window.removeEventListener('axiom:task-catalog-mutated', handleCatalogMutation);
     };
-  }, [restoreWorkflowHistory, workflowId]);
+  }, [restoreWorkflowHistory, workflowId, historyRevision]);
 
   const refresh = useCallback(async () => {
     const items = await listAgentWorkflows();
@@ -318,6 +330,9 @@ export function WorkflowStudio() {
   const selectedEdge = selection?.type === 'edge' ? canvas.edges.find((edge) => edge.id === selection.id) ?? null : null;
 
   function openSavedWorkflow(workflow: SavedAgentWorkflow) {
+    runControllerRef.current?.abort();
+    setRunningTaskId(null); setActiveRunTask(null); setStreamTarget(null); setHistoryReadyId(null); setStartingRun(false);
+    setHistoryRevision((value) => value + 1);
     setWorkflowId(workflow.id);
     setName(nexusDisplayName(workflow.name));
     setDescription(workflow.description);
@@ -355,6 +370,7 @@ export function WorkflowStudio() {
     setNexusDeleteConfirm(false);
     setReleaseCenterOpen(false);
     setMessages([]);
+    setActiveRunTask(null); setStreamTarget(null);
     setIssues([]);
     setNodeStatuses({});
     setDirty(true);
@@ -699,19 +715,83 @@ export function WorkflowStudio() {
     setMessages((current) => current.map((message) => message.id === id ? updater(message) : message));
   };
 
+  useEffect(() => {
+    if (!streamTarget || workflowScope.current !== streamTarget.workflowId) return;
+    const target = streamTarget;
+    const controller = new AbortController();
+    runControllerRef.current = controller;
+    setRunningTaskId(target.taskId);
+    setAssistantMessage(target.assistantId, (message) => ({ ...message, pending: true }));
+    let streamedOutput = '';
+    const current = () => !controller.signal.aborted && workflowScope.current === target.workflowId;
+    void (async () => {
+      try {
+        await streamWorkflowEvents(target.taskId, controller.signal, (event) => {
+          if (!current()) return;
+          taskSequences.current.set(target.taskId, event.sequence);
+          const stepId = typeof event.payload.stepId === 'string' ? baseStepId(event.payload.stepId) : null;
+          if (stepId && ['agent.spawned', 'agent.assigned'].includes(event.type)) setNodeStatuses((value) => ({ ...value, [stepId]: 'queued' }));
+          if (stepId && event.type === 'agent.started') {
+            setNodeStatuses((value) => ({ ...value, [stepId]: 'running' }));
+            setRunActivity(`${String(event.payload.agentName ?? event.payload.title ?? 'Agent')}正在执行`);
+          }
+          if (stepId && event.type === 'agent.completed') setNodeStatuses((value) => ({ ...value, [stepId]: 'completed' }));
+          if (stepId && event.type === 'agent.failed') setNodeStatuses((value) => ({ ...value, [stepId]: 'failed' }));
+          if (event.type === 'loop.iteration' && event.payload.scope === 'workflow-loop') setRunActivity(`Loop 第 ${Number(event.payload.iteration ?? 1)} / ${Number(event.payload.maxIterations ?? 1)} 轮`);
+          if (event.type === 'model.delta' && event.payload.stage === 'synthesizer') {
+            if (event.payload.reset === true) streamedOutput = '';
+            streamedOutput += typeof event.payload.content === 'string' ? event.payload.content : '';
+            setAssistantMessage(target.assistantId, (message) => ({ ...message, content: streamedOutput }));
+            setRunActivity('汇总 Agent 正在生成 Nexus 输出');
+          }
+          if (event.type === 'review.started') setRunActivity('质量检查正在进行');
+        }, taskSequences.current.get(target.taskId) ?? 0);
+        const task = await getWorkflowTask(target.taskId, controller.signal);
+        if (!current()) return;
+        setActiveRunTask(task);
+        setRunActivity(nexusTaskActivity(task.status, taskHasPartialDelivery(task)));
+        setAssistantMessage(target.assistantId, (message) => ({ ...message, content: task.result || streamedOutput || message.content || (isNexusTaskTerminal(task.status) ? task.error || 'Agent Nexus 没有返回可交付内容。' : ''), pending: false }));
+        window.dispatchEvent(new CustomEvent('axiom:task-catalog-mutated', { detail: { kind: 'task-updated', workflowId: target.workflowId, taskId: task.id } }));
+      } catch (caught) {
+        if (!current()) return;
+        setAssistantMessage(target.assistantId, (message) => ({ ...message, pending: false }));
+        setError(userFacingError(caught, '连接已中断，任务仍保留，可重新连接查看状态。'));
+      } finally {
+        if (current()) setRunningTaskId(null);
+        if (runControllerRef.current === controller) runControllerRef.current = null;
+      }
+    })();
+    return () => controller.abort();
+  }, [streamTarget]);
+
+  const refreshActiveRun = async (taskId: string, afterSequence?: number) => {
+    const selectedWorkflow = workflowScope.current;
+    if (!selectedWorkflow || activeRunTask?.id !== taskId) return;
+    const task = await getWorkflowTask(taskId);
+    if (workflowScope.current !== selectedWorkflow) return;
+    setActiveRunTask(task); setRunActivity(nexusTaskActivity(task.status, taskHasPartialDelivery(task)));
+    if (afterSequence !== undefined) taskSequences.current.set(taskId, Math.max(taskSequences.current.get(taskId) ?? 0, afterSequence));
+    if (isNexusTaskExecuting(task.status)) {
+      const assistantId = [...messages].reverse().find((message) => message.role === 'assistant')?.id ?? `${task.id}-assistant`;
+      setMessages((current) => current.some((message) => message.id === assistantId) ? current : [...current, { id: assistantId, role: 'assistant', content: '', pending: true }]);
+      setStreamTarget({ taskId, workflowId: selectedWorkflow, assistantId });
+    }
+  };
+
   const execute = async () => {
     const text = runnerInput.trim();
-    if (!text || runningTaskId) return;
+    if (!text || runningTaskId || createRunLock.current || workflowId && historyReadyId !== workflowId || activeRunTask && !isNexusTaskTerminal(activeRunTask.status)) return;
+    createRunLock.current = true;
+    setStartingRun(true);
     let executableId = workflowId;
     if (dirty || !executableId) {
       const saved = await save();
       executableId = saved?.id ?? null;
     }
-    if (!executableId) return;
+    if (!executableId) { createRunLock.current = false; setStartingRun(false); return; }
     const executionSessionId = executableId ? `agent-nexus-${executableId}` : sessionIdRef.current;
     const controller = new AbortController();
     runControllerRef.current = controller;
-    let streamedOutput = '';
     const userMessage: RunnerMessage = { id: makeId('message'), role: 'user', content: text };
     const assistantId = makeId('message');
     const assistantMessage: RunnerMessage = { id: assistantId, role: 'assistant', content: '', pending: true };
@@ -728,38 +808,12 @@ export function WorkflowStudio() {
       const nexusInput = contextResult.messages
         .map((message) => `${message.role === 'user' ? 'USER' : 'ASSISTANT'}:\n${message.content}`)
         .join('\n\n');
-      const task = await runAgentWorkflow({ workflowId: executableId, sessionId: executionSessionId, text: nexusInput, signal: controller.signal });
-      setRunningTaskId(task.id);
-      await streamWorkflowEvents(task.id, controller.signal, (event) => {
-        const stepId = typeof event.payload.stepId === 'string' ? baseStepId(event.payload.stepId) : null;
-        if (stepId && ['agent.spawned', 'agent.assigned'].includes(event.type)) setNodeStatuses((current) => ({ ...current, [stepId]: 'queued' }));
-        if (stepId && event.type === 'agent.started') {
-          setNodeStatuses((current) => ({ ...current, [stepId]: 'running' }));
-          setRunActivity(`${String(event.payload.agentName ?? event.payload.title ?? 'Agent')}正在执行`);
-        }
-        if (stepId && event.type === 'agent.completed') setNodeStatuses((current) => ({ ...current, [stepId]: 'completed' }));
-        if (stepId && event.type === 'agent.failed') setNodeStatuses((current) => ({ ...current, [stepId]: 'failed' }));
-        if (event.type === 'loop.iteration' && event.payload.scope === 'workflow-loop') {
-          setRunActivity(`Loop 第 ${Number(event.payload.iteration ?? 1)} / ${Number(event.payload.maxIterations ?? 1)} 轮`);
-        }
-        if (event.type === 'model.delta' && event.payload.stage === 'synthesizer') {
-          if (event.payload.reset === true) {
-            streamedOutput = '';
-            setAssistantMessage(assistantId, (message) => ({ ...message, content: '' }));
-          }
-          const content = typeof event.payload.content === 'string' ? event.payload.content : '';
-          if (content) {
-            streamedOutput += content;
-            setAssistantMessage(assistantId, (message) => ({ ...message, content: `${message.content}${content}` }));
-          }
-          setRunActivity('汇总 Agent 正在生成 Nexus 输出');
-        }
-        if (event.type === 'review.started') setRunActivity('质量检查正在进行');
-      });
-      const completed = await getWorkflowTask(task.id, controller.signal);
-      setAssistantMessage(assistantId, (message) => ({ ...message, content: completed.result || streamedOutput || completed.error || 'Agent Nexus 已结束，但没有返回内容。', pending: false }));
-      setRunActivity(completed.status === 'completed' ? 'Agent Nexus 执行完成' : `Agent Nexus 已${completed.status}`);
+      const task = await runAgentWorkflow({ workflowId: executableId, sessionId: executionSessionId, text: nexusInput, conversationTurn: { id: userMessage.id, role: 'user', content: text }, providerConfig, signal: controller.signal });
+      if (controller.signal.aborted || workflowScope.current !== executableId) return;
+      setActiveRunTask(task);
+      setStreamTarget({ taskId: task.id, workflowId: executableId, assistantId });
     } catch (caught) {
+      if (workflowScope.current !== executableId) return;
       if (controller.signal.aborted) {
         setAssistantMessage(assistantId, (message) => ({ ...message, content: message.content || '本次 Agent Nexus 已停止。', pending: false }));
         setRunActivity('Agent Nexus 已停止');
@@ -770,15 +824,22 @@ export function WorkflowStudio() {
         setRunActivity('Agent Nexus 执行失败');
       }
     } finally {
-      setRunningTaskId(null);
-      runControllerRef.current = null;
+      createRunLock.current = false;
+      if (workflowScope.current === executableId) setStartingRun(false);
+      if (runControllerRef.current === controller) runControllerRef.current = null;
     }
   };
 
   const stop = async () => {
     if (!runningTaskId) return;
-    await cancelWorkflowTask(runningTaskId).catch(() => undefined);
-    runControllerRef.current?.abort();
+    try {
+      await cancelWorkflowTask(runningTaskId);
+      const task = await getWorkflowTask(runningTaskId);
+      if (activeRunTask?.id !== task.id) return;
+      setActiveRunTask(task); setRunActivity(nexusTaskActivity(task.status, taskHasPartialDelivery(task)));
+      runControllerRef.current?.abort(); setStreamTarget(null); setRunningTaskId(null);
+      setMessages((current) => current.map((message) => message.pending ? { ...message, pending: false } : message));
+    } catch (caught) { setError(userFacingError(caught, '停止任务未完成，请重试。')); }
   };
 
   return <div className="dash-workflow-studio">
@@ -796,7 +857,7 @@ export function WorkflowStudio() {
       </div>
     </header>
 
-    {error && <div className="workflow-error"><AlertCircle size={15} /><span>{error}</span><button type="button" aria-label="关闭错误" onClick={() => setError(null)}><X size={14} /></button></div>}
+    {error && <div className="workflow-error"><AlertCircle size={15} /><span>{error}</span>{workflowId && historyReadyId !== workflowId && <button type="button" aria-label="重新读取历史" onClick={() => setHistoryRevision((value) => value + 1)}><RefreshCw size={14} /></button>}<button type="button" aria-label="关闭错误" onClick={() => setError(null)}><X size={14} /></button></div>}
 
     <div className="workflow-studio-grid">
       <aside className="workflow-library glass-panel">
@@ -961,18 +1022,19 @@ export function WorkflowStudio() {
       </div>}
 
       <section className="workflow-runner glass-panel">
-        <header><div><MessageSquareText size={15} /><strong>运行 Agent Nexus</strong></div><span className={runningTaskId ? 'running' : ''}>{runningTaskId && <LoaderCircle className="spin" size={12} />}{runActivity}</span></header>
+        <header><div><MessageSquareText size={15} /><strong>运行 Agent Nexus</strong></div><span className={runningTaskId ? 'running' : ''}>{runningTaskId && <LoaderCircle className="spin" size={12} />}{runActivity}{activeRunTask && !runningTaskId && isNexusTaskExecuting(activeRunTask.status) && <button type="button" title="重新连接任务" aria-label="重新连接任务" onClick={() => void refreshActiveRun(activeRunTask.id)}><RefreshCw size={14} /></button>}</span></header>
         <div ref={messagesScrollRef} onScroll={onMessagesScroll} className="workflow-runner-messages">
            {messages.length === 0 && <div className="workflow-runner-empty"><Workflow size={22} /><strong>输入内容，按当前 Agent 流水线执行</strong><span>Agent 状态、分支和 Loop 轮次会实时显示在画布中。</span></div>}
           {messages.map((message) => <article key={message.id} className={message.role}>
             <span>{message.role === 'user' ? '你' : 'W'}</span>
-            <div>{message.pending && !message.content && <p className="workflow-pending"><LoaderCircle className="spin" size={14} />{runActivity}</p>}{message.content && <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>}</div>
+            <div>{message.pending && !message.content && <p className="workflow-pending"><LoaderCircle className="spin" size={14} />{runActivity}</p>}{message.content && <ChatMessageMarkdown content={message.content} />}</div>
           </article>)}
+          {activeRunTask && <TaskActionPanel taskId={activeRunTask.id} taskStatus={activeRunTask.status} refreshKey={activeRunTask.revision} onChanged={refreshActiveRun} context="nexus" />}
         </div>
         <footer>
           {showLatest && <button type="button" className="conversation-latest" data-conversation-latest title="回到最新消息" aria-label="回到最新消息" onClick={scrollToLatest}><ArrowDown size={17} /></button>}
-          <textarea rows={2} value={runnerInput} disabled={Boolean(runningTaskId)} onChange={(event) => setRunnerInput(event.target.value)} onKeyDown={(event) => { if (isConversationSubmitKey(event.nativeEvent)) { event.preventDefault(); void execute(); } }} placeholder="向 Agent Nexus 输入内容" />
-          <button type="button" className={runningTaskId ? 'stop' : 'send'} aria-label={runningTaskId ? '停止 Agent Nexus' : '运行 Agent Nexus'} disabled={!runningTaskId && !runnerInput.trim()} onClick={() => runningTaskId ? void stop() : void execute()}>{runningTaskId ? <Square size={15} /> : <Send size={15} />}</button>
+          <textarea rows={2} value={runnerInput} disabled={startingRun || Boolean(workflowId && historyReadyId !== workflowId) || Boolean(runningTaskId) || Boolean(activeRunTask && !isNexusTaskTerminal(activeRunTask.status))} onChange={(event) => setRunnerInput(event.target.value)} onKeyDown={(event) => { if (isConversationSubmitKey(event.nativeEvent)) { event.preventDefault(); void execute(); } }} placeholder="向 Agent Nexus 输入内容" />
+          <button type="button" className={runningTaskId ? 'stop' : 'send'} aria-label={runningTaskId ? '停止 Agent Nexus' : '运行 Agent Nexus'} disabled={startingRun || Boolean(workflowId && historyReadyId !== workflowId) || !runningTaskId && (!runnerInput.trim() || Boolean(activeRunTask && !isNexusTaskTerminal(activeRunTask.status)))} onClick={() => runningTaskId ? void stop() : void execute()}>{startingRun ? <LoaderCircle className="spin" size={15} /> : runningTaskId ? <Square size={15} /> : <Send size={15} />}</button>
         </footer>
       </section>
     </div>

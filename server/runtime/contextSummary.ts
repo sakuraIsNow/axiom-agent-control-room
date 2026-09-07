@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { StructuredContext } from './structuredContext.js';
 
 /**
  * Bounded conversation context for model calls.
@@ -41,6 +42,7 @@ export type PersistedContextSummary = {
   durableFacts: string[];
   createdAt: string;
   quality?: ContextSummaryQuality;
+  structuredContext?: StructuredContext;
 };
 
 export type ContextSummaryQuality = {
@@ -333,6 +335,7 @@ export const buildPersistedContextSummary = (
     durableFacts: [],
     createdAt: new Date().toISOString(),
     quality: summaryQuality(messages, covered, boundedContent, previous, action, options),
+    ...(previousIsPrefix && previous?.structuredContext ? { structuredContext: previous.structuredContext } : {}),
   };
 };
 

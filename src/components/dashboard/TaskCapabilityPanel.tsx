@@ -13,6 +13,7 @@ import { getWorkflowTask } from '../../lib/taskRuntime';
 import { downloadReportAttachment, exportConversationReport } from '../../lib/reportExport';
 import { userFacingError } from '../../lib/errorPresentation';
 import { agentDisplayName } from '../../lib/agentPresentation';
+import { evidenceSourceLabels, evidenceSourceStatus } from '../../lib/evidencePresentation';
 import '../../styles/task-capabilities.css';
 
 const activeStatuses = new Set(['queued', 'planning', 'running', 'reviewing', 'paused', 'waiting_for_human', 'awaiting_approval']);
@@ -20,19 +21,18 @@ const feedbackIssues = { accuracy: '准确性', completeness: '完整性', evide
 const evidenceKindLabel: Record<EvidenceItem['kind'], string> = {
   'user-fact': '用户事实', 'tool-result': '工具结果', 'external-source': '外部来源', artifact: 'Artifact', dependency: '上游交接', 'model-inference': '模型推断',
 };
-const evidenceStateLabel: Record<EvidenceItem['verification'], string> = { verified: '已验证', supported: '来源支持', unverified: '未验证', contradicted: '存在冲突' };
 const durationLabel = (milliseconds: number) => milliseconds < 60_000
   ? `${Math.max(1, Math.round(milliseconds / 1_000))} 秒`
   : `${Math.max(1, Math.round(milliseconds / 60_000))} 分钟`;
 
-function EvidenceGraph({ items }: { items: EvidenceItem[] }) {
+function EvidenceGraph({ items, taskId }: { items: EvidenceItem[]; taskId: string }) {
   if (!items.length) return null;
   return <section className="task-evidence-graph" aria-label="证据图">
     <div className="task-capability-head"><span><FileCheck2 size={14} />证据图</span><small>{items.length} 条</small></div>
-    <div className="task-evidence-list">{items.slice(0, 24).map((item) => <article key={item.id} className={item.verification}>
+    <div className="task-evidence-list">{items.slice(0, 24).map((item) => <article key={item.id} className={evidenceSourceStatus(item, taskId)}>
       <div className="task-evidence-source"><span>{evidenceKindLabel[item.kind]}</span><strong>{item.title ?? item.source}</strong>{item.locator && <small>{item.locator}</small>}{(item.publishedAt || item.retrievedAt) && <time>{new Date(item.publishedAt ?? item.retrievedAt!).toLocaleString('zh-CN')}</time>}</div>
       <ArrowRight size={13} />
-      <div className="task-evidence-claim"><span>{evidenceStateLabel[item.verification]} · {Math.round(item.confidence * 100)}%</span><p>{item.claim}</p><footer>{item.artifactId && <em>Artifact：{item.artifactId}</em>}{item.uri && <a href={item.uri} target="_blank" rel="noreferrer">查看来源<ExternalLink size={11} /></a>}</footer></div>
+      <div className="task-evidence-claim"><span>{evidenceSourceLabels[evidenceSourceStatus(item, taskId)]}</span><p>{item.claim}</p><footer>{item.artifactId && <em>Artifact：{item.artifactId}</em>}{item.uri && <a href={item.uri} target="_blank" rel="noreferrer">查看来源<ExternalLink size={11} /></a>}</footer></div>
     </article>)}</div>
   </section>;
 }
@@ -192,7 +192,7 @@ export function TaskCapabilityPanel({ task, onTaskCreated }: {
 
     {handoffs.length > 0 && <section className="task-handoff-list"><div className="task-capability-head"><span><GitBranch size={14} />Agent 交接</span><small>{handoffs.length} 次</small></div>{handoffs.slice(-6).map(({ stepId, agentId, handoff }) => <article key={`${stepId}-${agentId}`}><header><strong>{agentDisplayName(agentId)}</strong><span className={handoff.status}>{handoff.status === 'complete' ? '完整' : handoff.status === 'partial' ? '部分完成' : '受阻'}</span></header><p>{handoff.summary}</p><footer><span>{handoff.evidenceIds.length} 条证据</span><span>{handoff.artifactIds.length} 个 Artifact</span><span>{handoff.openQuestions.length} 个未决问题</span></footer>{handoff.openQuestions.length > 0 && <small>{handoff.openQuestions.join('；')}</small>}</article>)}</section>}
 
-    <EvidenceGraph items={evidenceItems} />
+    <EvidenceGraph items={evidenceItems} taskId={task.id} />
 
     <section className="task-memory-policy"><span><BrainCircuit size={13} /><em>本任务长期记忆</em></span><button type="button" className={memoryEnabled ? 'toggle active' : 'toggle'} onClick={toggleMemory} disabled={Boolean(busy)} aria-label={memoryEnabled ? '关闭长期记忆' : '开启长期记忆'}><i /></button></section>
 

@@ -3,6 +3,7 @@ import type {
   ImageResponse,
   ImageProviderSettings,
 } from '../types';
+import { getWorkflowTask, streamWorkflowEvents } from './taskRuntime';
 
 export async function generateImage(
   request: ImageRequest,
@@ -26,11 +27,23 @@ export async function generateImage(
   });
 
   const body = (await response.json().catch(() => null)) as
-    | (ImageResponse & { error?: string })
+    | (ImageResponse & { error?: string; task?: { id?: string } })
     | null;
 
   if (!response.ok) {
     throw new Error(body?.error ?? `图像网关返回 HTTP ${response.status}。`);
+  }
+
+  if (response.status === 202 && body?.task?.id) {
+    const taskId = body.task.id;
+    const startedAt = Date.now();
+    await streamWorkflowEvents(taskId, signal, () => undefined);
+    const task = await getWorkflowTask(taskId, signal);
+    if (task.status !== 'completed') throw new Error('绘图任务已保留，请在任务管理中查看或处理后继续。');
+    const images = [...(task.result ?? '').matchAll(/!\[([^\]]*)\]\(([^\s)]+)\)/g)]
+      .map((match, index) => ({ id: `${taskId}-${index}`, url: match[2], alt: match[1] || 'Agent image' }));
+    if (!images.length) throw new Error('任务未提供可用图片，请在任务管理中核对结果。');
+    return { images, model: provider.model || task.model || 'image-provider', durationMs: Date.now() - startedAt };
   }
 
   if (!body?.images?.length) {

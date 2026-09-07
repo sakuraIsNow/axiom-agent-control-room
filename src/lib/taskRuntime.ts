@@ -1,6 +1,19 @@
 import type { AgentMode, ChatRouteDecision, InAppNotificationFeed, InAppNotificationKind, OperationsAlertsSnapshot, OperationsSnapshot, OutboundNotificationCatalog, OutboundNotificationChannel, OutboundNotificationDelivery, TaskStats, TaskStatsDaily, WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowEvent, WorkflowTask, WorkflowTaskSummary } from '../types';
-import type { ExecutionPolicy } from '../types';
+import type { ChatMessage, ExecutionPolicy, ProviderServiceSettings, ProviderSettings } from '../types';
 import { consumeSseBlocks } from './sse';
+
+export type TaskProviderConfig = Partial<Record<keyof ProviderSettings,
+  Pick<ProviderServiceSettings, 'location'> & Partial<Pick<ProviderServiceSettings, 'credentialId' | 'apiKey' | 'apiUrl' | 'model'>>>>;
+
+export function taskProviderConfig(settings: ProviderSettings): TaskProviderConfig {
+  return Object.fromEntries(Object.entries(settings).flatMap(([kind, provider]) => provider.useCustom ? [[kind, {
+    location: provider.location,
+    ...(provider.credentialId ? { credentialId: provider.credentialId } : {}),
+    ...(provider.apiKey.trim() ? { apiKey: provider.apiKey.trim() } : {}),
+    ...(provider.apiUrl.trim() ? { apiUrl: provider.apiUrl.trim() } : {}),
+    ...(provider.model.trim() ? { model: provider.model.trim() } : {}),
+  }]] : []));
+}
 
 export async function createWorkflowTask(input: {
   sessionId: string;
@@ -9,11 +22,15 @@ export async function createWorkflowTask(input: {
   mode: AgentMode;
   templateId?: string;
   modelCredentialId?: string;
+  providerConfig?: TaskProviderConfig;
+  pluginId?: string;
   /** Stable per-turn key so a browser/network retry cannot create a duplicate task. */
   idempotencyKey?: string;
   signal: AbortSignal;
   policy?: Partial<ExecutionPolicy>;
   routing?: ChatRouteDecision;
+  contextMessages?: ChatMessage[];
+  inputSource?: { messageId: string; attachments: NonNullable<ChatMessage['attachments']> };
 }) {
   const response = await fetch('/api/tasks', {
     method: 'POST',
@@ -28,8 +45,22 @@ export async function createWorkflowTask(input: {
       mode: input.mode,
       templateId: input.templateId,
       modelCredentialId: input.modelCredentialId,
+      providerConfig: input.providerConfig,
+      pluginId: input.pluginId,
       policy: input.policy,
       routing: input.routing,
+      contextMessages: input.contextMessages?.map((message) => ({
+        id: message.id, role: message.role, content: message.content, taskId: message.taskId,
+        attachments: message.attachments?.map((attachment) => ({ id: attachment.id, kind: attachment.kind ?? 'image', ...('name' in attachment ? { name: attachment.name } : {}), ...('mimeType' in attachment ? { mimeType: attachment.mimeType } : {}), ...('size' in attachment ? { size: attachment.size } : {}) })),
+      })),
+      inputSource: input.inputSource ? { messageId: input.inputSource.messageId, attachments: input.inputSource.attachments.map((attachment) => ({
+        id: attachment.id, kind: attachment.kind ?? 'image',
+        ...('name' in attachment ? { name: attachment.name } : {}),
+        ...('mimeType' in attachment ? { mimeType: attachment.mimeType } : {}),
+        ...('url' in attachment ? { url: attachment.url } : {}),
+        ...('dataUrl' in attachment ? { dataUrl: attachment.dataUrl } : {}),
+        ...('text' in attachment ? { text: attachment.text } : {}),
+      })) } : undefined,
     }),
     signal: input.signal,
   });
@@ -296,6 +327,7 @@ export async function streamWorkflowEvents(
   let lastSequence = Math.max(0, Math.floor(afterSequence));
   let reconnects = 0;
   let terminal = false;
+  let humanBoundary = false;
 
   while (!terminal && !signal.aborted) {
     const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/events?after=${lastSequence}`, {
@@ -325,9 +357,12 @@ export async function streamWorkflowEvents(
         if (event.sequence <= lastSequence) return;
         lastSequence = event.sequence;
         onEvent(event);
+        humanBoundary = ['plan.approval_requested', 'plan.rejected', 'review.approval_requested', 'review.rejected', 'tool.approval_requested', 'tool.rejected', 'tool.outcome_unknown', 'task.paused'].includes(event.type);
         terminal = event.type === 'task.completed'
           || event.type === 'task.failed'
           || event.type === 'task.cancelled'
+          || event.type === 'task.paused'
+          || event.type === 'tool.outcome_unknown'
           || event.type === 'plan.approval_requested'
           || event.type === 'plan.rejected'
           || event.type === 'review.approval_requested'
@@ -347,13 +382,19 @@ export async function streamWorkflowEvents(
         if (event.sequence <= lastSequence) return;
         lastSequence = event.sequence;
         onEvent(event);
+        humanBoundary = ['plan.approval_requested', 'plan.rejected', 'review.approval_requested', 'review.rejected', 'tool.approval_requested', 'tool.rejected', 'tool.outcome_unknown', 'task.paused'].includes(event.type);
         terminal = event.type === 'task.completed' || event.type === 'task.failed' || event.type === 'task.cancelled'
+          || event.type === 'task.paused' || event.type === 'tool.outcome_unknown'
           || event.type === 'plan.approval_requested' || event.type === 'plan.rejected'
           || event.type === 'review.approval_requested' || event.type === 'review.rejected'
           || event.type === 'tool.approval_requested' || event.type === 'tool.rejected';
       });
     }
 
+    if (terminal && humanBoundary && !signal.aborted) {
+      const current = await getWorkflowTask(taskId, signal);
+      terminal = !['queued', 'planning', 'running', 'reviewing'].includes(current.status);
+    }
     if (!terminal && !signal.aborted) {
       reconnects += 1;
       if (reconnects > 8) throw new Error('Task event stream could not be reconnected.');

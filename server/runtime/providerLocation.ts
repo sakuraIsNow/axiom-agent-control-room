@@ -1,5 +1,10 @@
 export type ProviderLocation = 'internet' | 'local';
 
+export const defaultProviderLocation = (baseUrl: string): ProviderLocation => {
+  try { return isLocalProviderHostname(new URL(baseUrl).hostname) ? 'local' : 'internet'; }
+  catch { return 'internet'; }
+};
+
 export const isLocalProviderHostname = (rawHostname: string) => {
   const hostname = rawHostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (hostname === 'localhost' || hostname === '::1' || hostname === 'host.docker.internal' || hostname.endsWith('.local')) return true;

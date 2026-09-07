@@ -151,10 +151,7 @@ const resolveAgent = (
       addIssue(issues, 'builtin-agent-not-found', `内置 Agent“${id}”不存在。`, { nodeIds: [node.id] });
       return null;
     }
-    if ('available' in agent && !agent.available) {
-      addIssue(issues, 'specialist-unavailable', agent.unavailableReason ?? `服务 Agent“${agent.label}”当前不可用。`, { nodeIds: [node.id] });
-      return null;
-    }
+    // Provider availability belongs to the owner-bound run configuration, not the canvas structure.
     const requestedTools = node.toolNames ?? [];
     const missing = requestedTools.filter((name) => !availableTools.has(name));
     if (missing.length) addIssue(issues, 'tool-not-found', `Agent“${node.name}”引用了不可用能力：${missing.join('、')}。`, { nodeIds: [node.id] });
@@ -162,7 +159,7 @@ const resolveAgent = (
       roleId: agent.role,
       model: node.model,
       maxTokens: node.maxTokens,
-      maxDurationMs: node.maxDurationMs,
+      maxDurationMs: node.maxDurationMs ?? (id === 'drawing-agent' ? 600_000 : id === 'video-agent' ? 900_000 : undefined),
       failureStrategy: node.failureStrategy,
       tools: requestedTools.filter((name) => availableTools.has(name)),
       contract: { source, agentId: agent.id, displayName: agent.label, toolAllowlist: requestedTools } satisfies WorkflowStepAgentContract,

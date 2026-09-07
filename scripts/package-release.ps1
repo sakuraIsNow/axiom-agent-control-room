@@ -30,6 +30,8 @@ $requiredPaths = @(
   "package-lock.json",
   ".env.example",
   "README.md",
+  "README.zh-CN.md",
+  "scripts/setup-local-provider-secret.mjs",
   "CHANGELOG.md",
   "LICENSE",
   "THIRD_PARTY_NOTICES.md",
@@ -74,13 +76,15 @@ $installNote = @"
 
 1. Copy .env.example to .env.local and provide your own secrets.
 2. Run: npm ci --omit=dev
+   For a single-instance setup, run: node scripts/setup-local-provider-secret.mjs
+   Back up the generated .env.local securely. All workers must share its key.
 3. For PostgreSQL, run: npm run db:migrate
 4. Start the combined API and web service: npm start
 5. Open the configured API_PORT (default: http://127.0.0.1:8787).
 
 This archive never includes .env.local, local databases, Artifact data, logs,
 node_modules, demo files, QA screenshots, or API keys.
-See README.md and docs/migration-v2.2.md before upgrading an existing deployment.
+See README.md and docs/migration-v2.3.md before upgrading an existing deployment.
 "@
 Set-Content -LiteralPath (Join-Path $stagingRoot "DEPLOY.txt") -Value $installNote -Encoding UTF8
 

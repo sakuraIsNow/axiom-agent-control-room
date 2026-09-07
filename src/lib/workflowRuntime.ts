@@ -1,4 +1,5 @@
 import type { WorkflowEvent, WorkflowTask, UserDefinedAgent } from '../types';
+import type { TaskProviderConfig } from './taskRuntime';
 
 export type WorkflowAgentSource = 'builtin' | 'platform' | 'workflow';
 
@@ -207,8 +208,10 @@ export async function createNexusTest(workflowId: string, input: { name: string;
   return (await readJson<{ testCase: NexusBusinessRecord }>(response, 'Nexus 测试保存失败')).testCase;
 }
 
-export async function runNexusTests(workflowId: string) {
-  const response = await fetch(`/api/capabilities/nexus/${encodeURIComponent(workflowId)}/test-run`, { method: 'POST' });
+export async function runNexusTests(workflowId: string, providerConfig?: TaskProviderConfig) {
+  const response = await fetch(`/api/capabilities/nexus/${encodeURIComponent(workflowId)}/test-run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ providerConfig }),
+  });
   return readJson<{ workflowId: string; workflowVersion: number; runs: Array<{ id: string; testCaseId: string; taskId: string; expectedIncludes: string[] }> }>(response, 'Nexus 测试启动失败');
 }
 
@@ -296,15 +299,22 @@ export async function runAgentWorkflow(input: {
   workflowId: string;
   sessionId: string;
   text: string;
+  providerConfig?: TaskProviderConfig;
+  conversationTurn?: { id: string; role: 'user'; content: string };
   signal: AbortSignal;
 }) {
   const response = await fetch(`/api/workflows/${encodeURIComponent(input.workflowId)}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: input.sessionId, input: input.text }),
+    body: JSON.stringify({ sessionId: input.sessionId, input: input.text, conversationTurn: input.conversationTurn, providerConfig: input.providerConfig }),
     signal: input.signal,
   });
   return (await readJson<{ task: WorkflowTask; eventsUrl: string }>(response, '工作流启动失败')).task;
+}
+
+export async function getAgentWorkflowHistory(workflowId: string, signal?: AbortSignal) {
+  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/history`, { signal });
+  return readJson<{ messages: Array<{ id: string; role: 'user' | 'assistant'; content: string }>; activeTaskId?: string | null; tasks?: Array<{ id: string; status: WorkflowTask['status']; revision: number }> }>(response, 'Workflow history could not be read.');
 }
 
 export type WorkflowRunEvent = WorkflowEvent;

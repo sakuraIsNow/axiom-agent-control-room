@@ -37,6 +37,7 @@ type TaskRow = {
   mode: WorkflowTask['mode'];
   model: string | null;
   model_credential_id: string | null;
+  provider_binding_id: string | null;
   status: WorkflowTask['status'];
   plan_json: string | null;
   step_results_json: string;
@@ -104,6 +105,7 @@ const taskFromRow = (row: TaskRow): WorkflowTask => ({
   mode: row.mode,
   model: row.model ?? undefined,
   modelCredentialId: row.model_credential_id ?? undefined,
+  providerBindingId: row.provider_binding_id ?? undefined,
   status: row.status,
   plan: parseJson(row.plan_json, undefined),
   stepResults: parseJson(row.step_results_json, []),
@@ -267,6 +269,9 @@ export class SqliteTaskStore implements TaskStore {
     if (!columns.some((column) => column.name === 'model_credential_id')) {
       this.db.exec('ALTER TABLE tasks ADD COLUMN model_credential_id TEXT');
     }
+    if (!columns.some((column) => column.name === 'provider_binding_id')) {
+      this.db.exec('ALTER TABLE tasks ADD COLUMN provider_binding_id TEXT');
+    }
     const sessionColumns = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
     if (!sessionColumns.some((column) => column.name === 'deleted_at')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN deleted_at INTEGER');
@@ -303,9 +308,9 @@ export class SqliteTaskStore implements TaskStore {
     };
     this.db.prepare(`
       INSERT INTO tasks (
-        id, run_id, tenant_id, user_id, session_id, template_id, title, input, mode, model, model_credential_id, status,
+        id, run_id, tenant_id, user_id, session_id, template_id, title, input, mode, model, model_credential_id, provider_binding_id, status,
         plan_json, step_results_json, cancel_requested, plan_version, policy_json, idempotency_key, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 0, 0, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 0, 0, ?, ?, ?, ?)
     `).run(
       task.id,
       task.runId,
@@ -318,6 +323,7 @@ export class SqliteTaskStore implements TaskStore {
       task.mode,
       task.model ?? null,
       task.modelCredentialId ?? null,
+      task.providerBindingId ?? null,
       task.status,
       task.plan ? JSON.stringify(task.plan) : null,
       JSON.stringify(task.policy),

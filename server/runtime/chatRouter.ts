@@ -132,6 +132,44 @@ const withSystemSynthesizer = (value: unknown): unknown => {
   return { ...value, synthesisAgentId: 'synthesizer' };
 };
 const unique = <T>(values: T[]) => [...new Set(values)];
+const attachmentRequirements = (input: ChatRouteInput) => {
+  const image = (attachment: NonNullable<ChatRouteInput['attachments']>[number]) => attachment.kind === 'image'
+    || attachment.mimeType?.startsWith('image/')
+    || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(attachment.name ?? '');
+  const attachments = input.attachments ?? [];
+  return [
+    ...(attachments.some(image) ? [{ capability: 'image-analysis', agentId: 'vision-agent' }] : []),
+    ...(attachments.some((attachment) => !image(attachment)) ? [{ capability: 'document-analysis', agentId: 'document-agent' }] : []),
+  ];
+};
+const requireAttachmentCapabilities = (router: ChatRouteDecision['router'], input: ChatRouteInput): ChatRouteDecision['router'] => {
+  const requirements = attachmentRequirements(input);
+  if (!requirements.length || router.intent === 'report-export'
+    || ['image-generation', 'video-generation'].includes(router.intent) && requirements.every((item) => item.agentId === 'vision-agent')) return router;
+  const specialist = router.intent === 'task' ? undefined : intentAgent[router.intent];
+  const composite = router.intent === 'task' || requirements.some((requirement) => requirement.agentId !== specialist);
+  return {
+    ...router,
+    intent: composite ? 'task' : router.intent,
+    requiredCapabilities: unique([...router.requiredCapabilities, ...requirements.map((requirement) => requirement.capability)]),
+    candidateAgentIds: unique([...router.candidateAgentIds.filter((id) => !composite || id !== 'direct-responder'), ...requirements.map((requirement) => requirement.agentId)]),
+  };
+};
+const requireAttachmentSteps = (scheduler: TurnSchedulingDecision, router: ChatRouteDecision['router'], input: ChatRouteInput): TurnSchedulingDecision => {
+  if (router.intent !== 'task') return scheduler;
+  const missing = attachmentRequirements(input).filter((requirement) => !scheduler.steps.some((step) => step.agentId === requirement.agentId));
+  if (!missing.length) return scheduler;
+  const used = new Set(scheduler.steps.map((step) => step.id));
+  const preparations = missing.map((requirement): TurnSchedulingStep => {
+    let id = `attachment-${requirement.capability}`;
+    while (used.has(id)) id += '-input';
+    used.add(id);
+    return { id, title: requirement.capability === 'image-analysis' ? '分析图片附件' : '分析文档附件', agentId: requirement.agentId, objective: `Analyze this turn's ${requirement.capability === 'image-analysis' ? 'image' : 'document'} attachments and pass source-backed findings to the dependent work. User request: ${input.message.slice(0, 1_500)}`, dependsOn: [], skillIds: [] };
+  });
+  const steps = [...preparations, ...scheduler.steps.map((step) => step.dependsOn.length ? step : { ...step, dependsOn: preparations.map((item) => item.id) })];
+  if (steps.length > 8) throw new Error('Attachment requirements exceed the eight-step schedule budget.');
+  return { ...scheduler, steps, activeAgentIds: unique(steps.map((step) => step.agentId)) };
+};
 const directories = (input: ChatRouteInput) => ({
   agents: (input.availableAgents?.length ? input.availableAgents : defaultAgents).filter((agent) => agent.available !== false).filter((agent, index, all) => all.findIndex((candidate) => candidate.id === agent.id) === index).slice(0, 64),
   skills: (input.availableSkills?.length ? input.availableSkills : runtimeSkillCatalog.map(({ id, label, description }) => ({ id, label, description }))).filter((skill, index, all) => all.findIndex((candidate) => candidate.id === skill.id) === index).slice(0, 64),
@@ -213,11 +251,11 @@ const fallbackReportExport = (text: string): ReportExportDecision => {
 };
 
 /** Regex-based routing is retained only as the model-unavailable fallback. */
-export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
+const baseFallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
   const text = input.message.trim();
-  const attachments = input.attachments ?? [];
-  const hasImage = attachments.some((attachment) => attachment.mimeType?.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(attachment.name ?? ''));
-  const hasDocument = attachments.some((attachment) => !attachment.mimeType?.startsWith('image/'));
+  const required = attachmentRequirements(input);
+  const hasImage = required.some((item) => item.agentId === 'vision-agent');
+  const hasDocument = required.some((item) => item.agentId === 'document-agent');
   const videoGeneration = /(?:生成|制作|创建|剪辑|合成).{0,18}(?:视频|短片|动画|影片)|(?:generate|create|make|edit).{0,18}(?:video|movie|clip|animation)/i.test(text);
   const imageGeneration = /(?:生成|绘制|画|制作|设计|编辑|修改).{0,16}(?:图片|图像|海报|插画|封面)|(?:draw|generate|create|edit).{0,16}(?:image|picture|poster|illustration)/i.test(text);
   const agentRegistry = /(?:有哪些|哪几个|列出|查看|介绍|可用).{0,20}(?:agent|智能体|子智能体)|(?:agent|agents).{0,20}(?:available|list|registry|catalog)/i.test(text);
@@ -233,6 +271,7 @@ export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
   if (reportExport) return fallbackDecision(input, 'report-export', 'direct', '兜底规则检测到明确的会话报告导出动作。', fallbackReportExport(text));
   if (videoGeneration) return fallbackDecision(input, 'video-generation', 'direct', '兜底规则检测到视频生成目标。');
   if (imageGeneration) return fallbackDecision(input, 'image-generation', 'direct', '兜底规则检测到图像生成目标。');
+  if (hasImage && hasDocument) return fallbackDecision(input, 'task', 'direct', '图片与文档附件需要组合分析能力。');
   if (hasImage) return fallbackDecision(input, 'image-analysis', 'direct', '图片附件要求视觉能力。');
   if (hasDocument) return fallbackDecision(input, 'document-analysis', 'direct', '文档附件要求文档解析能力。');
   if (academicSearch) return fallbackDecision(input, 'academic-search', 'direct', '兜底规则检测到学术检索目标。');
@@ -244,6 +283,22 @@ export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
   return fallbackDecision(input, 'task', profile.route, `兜底分类为 ${profile.kind} / ${profile.difficulty}。`);
 };
 
+export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
+  const decision = baseFallbackChatRoute(input);
+  const router = requireAttachmentCapabilities(decision.router, input);
+  if (router.intent !== 'task' || !attachmentRequirements(input).length) return { ...decision, router };
+  const specialist = decision.intent === 'task' || decision.intent === 'conversation' ? undefined : intentAgent[decision.intent];
+  const initial = specialist && !decision.scheduler.steps.length ? {
+    ...decision.scheduler,
+    steps: [{ id: 'specialist-delivery', title: decision.reason.slice(0, 120), agentId: specialist, objective: input.message, dependsOn: [], skillIds: decision.skillIds }],
+  } : decision.scheduler;
+  const prepared = requireAttachmentSteps(initial, router, input);
+  const route = routeForScheduledSteps(prepared.route, router.difficulty, prepared.steps.length);
+  const existing = currentGraphRoles(input);
+  const scheduler = { ...prepared, route, executionWaves: executionWaves(prepared.steps), appendAgentIds: prepared.activeAgentIds.filter((id) => !existing.includes(id)), skippedAgentIds: existing.filter((id) => !prepared.activeAgentIds.includes(id)) };
+  return { ...decision, intent: 'task', execution: 'workflow', agentRole: 'orchestrator', workflowRoute: route, router, scheduler };
+};
+
 /**
  * Applies server-side constraints to a decision returned by the browser's
  * routing pass. A decision can be stale when a request is retried, so an
@@ -253,6 +308,8 @@ export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
  */
 export const enforceChatRouteSafety = (routing: ChatRouteDecision, input: ChatRouteInput): ChatRouteDecision => {
   const fallback = fallbackChatRoute(input);
+  if (['image-generation', 'video-generation'].includes(routing.intent)
+    && attachmentRequirements(input).every((item) => item.agentId === 'vision-agent')) return durableMediaRoute(routing, input.message);
   const hardSpecialistIntents = new Set<ChatIntent>([
     'report-export',
     'image-generation',
@@ -262,7 +319,15 @@ export const enforceChatRouteSafety = (routing: ChatRouteDecision, input: ChatRo
     'agent-registry',
   ]);
   if (routing.intent === 'conversation' && fallback.intent !== 'conversation') return fallback;
-  if (hardSpecialistIntents.has(fallback.intent) && routing.intent !== fallback.intent) return fallback;
+  if (hardSpecialistIntents.has(fallback.intent) && routing.intent !== fallback.intent && (routing.intent !== 'task' || fallback.intent === 'report-export')) return fallback;
+  const router = requireAttachmentCapabilities(routing.router, input);
+  if (router.intent === 'task' && attachmentRequirements(input).length) {
+    let prepared: TurnSchedulingDecision;
+    try { prepared = requireAttachmentSteps(routing.scheduler, router, input); } catch { return fallback; }
+    const route = routeForScheduledSteps(prepared.route, router.difficulty, prepared.steps.length);
+    const existing = currentGraphRoles(input);
+    routing = { ...routing, intent: 'task', router, workflowRoute: route, scheduler: { ...prepared, route, executionWaves: executionWaves(prepared.steps), appendAgentIds: prepared.activeAgentIds.filter((id) => !existing.includes(id)), skippedAgentIds: existing.filter((id) => !prepared.activeAgentIds.includes(id)) } };
+  }
   const specialistRole = intentAgent[routing.intent as Exclude<ChatIntent, 'task'>];
   if (routing.intent !== 'task') {
     // Specialist gateway intents never create a workflow task. Normalize stale
@@ -338,11 +403,7 @@ const validateRouter = (router: ChatRouteDecision['router'], input: ChatRouteInp
   if (router.confidence < 0.55) throw new Error('Router confidence is below threshold.');
   assertKnownIds(router.candidateAgentIds, agentIds, 'Router Agent');
   assertKnownIds(router.candidateSkillIds, skillIds, 'Router Skill');
-  const attachments = input.attachments ?? [];
-  const hasImage = attachments.some((attachment) => attachment.mimeType?.startsWith('image/') || attachment.kind === 'image');
-  const hasDocument = attachments.some((attachment) => !attachment.mimeType?.startsWith('image/') && attachment.kind !== 'image');
-  if (hasImage && (router.intent !== 'image-analysis' || !router.candidateAgentIds.includes('vision-agent'))) throw new Error('Image attachments require Vision Agent.');
-  if (hasDocument && (router.intent !== 'document-analysis' || !router.candidateAgentIds.includes('document-agent'))) throw new Error('Documents require Document Agent.');
+  if (router.intent !== 'report-export' && attachmentRequirements(input).some((requirement) => !router.candidateAgentIds.includes(requirement.agentId))) throw new Error('Attachments require their analysis capabilities.');
   if (router.intent === 'report-export' && !router.reportExport) throw new Error('Report export intent requires format and scope.');
   if (router.intent !== 'report-export' && router.reportExport) throw new Error('Only report export intent may include report export settings.');
   if (router.intent !== 'task' && !router.candidateAgentIds.includes(intentAgent[router.intent])) throw new Error('Required specialist is absent.');
@@ -402,6 +463,7 @@ const routeForScheduledSteps = (
   return 'team';
 };
 const validateScheduler = (scheduler: TurnSchedulingDecision, router: ChatRouteDecision['router'], input: ChatRouteInput, agentIds: Set<string>, skillIds: Set<string>): TurnSchedulingDecision => {
+  scheduler = requireAttachmentSteps(scheduler, router, input);
   assertKnownIds(scheduler.activeAgentIds, agentIds, 'Scheduler Agent');
   assertKnownIds(scheduler.appendAgentIds, agentIds, 'Scheduler append');
   assertKnownIds(scheduler.selectedSkillIds, skillIds, 'Scheduler Skill');
@@ -466,21 +528,23 @@ export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient,
       signal, responseFormat: 'json', temperature: 0, maxTokens: 900,
       system: `You are the Router Agent for a production Agent platform. Classify and select candidates only; never answer or schedule.
 Use the latest turn, compact conversation context, attachments, live Agent/Skill directories, and cumulative session Graph. Choose only supplied IDs and the smallest sufficient candidate set. Existing Graph Agents need not run again. Add capabilities only when this turn needs them.
+Attachments are additive required capabilities, never mutually exclusive intents. Image inputs require image-analysis/vision-agent; document inputs require document-analysis/document-agent. Mixed attachments or attachment analysis combined with research, reasoning, creation, or implementation are tasks; preserve every useful stage in a minimal plan.
 Intents: conversation only for greetings, thanks, social chat, or casual small talk; agent-registry; web-search for a simple current-fact lookup; academic-search; github-research; image-generation; video-generation; image-analysis; document-analysis; report-export only when the user explicitly asks to export, download, save, or generate a file from an existing answer/conversation; task for every comparison, decision, analysis, design, planning, implementation, report-writing request without an explicit file-export action, or multi-stage request. A retrieval request that also needs analysis or implementation is a task and should include the relevant search Agent plus reasoning/build Agents. Do not call every task complex. Confidence below 0.55 triggers fallback.
 For report-export, include reportExport with scope last-answer or conversation and format md, docx, tex, or pdf. Infer scope and format from the user's wording. Default to last-answer and docx when unspecified. For every other intent, omit reportExport. Never ask ordinary users whether they want an export.
 Return JSON only: {"intent":"...","taskKind":"conversation|question|research|implementation|decision|creative|operations","difficulty":"trivial|easy|moderate|hard|complex","requiresExternalFacts":false,"requiredCapabilities":["..."],"candidateAgentIds":["..."],"candidateSkillIds":["..."],"confidence":0.0,"rationale":"...","reportExport":{"scope":"last-answer|conversation","format":"md|docx|tex|pdf","title":"optional"}}.`,
       user: JSON.stringify({ latestUserTurn: input.message.slice(0, 8_000), mode: input.mode, attachments: input.attachments ?? [], conversationContext: (input.conversationContext ?? []).slice(-12).map((message) => ({ ...message, content: message.content.slice(0, 2_000) })), availableAgents: agents, availableSkills: skills, currentSessionGraph: graph }),
     });
-    const router = enforceExplicitReportExport(
+    const router = requireAttachmentCapabilities(enforceExplicitReportExport(
       normalizeRouter(routerAgentDecisionSchema.parse(extractJson(routerCompletion.content)) as ChatRouteDecision['router']),
       input,
-    );
+    ), input);
     validateRouter(router, input, agentIds, skillIds);
     const schedulerCompletion = await model.complete({
       signal, responseFormat: 'json', temperature: 0, maxTokens: 1_800,
       system: `You are the Scheduler Agent for a production multi-Agent runtime. Do not answer and do not change Router intent.
 Use only Router candidate IDs. Activate only Agents useful this turn; do not run every Agent already in the Graph. skippedAgentIds lists prior unused Agent roles. appendAgentIds lists genuinely new active roles.
 For non-task specialist intents, always return direct with that one specialist and no steps. For tasks: direct has no steps; single-agent exactly 1; team 2-3; full-workflow normally has 3-8 dependency-aware steps and is reserved for hard/complex work with justified dependencies. A small implementation plus review is team, not full-workflow. executionWaves contains dependency-ready step IDs. Every active Agent must own a step. Dependencies must form a DAG. synthesisAgentId must be synthesizer.
+For attachment tasks, schedule each required attachment analysis capability. Make reasoning or delivery that uses those attachments depend on the relevant analysis steps. Preserve this turn's goal; do not restart unrelated Agents from earlier turns.
 Return JSON only: {"route":"direct|single-agent|team|full-workflow","activeAgentIds":["..."],"skippedAgentIds":["..."],"appendAgentIds":["..."],"selectedSkillIds":["..."],"executionWaves":[["step-id"]],"steps":[{"id":"...","title":"...","agentId":"...","objective":"...","dependsOn":[],"skillIds":[]}],"requiresReview":false,"synthesisAgentId":"synthesizer","reason":"..."}.`,
       user: JSON.stringify({ latestUserTurn: input.message.slice(0, 8_000), mode: input.mode, routerDecision: router, candidateAgents: agents.filter((agent) => router.candidateAgentIds.includes(agent.id)), candidateSkills: skills.filter((skill) => router.candidateSkillIds.includes(skill.id)), currentSessionGraph: graph }),
     });
@@ -500,7 +564,7 @@ Return JSON only: {"route":"direct|single-agent|team|full-workflow","activeAgent
 };
 
 const difficultyScore: Record<TaskDifficulty, number> = { trivial: 0, easy: 1, moderate: 2, hard: 4, complex: 6 };
-const specialists = new Set(['search-agent', 'academic-search-agent', 'github-research-agent', 'drawing-agent', 'video-agent']);
+const specialists = new Set(['search-agent', 'academic-search-agent', 'github-research-agent', 'drawing-agent', 'video-agent', 'vision-agent', 'document-agent']);
 const graphForSteps = (steps: WorkflowStep[]): AgentGraph => {
   const nodes: AgentGraph['nodes'] = [
     { id: 'orchestrator', agentId: 'orchestrator', role: 'orchestrator', title: '调度 Agent', dependsOn: [], status: 'running' },
@@ -511,7 +575,21 @@ const graphForSteps = (steps: WorkflowStep[]): AgentGraph => {
   edges.push(...steps.map((step) => ({ from: step.id, to: 'synthesizer', kind: 'dependency' as const })));
   return { nodes, edges };
 };
-export const workflowPlanFromChatRoute = (decision: ChatRouteDecision): WorkflowPlan | undefined => {
+// A generation request is still one specialist, but its external write must
+// use the durable execution ledger instead of a connection-bound gateway.
+export const durableMediaRoute = (decision: ChatRouteDecision, objective = ''): ChatRouteDecision => {
+  if (!['image-generation', 'video-generation'].includes(decision.intent)) return decision;
+  const role = decision.intent === 'image-generation' ? 'drawing-agent' : 'video-agent';
+  const steps: TurnSchedulingStep[] = [{ id: 'media-generation', agentId: role,
+    title: role === 'drawing-agent' ? '图像生成' : '视频生成',
+    objective: objective || '完成用户请求的生成或编辑，返回实际服务产物。', dependsOn: [], skillIds: decision.skillIds }];
+  return { ...decision, execution: 'workflow', workflowRoute: 'single-agent', agentRole: role,
+    scheduler: { ...decision.scheduler, route: 'single-agent', activeAgentIds: [role], steps,
+      executionWaves: [['media-generation']], requiresReview: false } };
+};
+
+export const workflowPlanFromChatRoute = (inputDecision: ChatRouteDecision): WorkflowPlan | undefined => {
+  const decision = durableMediaRoute(inputDecision);
   if (decision.execution !== 'workflow') return undefined;
   const profile: TaskProfile = {
     kind: decision.router.taskKind, difficulty: decision.router.difficulty, route: decision.scheduler.route, score: difficultyScore[decision.router.difficulty],
@@ -527,7 +605,9 @@ export const workflowPlanFromChatRoute = (decision: ChatRouteDecision): Workflow
         ? ['完整覆盖用户明确要求的研究维度，不以摘要代替正文。', '关键技术、成熟度、案例、成本和落地策略均有证据或明确的不确定性说明。']
         : [`完成“${step.title}”并给出可验证的结果。`],
       skillIds: reportWritingStep ? unique([...step.skillIds.filter((id) => id !== 'implementation'), 'report-authoring']) : step.skillIds,
-      maxTokens: step.agentId === 'reviewer' || reportWritingStep ? 8_192 : 6_144, maxDurationMs: 120_000, failureStrategy: 'retry',
+      maxTokens: step.agentId === 'reviewer' || reportWritingStep ? 8_192 : 6_144,
+      maxDurationMs: step.agentId === 'drawing-agent' ? 600_000 : step.agentId === 'video-agent' ? 900_000 : 120_000,
+      failureStrategy: 'retry',
       ...(specialists.has(step.agentId) || reportWritingStep ? { agentContract: { source: 'builtin' as const, agentId: step.agentId, displayName: step.title, toolAllowlist: [] } } : {}),
     };
   });

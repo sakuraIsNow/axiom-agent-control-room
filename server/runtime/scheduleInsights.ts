@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { nextRunAtForCadence, type ScheduleCadence } from './scheduleCadence.js';
 import type { ScheduledTrigger } from './scheduler.js';
+import type { CompletionEvidenceSummary } from './contracts.js';
+import { canReuseCompletionArtifact } from './completionEvidence.js';
 
 export type ScheduleRunInsight = {
   id: string;
@@ -9,7 +11,7 @@ export type ScheduleRunInsight = {
   updatedAt: string;
   durationMs: number;
   tokens: { total: number };
-  evidenceSummary?: { status: 'verified' | 'partial' | 'unverified' | 'not-required' };
+  evidenceSummary?: Pick<CompletionEvidenceSummary, 'status' | 'schemaVersion' | 'execution' | 'acceptance' | 'evidenceStatus'>;
 };
 
 export type ScheduleOccurrence = {
@@ -240,17 +242,18 @@ export const buildScheduleInsights = ({
         }, [recent.map((run) => run.id), Math.round(recentTokens), Math.round(baselineTokens)]));
       }
 
-      const recentQuality = recent.map((run) => run.evidenceSummary?.status);
-      const baselineVerified = baseline.some((run) => run.evidenceSummary?.status === 'verified');
-      if (baselineVerified && recentQuality.every((status) => status === 'partial' || status === 'unverified')) {
+      const reusableRun = (run: ScheduleRunInsight) => run.status === 'completed' && canReuseCompletionArtifact(run.evidenceSummary);
+      const baselineReusable = baseline.some(reusableRun);
+      const recentIncomplete = recent.every((run) => run.evidenceSummary?.schemaVersion === 2 && !reusableRun(run));
+      if (baselineReusable && recentIncomplete) {
         suggestions.push(suggestion(schedule, 'quality_decline', {
           severity: 'attention',
-          title: '暂停并检查交付质量',
-          reason: `“${schedule.title}”最近两次没有形成完整验证结果，而此前运行曾通过验证。`,
-          evidence: ['最近两次为部分验证或未验证', '此前运行存在已验证交付'],
+          title: '暂停并检查交付条件',
+          reason: `“${schedule.title}”最近两次未满足结果接续条件；此前运行曾执行完成，并有可追溯来源或人工接受记录。`,
+          evidence: ['最近两次执行未完成，或缺少可追溯来源与人工接受记录', '此前存在可接续的完成结果'],
           recommendedAction: 'pause',
           actionLabel: '确认暂停',
-        }, recent.map((run) => [run.id, run.evidenceSummary?.status])));
+        }, [...recent, ...baseline].map((run) => [run.id, run.status, run.evidenceSummary])));
       }
     }
 

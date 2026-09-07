@@ -1,35 +1,24 @@
-import { AlertTriangle, Check, CircleCheck, CircleDashed, CircleX, Compass, ListChecks, LoaderCircle, RotateCcw, Trash2, UserCheck } from 'lucide-react';
+import { CircleCheck, CircleDashed, CircleX, Compass, ListChecks, LoaderCircle, RotateCcw, Trash2 } from 'lucide-react';
 import type { TaskProfile, WorkflowTaskSummary } from '../../types';
 import { latestUserInput } from '../../lib/conversationInput';
 import { taskStatusLabels } from '../../lib/graphPresentation';
-import { canHumanReviewTask } from '../../lib/humanReviewState';
+import { completionSourceStatus, evidenceSourceLabels } from '../../lib/evidencePresentation';
 import { localizeRuntimeText, taskDifficultyLabel, taskKindLabel, taskReasonLabel, taskRouteLabel, taskStageLabel } from '../../lib/taskPresentation';
 import { CheckpointPanel } from './CheckpointPanel';
 import { TaskCapabilityPanel } from './TaskCapabilityPanel';
+import { TaskActionPanel } from './TaskActionPanel';
 
 type ReviewResult = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
-
-const evidenceStatusLabel = {
-  verified: '交付已核验',
-  partial: '部分交付',
-  unverified: '待核验',
-  'not-required': '无需核验',
-} as const;
 
 export function TaskDetailPanel({
   task,
   sessionTopic,
   taskProfile,
   reviewResult,
-  reviewApprovalTaskId,
-  reviewNote,
-  reviewBusy,
-  onReviewNoteChange,
-  onRequestApprove,
-  onRequestReject,
   onResubmit,
   onDeleteTask,
   onCheckpointTaskCreated,
+  onRecoveryChanged,
 }: {
   task: WorkflowTaskSummary | null;
   sessionTopic: string | null;
@@ -44,13 +33,14 @@ export function TaskDetailPanel({
   onResubmit: (input: string) => void;
   onDeleteTask: (taskId: string) => void;
   onCheckpointTaskCreated: (taskId: string) => Promise<void>;
+  onRecoveryChanged?: (taskId: string, afterSequence?: number) => Promise<void>;
 }) {
   if (!task && !taskProfile) {
     return <aside className="dash-detail-panel dash-empty"><Compass size={18} /><span>选择或提交一个任务查看详情</span></aside>;
   }
   const effectiveProfile = taskProfile ?? task?.profile ?? null;
-  const reviewAvailable = canHumanReviewTask(task, reviewResult, reviewApprovalTaskId);
   const isDirect = effectiveProfile?.route === 'direct';
+  const sourceStatus = completionSourceStatus(task?.evidenceSummary);
   const terminal = task ? ['completed', 'failed', 'cancelled'].includes(task.status) : false;
   const lifecycle = task ? [
     { label: '意图', state: task.input ? 'complete' : 'pending' },
@@ -77,7 +67,7 @@ export function TaskDetailPanel({
         <div><dt>阶段</dt><dd>{taskStageLabel(task.currentStage)}</dd></div>
         <div><dt>难度</dt><dd>{taskDifficultyLabel(task.profile?.difficulty ?? taskProfile?.difficulty)}</dd></div>
       </dl>
-      <div className="dash-detail-pills"><span>{taskKindLabel(task.profile?.kind ?? taskProfile?.kind)}</span><span>{taskRouteLabel(task.profile?.route ?? taskProfile?.route)}</span><span>{task.tokens.total.toLocaleString()} Token</span>{task.evidenceSummary && <span className={`dash-evidence-pill ${task.evidenceSummary.status}`}>{evidenceStatusLabel[task.evidenceSummary.status]}</span>}</div>
+      <div className="dash-detail-pills"><span>{taskKindLabel(task.profile?.kind ?? taskProfile?.kind)}</span><span>{taskRouteLabel(task.profile?.route ?? taskProfile?.route)}</span><span>{task.tokens.total.toLocaleString()} Token</span>{task.evidenceSummary && <span className={`dash-evidence-pill ${sourceStatus}`}>{evidenceSourceLabels[sourceStatus]}</span>}</div>
       <div className="dash-lifecycle" aria-label="执行链">
         <div className="dash-lifecycle-head"><span>执行链</span><small>意图到交付</small></div>
         <div className="dash-lifecycle-track">
@@ -96,6 +86,7 @@ export function TaskDetailPanel({
       </div>
     </div>}
     {task && <CheckpointPanel task={task} onTaskCreated={onCheckpointTaskCreated} />}
+    {task && <TaskActionPanel taskId={task.id} taskStatus={task.status} refreshKey={task.revision} onChanged={onRecoveryChanged ?? onCheckpointTaskCreated} />}
     {task && <TaskCapabilityPanel task={task} onTaskCreated={onCheckpointTaskCreated} />}
     <div className="dash-detail-section">
       <div className="dash-detail-head"><Compass size={14} /><span>路由依据</span></div>
@@ -103,50 +94,22 @@ export function TaskDetailPanel({
         ? <ul>{effectiveProfile.reasons.slice(0, 3).map((reason) => <li key={reason}>{taskReasonLabel(reason)}</li>)}</ul>
         : <p className="dash-detail-empty">暂无路由说明。</p>}
     </div>
-    {reviewResult && <div className="dash-detail-section">
-      <div className="dash-detail-head"><ListChecks size={14} /><span>审查发现</span><em className={reviewResult.approved ? 'approved' : 'rejected'}>{reviewResult.score}/100</em></div>
-      {reviewResult.gaps.length > 0 && <div className="dash-detail-subgroup">
-        <h4>完整性缺口</h4>
-        <ul>{reviewResult.gaps.map((gap) => <li key={gap}>{localizeRuntimeText(gap)}</li>)}</ul>
-      </div>}
-      {reviewResult.requiredCorrections.length > 0 && <div className="dash-detail-subgroup">
-        <h4><AlertTriangle size={12} /> 必须整改项</h4>
-        <ul>{reviewResult.requiredCorrections.map((item) => <li key={item}>{localizeRuntimeText(item)}</li>)}</ul>
-      </div>}
-      {reviewResult.gaps.length === 0 && reviewResult.requiredCorrections.length === 0 && <p className="dash-detail-empty">{reviewResult.summary ? localizeRuntimeText(reviewResult.summary) : '审查员未提出具体缺口。'}</p>}
-    </div>}
     {task?.evidenceSummary && <div className="dash-detail-section dash-evidence-summary">
-      <div className="dash-detail-head"><ListChecks size={14} /><span>交付凭据</span><em className={task.evidenceSummary.status}>{evidenceStatusLabel[task.evidenceSummary.status]}</em></div>
+      <div className="dash-detail-head"><ListChecks size={14} /><span>交付凭据</span><em className={sourceStatus}>{evidenceSourceLabels[sourceStatus]}</em></div>
+      <dl className="dash-detail-fields">
+        <div><dt>执行结果</dt><dd>{task.evidenceSummary.execution === 'completed' ? '执行完成' : task.evidenceSummary.execution === 'partial' ? '执行未完成' : '执行待核对'}</dd></div>
+        <div><dt>人工接受</dt><dd>{task.evidenceSummary.schemaVersion === 2 && task.evidenceSummary.acceptance === 'accepted' ? '已接受' : '未记录'}</dd></div>
+        <div><dt>事实核验</dt><dd>事实待核验</dd></div>
+      </dl>
       <div className="dash-evidence-grid">
         <span><strong>{task.evidenceSummary.completedSteps}/{task.evidenceSummary.totalSteps}</strong> 步骤完成</span>
-        <span><strong>{task.evidenceSummary.verifiedEvidenceItems ?? 0}</strong> 已验证</span>
-        <span><strong>{task.evidenceSummary.supportedEvidenceItems ?? 0}</strong> 来源支持</span>
-        <span><strong>{task.evidenceSummary.unverifiedEvidenceItems ?? task.evidenceSummary.evidenceItems}</strong> 未验证</span>
-        <span className={(task.evidenceSummary.contradictedEvidenceItems ?? 0) > 0 ? 'is-conflicted' : ''}><strong>{task.evidenceSummary.contradictedEvidenceItems ?? 0}</strong> 存在冲突</span>
+        <span><strong>{sourceStatus === 'supported' ? task.evidenceSummary.supportedEvidenceItems ?? 0 : 0}</strong> 来源可追溯</span>
+        <span><strong>{sourceStatus === 'supported' ? task.evidenceSummary.unverifiedEvidenceItems ?? task.evidenceSummary.evidenceItems : task.evidenceSummary.evidenceItems}</strong> 来源未核对</span>
         <span><strong>{task.evidenceSummary.recoveredFailures ?? 0}</strong> 已恢复失败</span>
         <span><strong>{task.evidenceSummary.artifactRefs}</strong> 个 Artifact</span>
         <span><strong>{task.evidenceSummary.toolReceipts}</strong> 次工具回执</span>
       </div>
       {task.evidenceSummary.gaps.length > 0 && <ul className="dash-evidence-gaps">{task.evidenceSummary.gaps.slice(0, 3).map((gap) => <li key={gap}>{localizeRuntimeText(gap)}</li>)}</ul>}
     </div>}
-    {reviewAvailable && <section className="dash-human-review" data-testid="human-review-controls" aria-labelledby="dash-human-review-title">
-      <div className="dash-human-review-head">
-        <span><UserCheck size={15} /><strong id="dash-human-review-title">人工审核</strong></span>
-        <em>{reviewResult!.score}/100</em>
-      </div>
-      <textarea
-        value={reviewNote}
-        onChange={(event) => onReviewNoteChange(event.target.value)}
-        rows={3}
-        maxLength={2000}
-        disabled={reviewBusy}
-        aria-label="审核意见"
-        placeholder="填写审核意见（可选）"
-      />
-      <div className="dash-human-review-actions">
-        <button type="button" className="reject" onClick={onRequestReject} disabled={reviewBusy}><RotateCcw size={14} />驳回并整改</button>
-        <button type="button" className="approve" onClick={onRequestApprove} disabled={reviewBusy}><Check size={15} />批准交付</button>
-      </div>
-    </section>}
   </aside>;
 }

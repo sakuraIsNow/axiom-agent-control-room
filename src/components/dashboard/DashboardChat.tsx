@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { ArrowDown, Bot, Check, Copy, FileText, MessageSquareText, Paperclip, Pause, Play, Plus, Route, RotateCcw, Trash2, UserCheck, X } from 'lucide-react';
+import { ArrowDown, Bot, Copy, FileText, MessageSquareText, Paperclip, Pause, Play, Plus, Route, Trash2, X } from 'lucide-react';
 import { MorphIcon } from 'morphicons/react';
 import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, RunEvent, Session, TopologyAgent } from '../../types';
 import type { GuidanceState, ReviewResultState, RouteInsightState } from './dashboardTypes';
@@ -9,6 +9,9 @@ import { ChatFileArtifact, ChatMessageMarkdown } from './ChatArtifact';
 import { isConversationSubmitKey } from '../../lib/conversationInteraction';
 import { useConversationScroll } from '../../lib/useConversationScroll';
 import { useUiLanguage } from '../../lib/uiLanguage';
+import { TaskActionPanel } from './TaskActionPanel';
+import { TaskMedia } from './TaskMedia';
+import { taskMediaPath } from '../../lib/taskMedia';
 
 const modeLabel: Record<AgentMode, string> = { analyze: '分析', build: '构建', decide: '决策' };
 const phaseLabel: Record<AgentPhase, string> = {
@@ -65,13 +68,17 @@ type Props = {
   onReviewNoteChange: (value: string) => void;
   onRequestApprove: () => void;
   onRequestReject: () => void;
+  actionTaskId?: string | null;
+  actionTaskStatus?: string;
+  actionRefreshKey?: string | number;
+  onTaskActionChanged: (taskId: string, afterSequence?: number) => Promise<void>;
 };
 
 export function DashboardChat(props: Props) {
   const {
     sessions, activeSession, provider, phase, mode, draft, isRunning, agentActivity, error, onDraftChange, onModeChange,
     onSend, onStop, onPause, onResume, canGuide, guidanceBusy, guidanceState, onGuidance, routeInsight, onNewTask, onSelectSession, onDeleteSession, attachments, onAddAttachments, onRemoveAttachment,
-    agents, graph, events, selectedNodeId, onSelectAgent, reviewResult, reviewNote, reviewBusy, onReviewNoteChange, onRequestApprove, onRequestReject,
+    agents, graph, events, selectedNodeId, onSelectAgent, actionTaskId, actionTaskStatus, actionRefreshKey, onTaskActionChanged,
   } = props;
   const { t } = useUiLanguage();
   const { scrollRef: messageListRef, onScroll, showLatest, scrollToLatest } = useConversationScroll(activeSession.id, activeSession.messages);
@@ -92,9 +99,6 @@ export function DashboardChat(props: Props) {
       : phase === 'context'
         ? '上下文 Agent 正在整理资料'
         : '执行 Agent 正在组织回答');
-  const reviewIssues = reviewResult
-    ? [...reviewResult.requiredCorrections, ...reviewResult.gaps].filter(Boolean).slice(0, 3)
-    : [];
 
   return <section className="dash-chat-workspace" aria-label="对话工作区">
     <div className="dash-chat-side">
@@ -145,7 +149,9 @@ export function DashboardChat(props: Props) {
           <div className="dash-chat-message-meta"><span>{message.role === 'user' ? '你' : provider}</span><time>{new Date(message.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>
           <div className="dash-chat-message-content">
             {message.attachments && message.attachments.length > 0 && <div className="dash-chat-attachments">
-              {message.attachments.map((attachment) => attachment.kind === 'video'
+              {message.attachments.map((attachment) => attachment.kind !== 'file' && taskMediaPath(attachment.url, window.location.origin)
+                ? <TaskMedia key={attachment.id} src={attachment.url} alt={attachment.alt} />
+                : attachment.kind === 'video'
                 ? <div key={attachment.id} className="dash-chat-video-attachment"><video controls preload="metadata" src={attachment.url} poster={attachment.poster} aria-label={attachment.alt} /><a href={attachment.url} target="_blank" rel="noreferrer">打开视频</a></div>
                 : attachment.kind === 'file'
                   ? <ChatFileArtifact key={attachment.id} attachment={attachment} />
@@ -156,27 +162,7 @@ export function DashboardChat(props: Props) {
           </div>
           {message.content && <button type="button" className="dash-chat-copy" title="复制" onClick={() => void navigator.clipboard.writeText(message.content)}><Copy size={12} /></button>}
         </article>)}
-        {reviewResult && <section className="dash-chat-review" data-testid="chat-human-review-controls" aria-labelledby="dash-chat-review-title">
-          <header>
-            <span className="dash-chat-review-icon"><UserCheck size={17} /></span>
-            <div><strong id="dash-chat-review-title">需要你决定下一步</strong><span>质量审查未通过，Agent 已暂停在交付前。</span></div>
-            <em>{reviewResult.score}/100</em>
-          </header>
-          {reviewIssues.length > 0 && <ul>{reviewIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}
-          <textarea
-            value={reviewNote}
-            onChange={(event) => onReviewNoteChange(event.target.value)}
-            rows={2}
-            maxLength={2000}
-            disabled={reviewBusy}
-            aria-label="审核意见"
-            placeholder="补充整改要求（可选）"
-          />
-          <div className="dash-chat-review-actions">
-            <button type="button" className="revise" onClick={onRequestReject} disabled={reviewBusy}><RotateCcw size={14} />继续整改</button>
-            <button type="button" className="deliver" onClick={onRequestApprove} disabled={reviewBusy}><Check size={15} />按当前结果交付</button>
-          </div>
-        </section>}
+        {actionTaskId && <TaskActionPanel taskId={actionTaskId} taskStatus={actionTaskStatus} refreshKey={actionRefreshKey} onChanged={onTaskActionChanged} context="chat" />}
         {error && <div className="dash-chat-error">{error}</div>}
       </div>
 

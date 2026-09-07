@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type CompletionEvidenceSummary, type InAppNotification, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
+import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type InAppNotification, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
+import { canReuseCompletionArtifact, parseCompletionEvidence } from './completionEvidence.js';
 import { isBuiltinRoleId } from './agentStore.js';
 import type { TaskCoordinator } from './coordinator.js';
 import type { EventHub } from './eventHub.js';
@@ -18,11 +19,12 @@ import { InMemoryScheduler, PostgresScheduler, ScheduleHealthActionConflictError
 import { verifyPrincipal } from './principal.js';
 import { DockerSandboxExecutor } from './toolExecutor.js';
 import type { ModelClient, OpenAICompatibleModelClient } from './modelClient.js';
-import type { ToolRegistry } from './toolRegistry.js';
+import { ToolExecutionResolutionConflictError, type ToolRegistry } from './toolRegistry.js';
 import { classifyTask } from './orchestrator.js';
 import { builtInTemplates, getBuiltInTemplate } from './templateCatalog.js';
 import { agentWorkflowCanvasSchema, compileAgentWorkflow } from './workflowCompiler.js';
 import { workflowSpecialistCatalog } from './workflowSpecialists.js';
+import { providerConfigSchema, type ProviderConfig, type ProviderBindingOwner, type ProviderBindingReference } from './providerBindings.js';
 import { runtimeSkillCatalog } from './skillCatalog.js';
 import { verifyWebhookRequest } from './webhookSecurity.js';
 import { chatRouteDecisionSchema, fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute, type ChatRouteDecision, type RoutingAgentDirectoryEntry } from './chatRouter.js';
@@ -31,6 +33,9 @@ import { nextRunAtForCadence, scheduleCadenceSchema } from './scheduleCadence.js
 import { fallbackScheduleDraft, parseScheduleDraft, scheduleAgentPrompt } from './scheduleAgent.js';
 import { checkpointsFromEvents, diffCheckpointToTask, mergeCheckpointBranch } from './checkpointRuntime.js';
 import { aggregateContextSummaryQuality, attachPersistedContextMetadata, buildPersistedContextSummary, type ContextWindowOptions, type DurableContextSourceMessage } from './contextSummary.js';
+import { enrichConversationSummary, loadOwnedWorkflowConversation, prepareConversationContext } from './conversationContextService.js';
+import { retrieveContextSources, validateStructuredContext } from './structuredContext.js';
+import { loadTaskInputAttachments, persistTaskInputAttachments, taskInputSourceSchema, type TaskInputAttachmentSnapshot } from './taskInputAttachments.js';
 import { buildOperationsAlerts } from './operationsAlerts.js';
 import { buildInAppNotifications } from './inAppNotifications.js';
 import { createPluginRelease, inspectPluginCompatibility } from './pluginCompatibility.js';
@@ -48,6 +53,7 @@ const executingTaskStatuses = new Set<TaskStatus>(['queued', 'planning', 'runnin
 // migrated into the regular conversation list, otherwise deleting a normal
 // conversation is undone the next time Nexus tasks are listed.
 const isAgentNexusSessionId = (sessionId: string) => sessionId.startsWith('agent-nexus-');
+const isMiniAppSessionId = (sessionId: string) => /^plugin-[0-9a-f-]{36}-/iu.test(sessionId);
 const isLegacyWorkflowSessionId = (sessionId: string) => sessionId.startsWith('workflow-session-') || sessionId.startsWith('qa-workflow-session-');
 const isLikelyAgentWorkflowTask = (task: { templateId?: string; sessionId: string; title: string; plan?: { profile?: { route?: string } } }) => Boolean(
   task.templateId
@@ -82,6 +88,21 @@ const deleteTerminalWorkflowTasks = async (
   }
 };
 
+const contextSourceMessageSchema = z.object({
+  id: z.string().min(1).max(200),
+  role: z.enum(['user', 'assistant']),
+  content: z.string().max(240_000),
+  taskId: z.string().max(200).optional(),
+  attachments: z.array(z.object({ id: z.string().max(200).optional(), kind: z.string().max(40).optional(), name: z.string().max(300).optional(), mimeType: z.string().max(150).optional(), size: z.number().nonnegative().optional() })).max(6).optional(),
+});
+const contextSourceSelectionSchema = z.object({
+  messageIds: z.array(z.string().min(1).max(200)).max(20).optional(),
+  directiveIds: z.array(z.string().min(1).max(100)).max(20).optional(),
+  query: z.string().min(1).max(500).optional(),
+  offset: z.number().int().nonnegative().max(1_000_000).optional(),
+  limit: z.number().int().min(1).max(20).optional(),
+  maxCharacters: z.number().int().min(1).max(24_000).optional(),
+}).strict().refine((value) => Boolean(value.messageIds?.length || value.directiveIds?.length || value.query), { message: 'A source selection is required.' });
 const createTaskSchema = z.object({
   sessionId: z.string().min(1).max(160),
   templateId: z.string().uuid().optional(),
@@ -90,6 +111,8 @@ const createTaskSchema = z.object({
   mode: z.enum(['analyze', 'build', 'decide']).default('analyze'),
   model: z.string().min(1).max(160).optional(),
   modelCredentialId: z.string().uuid().optional(),
+  providerConfig: providerConfigSchema.optional(),
+  mediaRequest: z.object({ mode: z.enum(['generate', 'edit']).optional(), size: z.string().regex(/^\d{2,5}x\d{2,5}$/u).optional(), count: z.number().int().min(1).max(4).optional(), quality: z.enum(['low', 'medium', 'high', 'auto']).optional() }).strict().optional(),
   policy: z.object({
     requirePlanApproval: z.boolean().default(false),
     maxTokens: z.number().int().min(1_000).max(10_000_000).optional(),
@@ -99,34 +122,9 @@ const createTaskSchema = z.object({
   }).optional(),
   /** Validated output of the per-turn Router and Scheduler Agents. */
   routing: chatRouteDecisionSchema.optional(),
+  contextMessages: z.array(contextSourceMessageSchema).min(1).max(400).optional(),
+  inputSource: taskInputSourceSchema.optional(),
 });
-
-const completionEvidenceStatuses = new Set<CompletionEvidenceSummary['status']>(['verified', 'partial', 'unverified', 'not-required']);
-const completionEvidenceReviews = new Set<CompletionEvidenceSummary['review']>(['approved', 'not-required', 'pending', 'rejected']);
-const finiteCount = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
-const parseCompletionEvidence = (value: unknown): CompletionEvidenceSummary | undefined => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const source = value as Record<string, unknown>;
-  if (typeof source.status !== 'string' || !completionEvidenceStatuses.has(source.status as CompletionEvidenceSummary['status'])) return undefined;
-  if (typeof source.review !== 'string' || !completionEvidenceReviews.has(source.review as CompletionEvidenceSummary['review'])) return undefined;
-  const counts = ['totalSteps', 'completedSteps', 'failedSteps', 'skippedSteps', 'acceptanceCriteria', 'evidenceItems', 'artifactRefs', 'toolReceipts'] as const;
-  const parsedCounts = Object.fromEntries(counts.map((key) => [key, finiteCount(source[key])])) as Record<(typeof counts)[number], number | null>;
-  if (Object.values(parsedCounts).some((count) => count === null)) return undefined;
-  const gaps = Array.isArray(source.gaps) && source.gaps.every((gap) => typeof gap === 'string') ? source.gaps.slice(0, 8) as string[] : [];
-  return {
-    status: source.status as CompletionEvidenceSummary['status'],
-    totalSteps: parsedCounts.totalSteps!,
-    completedSteps: parsedCounts.completedSteps!,
-    failedSteps: parsedCounts.failedSteps!,
-    skippedSteps: parsedCounts.skippedSteps!,
-    acceptanceCriteria: parsedCounts.acceptanceCriteria!,
-    evidenceItems: parsedCounts.evidenceItems!,
-    artifactRefs: parsedCounts.artifactRefs!,
-    toolReceipts: parsedCounts.toolReceipts!,
-    review: source.review as CompletionEvidenceSummary['review'],
-    gaps,
-  };
-};
 
 const reportExportSchema = z.object({
   sessionId: z.string().min(1).max(160),
@@ -301,6 +299,8 @@ const generatedMiniAppSchema = z.object({
   summary: z.string().min(1).max(1_000),
 }).strict();
 const runPluginSchema = z.object({
+  providerConfig: providerConfigSchema.optional(),
+  routing: chatRouteDecisionSchema.optional(),
   sessionId: z.string().min(1).max(160),
   input: z.string().max(80_000).optional(),
   values: z.record(z.string(), z.union([z.string(), z.number()])).optional(),
@@ -351,12 +351,14 @@ const saveAgentWorkflowSchema = z.object({
 }).strict();
 
 const runAgentWorkflowSchema = z.object({
+  providerConfig: providerConfigSchema.optional(),
   sessionId: z.string().min(1).max(160),
   input: z.string().min(1).max(80_000),
   title: z.string().min(1).max(200).optional(),
   model: z.string().min(1).max(160).optional(),
   modelCredentialId: z.string().uuid().optional(),
   policy: createTaskSchema.shape.policy,
+  conversationTurn: contextSourceMessageSchema.refine((message) => message.role === 'user', { message: 'A user turn is required.' }).optional(),
 }).strict();
 
 const scheduleSchema = createTaskSchema.omit({ templateId: true, routing: true, model: true, policy: true }).extend({
@@ -369,6 +371,7 @@ const scheduleSchema = createTaskSchema.omit({ templateId: true, routing: true, 
 });
 
 const scheduleDraftRequestSchema = z.object({
+  providerConfig: providerConfigSchema.optional(),
   request: z.string().min(1).max(8_000),
   sessionId: z.string().min(1).max(160),
   timezone: z.string().min(1).max(100).refine((value) => {
@@ -411,6 +414,7 @@ const noteSchema = z.object({
 });
 
 const guidanceSchema = z.object({
+  expectedRevision: z.number().int().nonnegative().optional(),
   message: z.string().min(1).max(8_000),
   behavior: z.enum(['continue', 'replan']).default('continue'),
 }).strict();
@@ -661,6 +665,7 @@ const templateBundle = (template: WorkflowTemplate) => ({
 const enqueueErrorResponse = (error: unknown) => {
   const candidate = error as { code?: unknown; constraint?: unknown; message?: unknown };
   const message = typeof candidate.message === 'string' ? candidate.message : 'Task enqueue failed.';
+  if (/AXIOM_PROVIDER_SECRET/u.test(message)) return { status: 503 as const, message };
   if (/not found/i.test(message)) return { status: 404 as const, message };
   if (candidate.code === '23505' || candidate.constraint === 'idx_tasks_idempotency') return { status: 409 as const, message };
   if (/^(?:08|53|57)/.test(String(candidate.code ?? '')) || /(?:ECONN|connection|database|pool|timeout|timed out|unavailable|network)/i.test(message)) {
@@ -697,6 +702,8 @@ export const createTaskApi = (dependencies: {
   agents?: AgentStore;
   memory?: TencentMemoryClient;
   resolveModelCredential?: (credentialId: string, tenantId: string, userId: string) => Promise<{ id: string; model: string } | null>;
+  bindProviders?: (input: { providerConfig?: ProviderConfig; modelCredentialId?: string; providerBindingId?: string }, tenantId: string, userId: string) => Promise<ProviderBindingReference>;
+  boundModelFactory?: (owner: ProviderBindingOwner) => Promise<ModelClient>;
   harnessAdapter?: HarnessAdapter;
   outboundNotifications?: OutboundNotificationManager;
   businessCapabilities?: BusinessCapabilityStore;
@@ -705,6 +712,10 @@ export const createTaskApi = (dependencies: {
   modelRouting?: ModelRoutingPolicy;
 }) => {
   const api = new Hono();
+  api.onError((error, c) => {
+    if (error instanceof TaskRevisionConflictError) return c.json({ error: 'The task changed. Refresh before submitting this action.', code: error.code, expectedRevision: error.expectedRevision, actualRevision: error.actualRevision }, 409);
+    throw error;
+  });
   const { store, hub, coordinator } = dependencies;
   const metrics = dependencies.metrics;
   const artifactStore = dependencies.artifactStore === undefined ? createArtifactStore() : dependencies.artifactStore;
@@ -726,6 +737,61 @@ export const createTaskApi = (dependencies: {
   const toolExecutor = new DockerSandboxExecutor();
   const model = dependencies.model;
   const toolRegistry = dependencies.toolRegistry;
+  const actionRevisions = new WeakMap<Request, number>();
+  const hasCurrentToolRejection = async (task: import('./contracts.js').WorkflowTask) => {
+    const rejected = task.toolApprovals?.filter((approval) => approval.status === 'rejected') ?? [];
+    if (!rejected.length) return false;
+    const events = await store.getEvents(task.id);
+    return rejected.some((approval) => {
+      const reset = events.filter((event) => event.type === 'plan.replanned' || event.type === 'task.resumed'
+        || (['node.rerun_requested', 'node.replace_requested'].includes(event.type)
+          && (event.payload.stepId === approval.stepId || (Array.isArray(event.payload.invalidatedSteps) && event.payload.invalidatedSteps.includes(approval.stepId))))).at(-1);
+      if (!reset) return true;
+      const rejection = events.filter((event) => event.type === 'tool.rejected'
+        && event.payload.approval && typeof event.payload.approval === 'object'
+        && (event.payload.approval as { id?: string }).id === approval.id).at(-1);
+      return rejection ? rejection.sequence > reset.sequence : Date.parse(approval.decidedAt ?? approval.requestedAt) > Date.parse(reset.timestamp);
+    });
+  };
+  api.use('/tasks/:taskId/*', async (c, next) => {
+    const action = c.req.path.match(/\/tasks\/[^/]+\/(.+)$/u)?.[1] ?? '';
+    if (c.req.method !== 'POST' || !new Set(['pause', 'resume', 'replan', 'notes', 'guidance', 'approve-plan', 'reject-plan', 'approve-review', 'reject-review', 'approve-tool', 'reject-tool', 'tools/resume']).has(action)) return next();
+    if (!runtimeIdSchema.safeParse(c.req.param('taskId')).success) return c.json({ error: 'Task not found.' }, 404);
+    const principal = identity(c.req.raw.headers);
+    const task = await store.getTask(c.req.param('taskId'), principal.tenantId);
+    if (!task) return c.json({ error: 'Task not found.' }, 404);
+    if (principal.role === 'viewer' || (task.userId !== principal.userId && !['owner', 'admin'].includes(principal.role))) return c.json({ error: 'Only the task owner or tenant admin can manage this task.' }, 403);
+    const body = await c.req.raw.clone().json().catch(() => ({})) as Record<string, unknown>;
+    if (body.expectedRevision !== undefined) {
+      const expected = z.number().int().nonnegative().safeParse(body.expectedRevision);
+      if (!expected.success) return c.json({ error: 'Invalid task revision.' }, 400);
+      if (task.revision !== expected.data) throw new TaskRevisionConflictError(task.id, expected.data, task.revision);
+      actionRevisions.set(c.req.raw, expected.data);
+    }
+    return next();
+  });
+  api.use('/tasks/:taskId/*', async (c, next) => {
+    if (c.req.method !== 'POST' || !toolRegistry?.executionStore) return next();
+    const suffix = c.req.path.match(/\/tasks\/[^/]+\/(.+)$/u)?.[1] ?? '';
+    const restarting = new Set(['resume', 'retry', 'replan', 'approve-plan', 'approve-review', 'approve-tool', 'reject-review', 'reject-tool', 'harness/start', 'harness/resume']);
+    const nodeRestart = /^nodes\/[^/]+\/(?:retry|rerun|resume|replace|skip|complete)$/u.test(suffix);
+    const checkpoint = /^checkpoints\/[^/]+\/(?:branch|merge)$/u.test(suffix);
+    const body = suffix === 'guidance' || checkpoint ? await c.req.raw.clone().json().catch(() => null) as Record<string, unknown> | null : null;
+    if (!restarting.has(suffix) && !nodeRestart && !checkpoint && !(suffix === 'guidance' && body?.behavior === 'replan')) return next();
+    if (!runtimeIdSchema.safeParse(c.req.param('taskId')).success) return c.json({ error: 'Task not found.' }, 404);
+    const principal = identity(c.req.raw.headers);
+    const task = await store.getTask(c.req.param('taskId'), principal.tenantId);
+    if (!task) return next();
+    if (task.userId !== principal.userId && !['owner', 'admin'].includes(principal.role)) return c.json({ error: 'Task not found.' }, 404);
+    const taskIds = [task.id, ...(checkpoint && typeof body?.branchTaskId === 'string' ? [body.branchTaskId] : [])];
+    for (const taskId of taskIds) {
+      await toolRegistry.executionStore.reconcileExpiredForTask(principal.tenantId, taskId);
+      if (await toolRegistry.executionStore.hasUnresolvedForTask(principal.tenantId, taskId)) {
+        return c.json({ error: '工具仍在执行或结果尚未核对。请先处理任务详情中的执行核对。', code: 'TOOL_OUTCOME_REVIEW_REQUIRED' }, 409);
+      }
+    }
+    return next();
+  });
   const templates = dependencies.templates;
   const plugins = dependencies.plugins;
   const agents = dependencies.agents;
@@ -770,11 +836,17 @@ export const createTaskApi = (dependencies: {
   ) => {
     if (!artifactStore || !task) return;
     const ids = new Set<string>([`result:${task.id}`]);
+    for (const attachment of task.plan?.inputAttachments ?? []) ids.add(attachment.artifactId);
     for (const result of task.stepResults ?? []) {
       for (const artifact of result.artifacts ?? []) ids.add(artifact.id);
     }
     const events = eventSnapshot ?? await store.getEvents(task.id).catch(() => []);
     for (const event of events) {
+      if (event.type === 'task.created' && Array.isArray(event.payload.inputAttachments)) {
+        for (const attachment of event.payload.inputAttachments) {
+          if (attachment && typeof attachment === 'object' && typeof attachment.artifactId === 'string' && attachment.artifactId.startsWith('conversation-input:')) ids.add(attachment.artifactId);
+        }
+      }
       if (event.type !== 'artifact.created' && event.type !== 'tool.completed') continue;
       const payload = event.payload as Record<string, unknown>;
       if (typeof payload.artifactId === 'string') ids.add(payload.artifactId);
@@ -845,7 +917,7 @@ export const createTaskApi = (dependencies: {
     }
     return { artifactIds, approvalEventIds, unresolvedItems, durableFacts };
   };
-  type CreateTaskData = z.infer<typeof createTaskSchema>;
+  type CreateTaskData = z.infer<typeof createTaskSchema> & { providerBindingId?: string };
 
   const taskStage = (task: Awaited<ReturnType<TaskStore['getTask']>>, eventSummary: TaskEventSummary) => {
     if (!task) return 'unknown';
@@ -975,6 +1047,10 @@ export const createTaskApi = (dependencies: {
     return messages.slice(-400);
   };
 
+  const workflowConversation = async (workflowId: string, tenantId: string, userId: string) => {
+    return loadOwnedWorkflowConversation(store, workflowId, tenantId, userId);
+  };
+
   const enqueueTask = async (
     input: CreateTaskData,
     tenantId: string,
@@ -994,9 +1070,11 @@ export const createTaskApi = (dependencies: {
       : null);
     if (input.templateId && !template) throw new Error('Workflow template not found.');
     if (template && template.status !== 'published') throw new Error('Only published workflow templates can create tasks.');
+    if (input.providerConfig && !dependencies.bindProviders) throw new Error('Durable user model configuration is unavailable.');
     let credentialModel: string | undefined;
     let modelCredentialId: string | undefined;
-    if (input.modelCredentialId) {
+    const binding = await dependencies.bindProviders?.(input, tenantId, userId);
+    if (input.modelCredentialId && !binding) {
       const credential = dependencies.resolveModelCredential
         ? await dependencies.resolveModelCredential(input.modelCredentialId, tenantId, userId)
         : null;
@@ -1007,6 +1085,30 @@ export const createTaskApi = (dependencies: {
     const effectivePolicy = { ...(template?.definition.policy ?? {}), ...(input.policy ?? {}) };
     const routedPlan = input.routing ? workflowPlanFromChatRoute(input.routing) : undefined;
     const initialPlan = template?.definition.plan ?? routedPlan;
+    if (binding?.capabilities) {
+      const requiredProvider = { 'vision-agent': 'vision', 'drawing-agent': 'image', 'video-agent': 'video', 'search-agent': 'search', 'academic-search-agent': 'search', 'github-research-agent': 'search' } as const;
+      for (const step of initialPlan?.steps ?? []) {
+        const agentId = step.agentContract?.agentId ?? step.role;
+        const kind = requiredProvider[agentId as keyof typeof requiredProvider];
+        if (kind && binding.capabilities[kind] === false) throw new Error(`The ${kind} provider selected for this task is not configured. Update model settings before starting this Agent.`);
+      }
+    }
+    if (input.inputSource?.attachments.length && !initialPlan) throw new Error('Attachment tasks require an executable workflow plan.');
+    if (input.contextMessages) {
+      const latest = input.contextMessages.at(-1);
+      if (latest?.role !== 'user' || new Set(input.contextMessages.map((message) => message.id)).size !== input.contextMessages.length) throw new Error('Conversation context requires unique message IDs and a final user turn.');
+      if (input.inputSource && input.inputSource.messageId !== latest.id) throw new Error('Attachment source must match the exact current user turn.');
+      const session = await store.getSession(input.sessionId, tenantId, userId);
+      if (input.modelCredentialId && !dependencies.reportModelFactory) throw new Error('The selected text model is unavailable for context extraction.');
+      const contextModel = binding && dependencies.boundModelFactory
+        ? await dependencies.boundModelFactory({ tenantId, userId, providerBindingId: binding.providerBindingId }) : input.modelCredentialId
+        ? await dependencies.reportModelFactory!(input.modelCredentialId, tenantId, userId) : model;
+      const prepared = await prepareConversationContext(input.sessionId, input.contextMessages, session?.contextSummary, contextModel, AbortSignal.timeout(45_000));
+      input = { ...input, input: prepared.window.messages.map((message) => `${message.role === 'user' ? 'USER' : 'ASSISTANT'}:\n${message.content}`).join('\n\n') };
+      metadata = { ...metadata, ...(prepared.summary ? { contextSummary: prepared.summary } : {}), originalTurn: latest };
+    }
+    const inputAttachments = await persistTaskInputAttachments(input.inputSource, { tenantId, userId, sessionId: input.sessionId }, artifactStore);
+    if (inputAttachments.length) metadata = { ...metadata, inputAttachments };
     const createInput = {
       tenantId,
       userId,
@@ -1015,12 +1117,15 @@ export const createTaskApi = (dependencies: {
       title: input.title?.trim() || input.input.trim().slice(0, 80),
       input: [template?.definition.promptPrefix, input.input.trim()].filter(Boolean).join('\n\n'),
       mode: input.mode,
-      model: input.model?.trim() || template?.definition.model || credentialModel,
+      model: binding?.model || input.model?.trim() || template?.definition.model || credentialModel,
       modelCredentialId,
+      providerBindingId: binding?.providerBindingId ?? input.providerBindingId,
       policy: effectivePolicy,
       idempotencyKey: normalizedIdempotencyKey,
       plan: initialPlan ? {
         ...initialPlan,
+        ...(input.mediaRequest ? { mediaRequest: input.mediaRequest } : {}),
+        ...(inputAttachments.length ? { inputAttachments } : {}),
         version: initialPlan.version ?? 1,
         approvalStatus: effectivePolicy.requirePlanApproval ? 'pending' as const : 'approved' as const,
         ...(!effectivePolicy.requirePlanApproval ? {
@@ -1050,6 +1155,9 @@ export const createTaskApi = (dependencies: {
       throw error;
     }
     metrics?.recordTask('created');
+    for (const attachment of inputAttachments) {
+      await artifactCatalog?.register({ id: attachment.artifactId, tenantId, taskId: task.id, source: 'upload', storageKey: attachment.storageKey, bytes: attachment.bytes, mimeType: attachment.mimeType, referenceKey: `task:${task.id}:input:${attachment.sourceMessageId}:${attachment.sourceAttachmentId}` });
+    }
     const created = await store.appendEvent(task, {
       type: 'task.created',
       payload: {
@@ -1150,7 +1258,8 @@ export const createTaskApi = (dependencies: {
       availableAgents,
       availableSkills: runtimeSkillCatalog.map((skill) => ({ id: skill.id, label: skill.label, description: skill.description })),
     };
-    const routeModel = dependencies.scheduleModelFactory
+    const routeModel = trigger.providerBindingId && dependencies.boundModelFactory
+      ? await dependencies.boundModelFactory(trigger) : dependencies.scheduleModelFactory
       ? await dependencies.scheduleModelFactory(trigger.modelCredentialId, trigger.tenantId, trigger.userId)
       : model;
     const decision = routeModel
@@ -1163,7 +1272,7 @@ export const createTaskApi = (dependencies: {
     if (!trigger.inputArtifact) return { input: trigger.input };
     const sourceTask = await store.getTask(trigger.inputArtifact.sourceTaskId, trigger.tenantId);
     if (sourceTask && (sourceTask.userId !== trigger.userId || sourceTask.status !== 'completed')) {
-      throw new Error('日程接续的已验证结果已不可用。');
+      throw new Error('日程接续的结果已不可用。');
     }
     const content = await artifactStore?.get(trigger.inputArtifact.artifactId, trigger.tenantId) ?? sourceTask?.result;
     if (!content) throw new Error('日程接续的 Artifact 内容已不可用。');
@@ -1173,7 +1282,7 @@ export const createTaskApi = (dependencies: {
     }
     const excerpt = content.slice(0, 24_000);
     return {
-      input: `${trigger.input}\n\n[已验证日程输入]\n来源：${trigger.inputArtifact.title}\nArtifact：${trigger.inputArtifact.artifactId}\n版本：任务 revision ${trigger.inputArtifact.sourceTaskRevision} / sha256 ${trigger.inputArtifact.contentSha256}\n内容：\n${excerpt}${content.length > excerpt.length ? '\n[内容已按上下文预算截断，完整结果保留在 Artifact 中]' : ''}`,
+      input: `${trigger.input}\n\n[已固定版本的日程输入]\n来源：${trigger.inputArtifact.title}\nArtifact：${trigger.inputArtifact.artifactId}\n版本：任务 revision ${trigger.inputArtifact.sourceTaskRevision} / sha256 ${trigger.inputArtifact.contentSha256}\n内容：\n${excerpt}${content.length > excerpt.length ? '\n[内容已按上下文预算截断，完整结果保留在 Artifact 中]' : ''}`,
       artifact: trigger.inputArtifact,
     };
   };
@@ -1216,6 +1325,7 @@ export const createTaskApi = (dependencies: {
       artifacts: artifactStore,
       artifactCatalog,
       modelRouting: dependencies.modelRouting,
+      bindProviders: dependencies.bindProviders,
       enterpriseGovernance: dependencies.enterpriseGovernance,
       memory,
       integrationCredentials: dependencies.integrationCredentials,
@@ -1223,7 +1333,11 @@ export const createTaskApi = (dependencies: {
         const cadence = input.runAt
           ? { kind: 'once' as const, runAt: input.runAt, timezone: 'Asia/Shanghai' }
           : { kind: 'interval' as const, intervalSeconds: input.intervalSeconds ?? 86_400, timezone: 'Asia/Shanghai' };
-        const schedule = await scheduler.upsert({ tenantId: input.tenantId, userId: input.userId, sessionId: input.sessionId, title: input.title, input: `${input.instruction}\n\n来源任务：${input.taskId}`, mode: input.mode, cadence, enabled: true });
+        const source = await store.getTask(input.taskId, input.tenantId);
+        if (!source || source.userId !== input.userId) throw new Error('Source task is unavailable for this schedule.');
+        const binding = await dependencies.bindProviders?.(source, input.tenantId, input.userId);
+        const schedule = await scheduler.upsert({ tenantId: input.tenantId, userId: input.userId, sessionId: input.sessionId, title: input.title, input: `${input.instruction}\n\n来源任务：${input.taskId}`, mode: input.mode, cadence, enabled: true,
+          providerBindingId: binding?.providerBindingId, modelCredentialId: source.modelCredentialId });
         return { scheduleId: schedule.id, nextRunAt: schedule.nextRunAt, cadence: schedule.cadence };
       },
       sendNotification: async (input) => {
@@ -1287,7 +1401,7 @@ export const createTaskApi = (dependencies: {
       return [`${field.label}: ${String(value).trim().slice(0, 8_000)}`];
     });
     const freeform = rawInput.trim().slice(0, 80_000);
-    return [plugin.definition.promptPrefix, lines.join('\n'), freeform].filter(Boolean).join('\n\n');
+    return [plugin.definition.promptPrefix, 'agentInstructions' in plugin.definition ? plugin.definition.agentInstructions : undefined, lines.join('\n'), freeform].filter(Boolean).join('\n\n');
   };
 
   const parseGeneratedPlugin = (content: string) => {
@@ -1795,7 +1909,8 @@ export const createTaskApi = (dependencies: {
     const resolved = await resolvePluginForUse(c.req.param('pluginId'), principal);
     if (!resolved.plugin) return c.json({ error: resolved.error }, resolved.status);
     const plugin = resolved.plugin;
-    if (plugin.kind === 'mini-app') return c.json({ error: 'Mini-app plugins open in the client window and do not create a workflow task.' }, 409);
+    if (plugin.kind === 'mini-app' && (!('agentEnabled' in plugin.definition) || !plugin.definition.agentEnabled)) return c.json({ error: 'This plugin has no Agent capability enabled.' }, 409);
+    if (plugin.kind === 'mini-app' && !parsed.data.sessionId.startsWith(`plugin-${plugin.id}-`)) return c.json({ error: 'Invalid plugin conversation scope.' }, 400);
     if (plugin.status !== 'published') return c.json({ error: '只有已发布插件可以运行。' }, 409);
     const compatibility = inspectPlugin(plugin);
     if (!compatibility.compatible) return c.json({ error: '插件当前版本未通过运行检查，请修复后重新发布。', report: compatibility }, 409);
@@ -1821,13 +1936,15 @@ export const createTaskApi = (dependencies: {
         return c.json({ error: `Workflow Plugin 固定的 Nexus v${workflowVersion ?? '?'} 发布快照不存在或已撤回。` }, 409);
       }
       const result = await enqueueTask({
+        providerConfig: parsed.data.providerConfig,
+        routing: parsed.data.routing,
         sessionId: parsed.data.sessionId,
         ...(workflowPlugin ? { templateId: workflowPlugin.id } : {}),
         title: parsed.data.title?.trim() || plugin.name,
         input,
         mode: workflowPlugin?.definition.mode ?? plugin.definition.mode,
         model: workflowPlugin?.definition.model ?? plugin.definition.model,
-        policy: parsed.data.policy ?? workflowPlugin?.definition.policy,
+        policy: { ...(parsed.data.policy ?? workflowPlugin?.definition.policy), toolAllowlist: plugin.definition.toolNames } as CreateTaskData['policy'],
       }, principal.tenantId, principal.userId, { source: 'plugin', pluginId: plugin.id, pluginVersion: plugin.version, nexusReleaseId: pinnedRelease?.id }, c.req.header('idempotency-key'), templateAccess(principal), workflowPlugin ?? undefined);
       return c.json({ ...result, pluginId: plugin.id, pluginVersion: plugin.version }, 202);
     } catch (error) {
@@ -2310,6 +2427,29 @@ export const createTaskApi = (dependencies: {
     return c.body(null, 204);
   });
 
+  api.get('/workflows/:workflowId/history', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const workflow = await templates?.getTemplate(c.req.param('workflowId'), principal.tenantId, templateAccess(principal));
+    if (!workflow || !isAgentWorkflow(workflow)) return c.json({ error: 'Workflow not found.' }, 404);
+    const history = await workflowConversation(workflow.id, principal.tenantId, principal.userId);
+    const tasks = (store.listTasksByTemplate ? await store.listTasksByTemplate(principal.tenantId, workflow.id) : await store.listTasks(principal.tenantId, 100))
+      .filter((task) => task.templateId === workflow.id && task.userId === principal.userId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return c.json({ messages: history.messages, contextSummary: history.summary,
+      activeTaskId: tasks.find((task) => !terminalStatuses.has(task.status))?.id ?? null,
+      tasks: tasks.map(({ id, status, revision }) => ({ id, status, revision })) });
+  });
+
+  api.post('/workflows/:workflowId/context-sources', async (c) => {
+    const parsed = contextSourceSelectionSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'Invalid context source selection.' }, 400);
+    const principal = identity(c.req.raw.headers);
+    const workflow = await templates?.getTemplate(c.req.param('workflowId'), principal.tenantId, templateAccess(principal));
+    if (!workflow || !isAgentWorkflow(workflow)) return c.json({ error: 'Workflow not found.' }, 404);
+    const history = await workflowConversation(workflow.id, principal.tenantId, principal.userId);
+    return c.json(retrieveContextSources(history.messages, history.summary?.structuredContext, parsed.data));
+  });
+
   api.post('/workflows/:workflowId/run', async (c) => {
     if (!templates) return c.json({ error: '工作流存储尚未初始化。' }, 503);
     const parsed = runAgentWorkflowSchema.safeParse(await c.req.json().catch(() => null));
@@ -2333,16 +2473,31 @@ export const createTaskApi = (dependencies: {
       : workflow.status === 'published' ? workflow : null;
     if (!releasedWorkflow) return c.json({ error: 'Agent Nexus 尚未发布；请先通过测试并发布固定版本。' }, 409);
     try {
+      const history = parsed.data.conversationTurn ? await workflowConversation(workflow.id, principal.tenantId, principal.userId) : undefined;
+      const binding = await dependencies.bindProviders?.(parsed.data, principal.tenantId, principal.userId);
+      if (parsed.data.modelCredentialId && !binding) {
+        const credential = await dependencies.resolveModelCredential?.(parsed.data.modelCredentialId, principal.tenantId, principal.userId);
+        if (!credential) throw new Error('Text model credential not found or not owned by the current user.');
+        if (parsed.data.conversationTurn && !dependencies.reportModelFactory) throw new Error('The selected text model is unavailable for context extraction.');
+      }
+      const contextModel = binding && dependencies.boundModelFactory
+        ? await dependencies.boundModelFactory({ ...principal, providerBindingId: binding.providerBindingId }) : parsed.data.conversationTurn && parsed.data.modelCredentialId
+        ? await dependencies.reportModelFactory!(parsed.data.modelCredentialId, principal.tenantId, principal.userId) : model;
+      const prepared = history && parsed.data.conversationTurn ? await prepareConversationContext(
+        parsed.data.sessionId, [...history.messages, parsed.data.conversationTurn], history.summary, contextModel, c.req.raw.signal,
+      ) : undefined;
       return c.json(await enqueueTask({
         sessionId: parsed.data.sessionId,
         templateId: workflow.id,
         title: parsed.data.title ?? `${workflow.name} · 执行`,
-        input: parsed.data.input,
+        input: prepared ? prepared.window.messages.map((message) => `${message.role === 'user' ? 'USER' : 'ASSISTANT'}:\n${message.content}`).join('\n\n') : parsed.data.input,
         mode: releasedWorkflow.definition.mode,
         model: parsed.data.model,
         modelCredentialId: parsed.data.modelCredentialId,
+        providerBindingId: binding?.providerBindingId,
+        providerConfig: parsed.data.providerConfig,
         policy: parsed.data.policy,
-      }, principal.tenantId, principal.userId, { source: 'agent-workflow', workflowId: workflow.id, workflowVersion: releasedWorkflow.version, nexusReleaseId: latestRelease?.id }, c.req.header('idempotency-key'), templateAccess(principal), releasedWorkflow), 202);
+      }, principal.tenantId, principal.userId, { source: 'agent-workflow', workflowId: workflow.id, workflowVersion: releasedWorkflow.version, nexusReleaseId: latestRelease?.id, ...(prepared?.summary ? { contextSummary: prepared.summary } : {}), ...(parsed.data.conversationTurn ? { originalTurn: parsed.data.conversationTurn } : {}) }, c.req.header('idempotency-key'), templateAccess(principal), releasedWorkflow), 202);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : '工作流启动失败。' }, 409);
     }
@@ -2558,11 +2713,12 @@ export const createTaskApi = (dependencies: {
 
   api.post('/tasks', async (c) => {
     const contentLength = Number(c.req.header('content-length') ?? 0);
-    if (Number.isFinite(contentLength) && contentLength > 128 * 1024) {
-      return c.json({ error: 'Task request is larger than 128 KB.' }, 413);
+    if (Number.isFinite(contentLength) && contentLength > 30 * 1024 * 1024) {
+      return c.json({ error: 'Task request is larger than 30 MB.' }, 413);
     }
     const parsed = createTaskSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'Invalid task request.', details: parsed.error.flatten() }, 400);
+    if (contentLength > 128 * 1024 && !parsed.data.inputSource && !parsed.data.contextMessages) return c.json({ error: 'Task request is larger than 128 KB.' }, 413);
     const principal = identity(c.req.raw.headers);
     const { tenantId, userId } = principal;
     try {
@@ -2626,7 +2782,7 @@ export const createTaskApi = (dependencies: {
     if (!task || task.userId !== principal.userId || task.status !== 'completed' || !task.result?.trim()) return null;
     const summary = (await store.getTaskEventSummaries([task.id], principal.tenantId)).get(task.id);
     const evidence = summary?.latest?.type === 'task.completed' ? parseCompletionEvidence(summary.latest.payload.evidenceSummary) : undefined;
-    if (evidence?.status !== 'verified') return null;
+    if (!canReuseCompletionArtifact(evidence)) return null;
     const artifactId = `result:${task.id}`;
     return {
       artifactId,
@@ -2670,7 +2826,9 @@ export const createTaskApi = (dependencies: {
     const principal = identity(c.req.raw.headers);
     let modelError: unknown;
     try {
-      const draftModel = dependencies.scheduleModelFactory
+      const binding = await dependencies.bindProviders?.(parsed.data, principal.tenantId, principal.userId);
+      const draftModel = binding && dependencies.boundModelFactory
+        ? await dependencies.boundModelFactory({ ...principal, providerBindingId: binding.providerBindingId }) : dependencies.scheduleModelFactory
         ? await dependencies.scheduleModelFactory(parsed.data.modelCredentialId, principal.tenantId, principal.userId)
         : model;
       if (!draftModel) throw new Error('日程 Agent 尚未配置文本模型。');
@@ -2778,9 +2936,11 @@ export const createTaskApi = (dependencies: {
       if (linked && (!artifactStore || !artifactCatalog)) {
         return c.json({ error: 'Artifact 持久化服务未就绪，当前不能建立日程结果联动。' }, 503);
       }
-      const { inputArtifactTaskId: _inputArtifactTaskId, ...scheduleInput } = parsed.data;
+      const binding = await dependencies.bindProviders?.(parsed.data, tenantId, userId);
+      const { inputArtifactTaskId: _inputArtifactTaskId, providerConfig: _providerConfig, ...scheduleInput } = parsed.data;
       const schedule = await scheduler.upsert({
         ...scheduleInput,
+        providerBindingId: binding?.providerBindingId,
         ...(linked ? { inputArtifact: linked.inputArtifact } : {}),
         title: parsed.data.title ?? parsed.data.input.slice(0, 80),
         tenantId,
@@ -3055,7 +3215,7 @@ export const createTaskApi = (dependencies: {
         const created = (await store.getEvents(task.id)).find((event) => event.type === 'task.created');
         if (created?.payload.source === 'agent-workflow') nexusSessionIds.add(task.sessionId);
       }));
-    const isNexusSession = (session: { id: string; title?: string }) => nexusSessionIds.has(session.id) || isLegacyNexusProjection(session);
+    const isNexusSession = (session: { id: string; title?: string }) => nexusSessionIds.has(session.id) || isLegacyNexusProjection(session) || isMiniAppSessionId(session.id);
     const reconciled = await Promise.all(persisted.filter((session) => !isNexusSession(session)).map(async (session) => {
       if (!session.messages.some((message) => message.pending) && !session.activeTaskId) return session;
       const activeTask = session.activeTaskId
@@ -3134,8 +3294,18 @@ export const createTaskApi = (dependencies: {
     }
   });
 
+  api.post('/sessions/:sessionId/context-sources', async (c) => {
+    const parsed = contextSourceSelectionSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'Invalid context source selection.' }, 400);
+    const principal = identity(c.req.raw.headers);
+    const session = await store.getSession(c.req.param('sessionId'), principal.tenantId, principal.userId);
+    if (!session) return c.json({ error: 'Session not found.' }, 404);
+    return c.json(retrieveContextSources(session.messages, session.contextSummary?.structuredContext, parsed.data));
+  });
+
   api.put('/sessions/:sessionId', async (c) => {
     const sessionId = c.req.param('sessionId');
+    if (isMiniAppSessionId(sessionId)) return c.json({ error: 'Mini App conversations belong to their plugin, not regular chat history.' }, 409);
     const contentLength = Number(c.req.header('content-length') ?? 0);
     if (contentLength > 10 * 1024 * 1024) return c.json({ error: 'Session history exceeds the 10 MB limit.' }, 413);
     const parsed = sessionUpsertSchema.safeParse(await c.req.json().catch(() => null));
@@ -3143,6 +3313,19 @@ export const createTaskApi = (dependencies: {
     const { tenantId, userId } = identity(c.req.raw.headers);
     try {
       const previous = await store.getSession(sessionId, tenantId, userId);
+      let previousSummary = previous?.contextSummary;
+      // Saving history is local-only; reuse source-validated extraction from actual task requests.
+      const sessionTasks = await store.listTasksBySession(tenantId, userId, sessionId);
+      for (const task of sessionTasks.sort((left, right) => right.createdAt.localeCompare(left.createdAt))) {
+        if (task.userId !== userId || task.tenantId !== tenantId || task.sessionId !== sessionId) continue;
+        const candidate = (await store.getEvents(task.id)).find((event) => event.type === 'task.created')?.payload.contextSummary as typeof previousSummary;
+        if (candidate?.structuredContext && validateStructuredContext(candidate.structuredContext, parsed.data.messages)
+          && (!validateStructuredContext(previousSummary?.structuredContext, parsed.data.messages)
+            || candidate.structuredContext.coveredMessageIds.length >= (previousSummary?.structuredContext?.coveredMessageIds.length ?? 0))) {
+          previousSummary = candidate;
+          break;
+        }
+      }
       const contextWindowOptions: ContextWindowOptions = {
         recentMessages: 12,
         triggerMessages: 16,
@@ -3156,9 +3339,10 @@ export const createTaskApi = (dependencies: {
       let contextSummary = buildPersistedContextSummary(
         sessionId,
         parsed.data.messages as DurableContextSourceMessage[],
-        previous?.contextSummary,
+        previousSummary,
         contextWindowOptions,
       );
+      contextSummary = await enrichConversationSummary(contextSummary, parsed.data.messages, previousSummary, undefined, c.req.raw.signal);
       if (contextSummary) {
         contextSummary = attachPersistedContextMetadata(
           contextSummary,
@@ -3217,7 +3401,8 @@ export const createTaskApi = (dependencies: {
   });
 
   api.get('/tasks/:taskId', async (c) => {
-    const { tenantId } = identity(c.req.raw.headers);
+    const principal = identity(c.req.raw.headers);
+    const { tenantId } = principal;
     const task = await store.getTask(c.req.param('taskId'), tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     const events = await store.getEvents(task.id);
@@ -3242,7 +3427,8 @@ export const createTaskApi = (dependencies: {
       if (typeof event.payload.requestedBy === 'string') current.requestedBy = event.payload.requestedBy;
       controls.set(stepId, current);
     }
-    return c.json({ task: { ...task, controlState: Object.fromEntries(controls), memoryPolicy } });
+    return c.json({ task: { ...task, controlState: Object.fromEntries(controls), memoryPolicy },
+      actionPermissions: { canManage: principal.role !== 'viewer' && (task.userId === principal.userId || ['owner', 'admin'].includes(principal.role)) } });
   });
 
   api.get('/tasks/:taskId/checkpoints', async (c) => {
@@ -3335,6 +3521,7 @@ export const createTaskApi = (dependencies: {
       mode: source.mode,
       model: source.model,
       modelCredentialId: source.modelCredentialId,
+      providerBindingId: source.providerBindingId,
       policy: source.policy,
       idempotencyKey,
       ...(parsed.data.behavior === 'continue' && checkpoint.snapshot.plan ? { plan: checkpoint.snapshot.plan } : {}),
@@ -3434,6 +3621,7 @@ export const createTaskApi = (dependencies: {
       mode: source.mode,
       model: source.model,
       modelCredentialId: source.modelCredentialId,
+      providerBindingId: source.providerBindingId,
       policy: source.policy,
       idempotencyKey,
       ...(mergedState.plan ? { plan: mergedState.plan } : {}),
@@ -3545,7 +3733,8 @@ export const createTaskApi = (dependencies: {
     if (terminalStatuses.has(task.status)) return c.json({ error: 'Task is already terminal.' }, 409);
     const parsed = noteSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'A non-empty operator note is required.' }, 400);
-    const event = await store.appendEvent(task, {
+    const reserved = await store.updateTask(task.id, {}, actionRevisions.get(c.req.raw) ?? task.revision);
+    const event = await store.appendEvent(reserved, {
       type: 'human.note',
       payload: { message: parsed.data.message.trim(), author: userId, source: 'operator' },
     });
@@ -3581,6 +3770,7 @@ export const createTaskApi = (dependencies: {
     if (terminalStatuses.has(task.status)) return c.json({ error: '任务已经结束，无法再追加执行要求。' }, 409);
     const parsed = guidanceSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: '请输入有效的补充要求。' }, 400);
+    const reserved = await store.updateTask(task.id, {}, actionRevisions.get(c.req.raw) ?? task.revision);
 
     const guidanceId = randomUUID();
     const message = parsed.data.message.trim();
@@ -3595,7 +3785,7 @@ export const createTaskApi = (dependencies: {
     }
 
     const delivery = delegated ? 'external-harness' : 'builtin-next-safe-point';
-    const accepted = await store.appendEvent(task, {
+    const accepted = await store.appendEvent(reserved, {
       type: 'human.guidance_accepted',
       payload: { guidanceId, message, behavior, author: principal.userId, delivery },
     });
@@ -3626,7 +3816,7 @@ export const createTaskApi = (dependencies: {
         result: null,
         error: null,
         cancelRequested: false,
-      });
+      }, reserved.revision);
       const event = await store.appendEvent(replanned, {
         type: 'plan.replanned',
         agentId: 'planner',
@@ -3647,7 +3837,7 @@ export const createTaskApi = (dependencies: {
     if (task.status === 'paused') return c.json({ taskId, status: 'paused' }, 200);
     const parsed = pauseSchema.safeParse(await c.req.json().catch(() => null));
     const reason = parsed.success ? parsed.data.reason?.trim() || 'Paused by operator.' : 'Paused by operator.';
-    const paused = await store.updateTask(taskId, { status: 'paused' });
+    const paused = await store.updateTask(taskId, { status: 'paused' }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(paused, {
       type: 'task.paused',
       payload: { reason, author: userId, source: 'operator' },
@@ -3663,7 +3853,8 @@ export const createTaskApi = (dependencies: {
     const task = await store.getTask(taskId, tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     if (task.status !== 'paused') return c.json({ error: 'Only paused tasks can be resumed.' }, 409);
-    const resumed = await store.updateTask(taskId, { status: 'queued', cancelRequested: false, error: '' });
+    if (task.toolApprovals?.some((approval) => approval.status === 'pending') || task.plan?.approvalStatus === 'pending' || task.plan?.approvalStatus === 'rejected' || task.review?.approved === false) return c.json({ error: 'Resolve the pending plan, tool or quality review before resuming.' }, 409);
+    const resumed = await store.updateTask(taskId, { status: 'queued', cancelRequested: false, error: '' }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(resumed, {
       type: 'task.resumed',
       payload: { author: userId, source: 'operator', checkpointSteps: resumed.stepResults.length },
@@ -3679,12 +3870,12 @@ export const createTaskApi = (dependencies: {
     const task = await store.getTask(taskId, tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     if (!task.plan?.steps.length) return c.json({ error: 'Task has no plan to approve.' }, 409);
-    if (task.status !== 'awaiting_approval') return c.json({ error: 'Task is not waiting for plan approval.' }, 409);
+    if (!['awaiting_approval', 'paused'].includes(task.status) || task.plan.approvalStatus === 'approved') return c.json({ error: 'Task is not waiting for plan approval.' }, 409);
     const parsed = planDecisionSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'Invalid plan approval.' }, 400);
     const approvedAt = new Date().toISOString();
     const plan = { ...task.plan, approvalStatus: 'approved' as const, approvedAt, approvedBy: userId };
-    const approved = await store.updateTask(taskId, { status: 'queued', plan, error: null });
+    const approved = await store.updateTask(taskId, { status: task.toolApprovals?.some((approval) => approval.status === 'pending') ? 'waiting_for_human' : 'queued', plan, error: null }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(approved, {
       type: 'plan.approved',
       agentId: 'planner',
@@ -3701,13 +3892,14 @@ export const createTaskApi = (dependencies: {
     const task = await store.getTask(taskId, tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     if (!task.plan?.steps.length) return c.json({ error: 'Task has no plan to reject.' }, 409);
+    if (!['awaiting_approval', 'paused'].includes(task.status) || task.plan.approvalStatus === 'approved') return c.json({ error: 'Task is not waiting for plan approval.' }, 409);
     const parsed = planDecisionSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'Invalid plan rejection.' }, 400);
     const rejected = await store.updateTask(taskId, {
       status: 'paused',
       plan: { ...task.plan, approvalStatus: 'rejected' },
       error: parsed.data.note?.trim() || 'Plan rejected by operator.',
-    });
+    }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(rejected, {
       type: 'plan.rejected',
       agentId: 'planner',
@@ -3722,12 +3914,12 @@ export const createTaskApi = (dependencies: {
     const { tenantId, userId } = identity(c.req.raw.headers);
     const task = await store.getTask(taskId, tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
-    if (task.status !== 'waiting_for_human' || !task.review) return c.json({ error: 'Task is not waiting for review approval.' }, 409);
+    if (!['waiting_for_human', 'paused'].includes(task.status) || !task.review || task.review.approved) return c.json({ error: 'Task is not waiting for review approval.' }, 409);
     const parsed = reviewDecisionSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'Invalid review decision.' }, 400);
     const note = parsed.data.note?.trim() || 'Approved by operator despite the automated quality gate.';
     const review = { ...task.review, approved: true, summary: `${task.review.summary} 人工审核：${note || '操作员批准当前结果。'}` };
-    const approved = await store.updateTask(taskId, { status: 'queued', review, error: null, cancelRequested: false });
+    const approved = await store.updateTask(taskId, { status: task.toolApprovals?.some((approval) => approval.status === 'pending') ? 'waiting_for_human' : 'queued', review, error: null, cancelRequested: false }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(approved, {
       type: 'review.approved',
       agentId: 'operator-review',
@@ -3743,11 +3935,11 @@ export const createTaskApi = (dependencies: {
     const { tenantId, userId } = identity(c.req.raw.headers);
     const task = await store.getTask(taskId, tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
-    if (task.status !== 'waiting_for_human' || !task.review) return c.json({ error: 'Task is not waiting for review approval.' }, 409);
+    if (!['waiting_for_human', 'paused'].includes(task.status) || !task.review || task.review.approved) return c.json({ error: 'Task is not waiting for review approval.' }, 409);
     const parsed = reviewDecisionSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'Invalid review decision.' }, 400);
     const note = parsed.data.note?.trim() || 'Review rejected by operator; replan is required.';
-    const rejected = await store.updateTask(taskId, { status: 'paused', error: note, cancelRequested: false });
+    const rejected = await store.updateTask(taskId, { status: 'paused', error: note, cancelRequested: false }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(rejected, {
       type: 'review.rejected',
       agentId: 'operator-review',
@@ -3763,7 +3955,7 @@ export const createTaskApi = (dependencies: {
     const task = await store.getTask(taskId, principal.tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     if (principal.role !== 'owner' && principal.role !== 'admin' && task.userId !== principal.userId) return c.json({ error: 'Only the task owner or tenant admin can approve a tool call.' }, 403);
-    if (task.status !== 'waiting_for_human') return c.json({ error: 'Task is not waiting for a tool approval.' }, 409);
+    if (!['waiting_for_human', 'paused'].includes(task.status)) return c.json({ error: 'Task is not waiting for a tool approval.' }, 409);
     const parsed = toolDecisionSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'Invalid tool approval.' }, 400);
     const approval = task.toolApprovals?.find((item) => item.status === 'pending' && (!parsed.data.approvalId || item.id === parsed.data.approvalId));
@@ -3780,12 +3972,13 @@ export const createTaskApi = (dependencies: {
     // An active external Harness still owns the task after its approval is
     // resolved. Keep it running and do not wake the built-in coordinator, or
     // both executors could claim the same task concurrently.
+    const hasRejectedCurrentCall = await hasCurrentToolRejection(task);
     const approved = await store.updateTask(taskId, {
-      status: delegatedApproval ? 'running' : 'queued',
+      status: approvals.some((item) => item.status === 'pending') || task.review?.approved === false ? 'waiting_for_human' : hasRejectedCurrentCall ? 'paused' : delegatedApproval ? 'running' : 'queued',
       toolApprovals: approvals,
       error: null,
       cancelRequested: false,
-    });
+    }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(approved, {
       type: 'tool.approved',
       agentId: 'operator-tool',
@@ -3797,7 +3990,7 @@ export const createTaskApi = (dependencies: {
       },
     });
     hub.publish(event);
-    if (!delegatedApproval) coordinator.nudge();
+    if (!delegatedApproval && approved.status === 'queued') coordinator.nudge();
     return c.json({ task: approved, event }, 202);
   });
 
@@ -3807,7 +4000,7 @@ export const createTaskApi = (dependencies: {
     const task = await store.getTask(taskId, principal.tenantId);
     if (!task) return c.json({ error: 'Task not found.' }, 404);
     if (principal.role !== 'owner' && principal.role !== 'admin' && task.userId !== principal.userId) return c.json({ error: 'Only the task owner or tenant admin can reject a tool call.' }, 403);
-    if (task.status !== 'waiting_for_human') return c.json({ error: 'Task is not waiting for a tool approval.' }, 409);
+    if (!['waiting_for_human', 'paused'].includes(task.status)) return c.json({ error: 'Task is not waiting for a tool approval.' }, 409);
     const parsed = toolDecisionSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'Invalid tool rejection.' }, 400);
     const approval = task.toolApprovals?.find((item) => item.status === 'pending' && (!parsed.data.approvalId || item.id === parsed.data.approvalId));
@@ -3821,7 +4014,7 @@ export const createTaskApi = (dependencies: {
     if (delegatedRejection && !delegatedRejection.accepted) {
       return c.json({ error: delegatedRejection.reason || '外部 Harness 未接受此审批。' }, 409);
     }
-    const rejected = await store.updateTask(taskId, { status: 'paused', toolApprovals: approvals, error: note, cancelRequested: false });
+    const rejected = await store.updateTask(taskId, { status: approvals.some((item) => item.status === 'pending') ? 'waiting_for_human' : 'paused', toolApprovals: approvals, error: note, cancelRequested: false }, actionRevisions.get(c.req.raw) ?? task.revision);
     const event = await store.appendEvent(rejected, {
       type: 'tool.rejected',
       agentId: 'operator-tool',
@@ -3839,7 +4032,8 @@ export const createTaskApi = (dependencies: {
     if (task.status === 'running' || task.status === 'reviewing' || task.status === 'planning') coordinator.abort(taskId);
     const parsed = replanSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'A replan instruction is required.' }, 400);
-    const instructionEvent = await store.appendEvent(task, {
+    const reserved = await store.updateTask(task.id, {}, actionRevisions.get(c.req.raw) ?? task.revision);
+    const instructionEvent = await store.appendEvent(reserved, {
       type: 'human.note',
       payload: { message: `Replan instruction: ${parsed.data.instruction.trim()}`, author: userId, source: 'replan' },
     });
@@ -3853,7 +4047,7 @@ export const createTaskApi = (dependencies: {
       result: null,
       error: null,
       cancelRequested: false,
-    });
+    }, reserved.revision);
     const event = await store.appendEvent(replanned, {
       type: 'plan.replanned',
       agentId: 'planner',
@@ -4098,26 +4292,74 @@ export const createTaskApi = (dependencies: {
   });
 
   api.post('/tasks/:taskId/retry', async (c) => {
-    const { tenantId } = identity(c.req.raw.headers);
+    const { tenantId, userId, role } = identity(c.req.raw.headers);
     const original = await store.getTask(c.req.param('taskId'), tenantId);
-    if (!original) return c.json({ error: 'Task not found.' }, 404);
+    if (!original || original.userId !== userId) return c.json({ error: 'Task not found.' }, 404);
+    if (role === 'viewer') return c.json({ error: 'The current identity cannot retry tasks.' }, 403);
     if (original.status !== 'failed' && original.status !== 'cancelled') {
       return c.json({ error: 'Only failed or cancelled tasks can be retried.' }, 409);
+    }
+    const originalCreated = (await store.getEvents(original.id)).find((event) => event.type === 'task.created')?.payload ?? {};
+    const inputAttachments = original.plan?.inputAttachments ?? originalCreated.inputAttachments as TaskInputAttachmentSnapshot[] | undefined;
+    if (inputAttachments?.length && !artifactCatalog) return c.json({ error: 'Attachment reference storage is unavailable; this task cannot be retried safely.' }, 503);
+    try {
+      await loadTaskInputAttachments(inputAttachments, original, artifactStore);
+      if (inputAttachments?.some((attachment) => attachment.sourceSessionId !== original.sessionId
+        || (originalCreated.originalTurn && typeof originalCreated.originalTurn === 'object'
+          && attachment.sourceMessageId !== (originalCreated.originalTurn as { id?: unknown }).id))) {
+        throw new Error('Attachment source does not match the original task turn.');
+      }
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : 'The original task inputs are unavailable.' }, 409);
+    }
+    const metadata = Object.fromEntries([
+      'source', 'routingVersion', 'routerModel', 'routerConfidence', 'activeAgentIds', 'selectedSkillIds',
+      'originalTurn', 'contextSummary', 'workflowId', 'workflowVersion', 'nexusReleaseId', 'pluginId', 'pluginVersion',
+      'triggerId', 'routingSource', 'inputArtifact',
+    ].filter((key) => originalCreated[key] !== undefined).map((key) => [key, originalCreated[key]]));
+    const plan = original.plan ? structuredClone(original.plan) : undefined;
+    if (plan) {
+      plan.inputAttachments = inputAttachments;
+      plan.approvalStatus = original.policy.requirePlanApproval ? 'pending' : 'approved';
+      delete plan.approvedAt;
+      delete plan.approvedBy;
+      if (!original.policy.requirePlanApproval) {
+        plan.approvedAt = new Date().toISOString();
+        plan.approvedBy = 'runtime-policy';
+      }
+      for (const node of plan.graph?.nodes ?? []) {
+        node.status = 'queued';
+        delete node.tokens;
+        delete node.durationMs;
+        delete node.attempts;
+        delete node.toolCalls;
+        delete node.failureReason;
+      }
     }
     const retried = await store.createTask({
       tenantId: original.tenantId,
       userId: original.userId,
       sessionId: original.sessionId,
+      templateId: original.templateId,
       title: original.title,
       input: original.input,
       mode: original.mode,
       model: original.model,
       modelCredentialId: original.modelCredentialId,
+      providerBindingId: original.providerBindingId,
+      policy: original.policy,
+      plan,
     });
     metrics?.recordTask('created');
+    for (const attachment of inputAttachments ?? []) {
+      await artifactCatalog!.register({ id: attachment.artifactId, tenantId, taskId: retried.id, source: 'upload', storageKey: attachment.storageKey, bytes: attachment.bytes, mimeType: attachment.mimeType, referenceKey: `task:${retried.id}:input:${attachment.sourceMessageId}:${attachment.sourceAttachmentId}` });
+    }
     const created = await store.appendEvent(retried, {
       type: 'task.created',
-      payload: { title: retried.title, mode: retried.mode, retryOfTaskId: original.id },
+      payload: { ...metadata, title: retried.title, mode: retried.mode, tenantId, userId, retryOfTaskId: original.id,
+        sourceTaskCreatedAt: originalCreated.sourceTaskCreatedAt ?? original.createdAt,
+        ...(inputAttachments?.length ? { inputAttachments } : {}),
+      },
     });
     hub.publish(created);
     const queued = await store.appendEvent(retried, {
@@ -4127,6 +4369,83 @@ export const createTaskApi = (dependencies: {
     hub.publish(queued);
     coordinator.nudge();
     return c.json({ task: retried, retryOfTaskId: original.id, eventsUrl: `/api/tasks/${retried.id}/events` }, 202);
+  });
+
+  api.get('/tasks/:taskId/tools/executions', async (c) => {
+    if (!runtimeIdSchema.safeParse(c.req.param('taskId')).success) return c.json({ error: 'Task not found.' }, 404);
+    const principal = identity(c.req.raw.headers);
+    const task = await store.getTask(c.req.param('taskId'), principal.tenantId);
+    if (!task || (task.userId !== principal.userId && !['owner', 'admin'].includes(principal.role))) return c.json({ error: 'Task not found.' }, 404);
+    const ledger = toolRegistry?.executionStore;
+    if (!ledger) return c.json({ enabled: false, executions: [], canResume: false });
+    await ledger.reconcileExpiredForTask(principal.tenantId, task.id);
+    const records = await ledger.listForTask(principal.tenantId, task.id, 200);
+    const unresolved = await ledger.hasUnresolvedForTask(principal.tenantId, task.id);
+    const latestPause = (await store.getEvents(task.id)).filter((event) => event.type === 'task.paused').at(-1);
+    const canResume = !unresolved && ['paused', 'waiting_for_human'].includes(task.status)
+      && latestPause?.payload.reason === 'tool-outcome-review' && !task.toolApprovals?.some((approval) => approval.status === 'pending')
+      && task.plan?.approvalStatus !== 'pending' && task.plan?.approvalStatus !== 'rejected' && task.review?.approved !== false;
+    return c.json({ enabled: true, canResume, executions: records.map((record) => ({
+      id: record.id, stepId: record.stepId, toolName: record.toolName, status: record.status, revision: record.revision,
+      attempts: record.attempts, updatedAt: record.updatedAt, receiptSource: record.receiptSource,
+      requiresReview: record.status === 'outcome_unknown',
+      resolution: record.resolutions.at(-1) ? { decision: record.resolutions.at(-1)!.decision, resolvedAt: record.resolutions.at(-1)!.resolvedAt } : null,
+    })) });
+  });
+
+  api.post('/tasks/:taskId/tools/executions/:executionId/resolve', async (c) => {
+    if (!runtimeIdSchema.safeParse(c.req.param('taskId')).success) return c.json({ error: 'Task not found.' }, 404);
+    const principal = identity(c.req.raw.headers);
+    const task = await store.getTask(c.req.param('taskId'), principal.tenantId);
+    if (!task || (task.userId !== principal.userId && !['owner', 'admin'].includes(principal.role))) return c.json({ error: 'Task not found.' }, 404);
+    if (principal.role === 'viewer') return c.json({ error: '当前身份不能确认执行结果。' }, 403);
+    if (!['waiting_for_human', 'paused', 'failed', 'cancelled'].includes(task.status)) return c.json({ error: '请先暂停任务再核对执行结果。' }, 409);
+    const parsed = z.object({ expectedRevision: z.number().int().min(1), decision: z.enum(['confirmed-completed', 'confirmed-not-executed']), note: z.string().trim().min(1).max(2_000) }).strict().safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '请选择核对结果，并填写核对依据。' }, 400);
+    const ledger = toolRegistry?.executionStore;
+    if (!ledger) return c.json({ error: '工具执行记录服务不可用。' }, 503);
+    const record = await ledger.get(principal.tenantId, c.req.param('executionId'));
+    if (!record || record.taskId !== task.id || record.runId !== task.runId) return c.json({ error: '执行记录不存在。' }, 404);
+    let resolved;
+    try {
+      resolved = await toolRegistry!.resolveExecutionUnknown({ ...parsed.data, tenantId: principal.tenantId, id: record.id, operatorId: principal.userId });
+    } catch (error) {
+      if (error instanceof ToolExecutionResolutionConflictError) return c.json({ error: '外部工具记录尚未完成核对，请刷新工具状态后重试。', code: error.code }, 409);
+      throw error;
+    }
+    if (!resolved) return c.json({ error: '执行记录已改变，请刷新后重新核对。' }, 409);
+    const event = await store.appendEvent(task, { type: 'tool.outcome_resolved', payload: {
+      executionId: resolved.id, stepId: resolved.stepId, decision: parsed.data.decision, operatorId: principal.userId,
+      receiptSource: resolved.receiptSource ?? null, requiresExplicitResume: true,
+    } });
+    hub.publish(event);
+    return c.json({ resolved: true, executionId: resolved.id, status: resolved.status, revision: resolved.revision, automaticResume: false });
+  });
+
+  api.post('/tasks/:taskId/tools/resume', async (c) => {
+    if (!runtimeIdSchema.safeParse(c.req.param('taskId')).success) return c.json({ error: 'Task not found.' }, 404);
+    const principal = identity(c.req.raw.headers);
+    const task = await store.getTask(c.req.param('taskId'), principal.tenantId);
+    if (!task || (task.userId !== principal.userId && !['owner', 'admin'].includes(principal.role))) return c.json({ error: 'Task not found.' }, 404);
+    if (principal.role === 'viewer') return c.json({ error: '当前身份不能继续任务。' }, 403);
+    const ledger = toolRegistry?.executionStore;
+    await ledger?.reconcileExpiredForTask(principal.tenantId, task.id);
+    if (!ledger || await ledger.hasUnresolvedForTask(principal.tenantId, task.id)) return c.json({ error: '仍有工具正在执行或结果尚未核对。' }, 409);
+    const latestPause = (await store.getEvents(task.id)).filter((event) => event.type === 'task.paused').at(-1);
+    if (!['paused', 'waiting_for_human'].includes(task.status) || latestPause?.payload.reason !== 'tool-outcome-review'
+      || task.toolApprovals?.some((approval) => approval.status === 'pending') || task.plan?.approvalStatus === 'pending'
+      || task.plan?.approvalStatus === 'rejected' || task.review?.approved === false) return c.json({ error: '任务还有其他待处理的审核，不能从此处继续。' }, 409);
+    let resumed;
+    try {
+      resumed = await store.updateTask(task.id, { status: 'queued', error: null, cancelRequested: false }, actionRevisions.get(c.req.raw) ?? task.revision);
+    } catch (error) {
+      if (error instanceof TaskRevisionConflictError) return c.json({ error: '任务刚刚产生了新进展，请刷新后再继续。', code: error.code }, 409);
+      throw error;
+    }
+    const event = await store.appendEvent(resumed, { type: 'task.resumed', payload: { source: 'tool-outcome-review', author: principal.userId } });
+    hub.publish(event);
+    coordinator.nudge();
+    return c.json({ task: resumed }, 202);
   });
 
   api.get('/tasks/:taskId/tools/audit', async (c) => {
@@ -4185,6 +4504,25 @@ export const createTaskApi = (dependencies: {
     });
   });
 
+  api.get('/tasks/:taskId/artifacts/media/:artifactId', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const taskId = c.req.param('taskId');
+    if (!runtimeIdSchema.safeParse(taskId).success) return c.json({ error: 'Task not found.' }, 404);
+    const task = await store.getTask(taskId, principal.tenantId);
+    if (!task || (task.userId !== principal.userId && !['owner', 'admin'].includes(principal.role))) return c.json({ error: 'Task not found.' }, 404);
+    const artifactId = c.req.param('artifactId');
+    const record = await artifactCatalog?.get(principal.tenantId, artifactId);
+    const supportedTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'video/mp4', 'video/webm']);
+    if (!record || record.taskId !== task.id || !record.id.startsWith(`media:${task.id}:`) || record.status !== 'active'
+      || record.referenceCount < 1 || !record.mimeType || !supportedTypes.has(record.mimeType)
+      || (record.expiresAt && Date.parse(record.expiresAt) <= Date.now())) return c.json({ error: 'Media artifact not found.' }, 404);
+    const bytes = await artifactStore?.getBinary?.(artifactId, principal.tenantId);
+    if (!bytes) return c.json({ error: 'Media artifact is unavailable.' }, 404);
+    return new Response(new Uint8Array(bytes), { headers: { 'Content-Type': record.mimeType,
+      'Content-Length': String(bytes.byteLength), 'Content-Disposition': 'inline',
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' } });
+  });
+
   api.get('/tasks/:taskId/thread-graph', async (c) => {
     const taskId = c.req.param('taskId');
     const { tenantId } = identity(c.req.raw.headers);
@@ -4225,7 +4563,7 @@ export const createTaskApi = (dependencies: {
           if (closed || event.sequence <= lastSequence) return;
           lastSequence = event.sequence;
           controller.enqueue(encodeEvent(event));
-          if (event.type === 'task.completed'
+          if (!replaying && (event.type === 'task.completed'
             || event.type === 'task.failed'
             || event.type === 'task.cancelled'
             || event.type === 'plan.approval_requested'
@@ -4233,8 +4571,14 @@ export const createTaskApi = (dependencies: {
             || event.type === 'review.approval_requested'
             || event.type === 'review.rejected'
             || event.type === 'tool.approval_requested'
-            || event.type === 'tool.rejected') {
-            setTimeout(close, 20);
+            || event.type === 'tool.outcome_unknown'
+            || event.type === 'task.paused'
+            || event.type === 'tool.rejected')) {
+            setTimeout(() => {
+              void store.getTask(taskId).then((current) => {
+                if (current && (terminalStatuses.has(current.status) || ['paused', 'waiting_for_human', 'awaiting_approval'].includes(current.status))) close();
+              }).catch(() => close());
+            }, 20);
           }
         };
         const receive = (event: RuntimeEvent) => {
@@ -4254,7 +4598,7 @@ export const createTaskApi = (dependencies: {
           for (const event of pending) push(event);
           pending.length = 0;
           const current = await store.getTask(taskId);
-          if (current && terminalStatuses.has(current.status)) {
+          if (current && (terminalStatuses.has(current.status) || ['paused', 'waiting_for_human', 'awaiting_approval'].includes(current.status))) {
             close();
             return;
           }

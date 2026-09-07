@@ -18,6 +18,7 @@ import type { MemoryScope, TencentMemoryClient } from './memoryClient.js';
 import { capabilityPackById, capabilityPackCatalog, capabilityPackManifestDigest, recommendedCapabilityPackIds } from './capabilityPacks.js';
 import type { IntegrationCredentialStore } from './integrationCredentialStore.js';
 import type { EnterpriseGovernanceStore } from './enterpriseGovernance.js';
+import { providerConfigSchema, type ProviderConfig, type ProviderBindingReference } from './providerBindings.js';
 import { GovernanceQuotaError, GovernanceToolUnavailableError, keepToolCallLease } from './enterpriseGovernance.js';
 import { acquireFeishuTenantToken, feishuOpenApiSpecification, invokeFeishuOperation } from './feishuConnector.js';
 import { attachmentDataUrl, decodeAttachmentDataUrl } from './attachmentContent.js';
@@ -464,6 +465,14 @@ const invokeExternalOperationOnce = async (
   return { content: externalResultText(await response.text()), responseStatus: response.status, ok: response.ok };
 };
 
+const operationIsReadOnly = (source: BusinessRecord, operation: Operation) => {
+  if (operation.method === 'get') return true;
+  if (operation.method !== 'mcp') return false;
+  const specification = object(source.data.specification);
+  const pinnedTool = (Array.isArray(specification.tools) ? specification.tools : []).map(object).find((tool) => tool.name === operation.operationId);
+  return object(pinnedTool?.annotations).readOnlyHint === true || pinnedTool?.readOnly === true;
+};
+
 const invokeExternalOperation = async (
   source: BusinessRecord,
   operation: Operation,
@@ -471,10 +480,8 @@ const invokeExternalOperation = async (
   integrations?: IntegrationCredentialStore,
   fetchImpl: typeof fetch = fetch,
 ) => {
-  // Only operations explicitly classified as read-only may be retried. MCP
-  // sources use low risk as their read-only declaration; writes (medium/high)
-  // always execute once to prevent duplicate side effects.
-  const retryable = operation.method === 'get' || (operation.method === 'mcp' && operation.risk === 'low');
+  // Risk is not an idempotency contract. Unannotated MCP operations run once.
+  const retryable = operationIsReadOnly(source, operation);
   const attempts = retryable ? readRetryAttempts() : 1;
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -548,10 +555,16 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
       name: externalToolName(source.id, operation.operationId),
       description: operation.description?.trim() || `${String(source.data.name ?? '外部工具')} · ${operation.operationId}`,
       risk: operation.risk,
+      sideEffect: operationIsReadOnly(source, operation) ? 'read-only' : 'write',
       executionBoundary: 'host-bounded',
       parameters: operationInputSchema(operation) as RegisteredTool['parameters'],
       schema: z.record(z.string(), z.unknown()),
       timeoutMs: 30_000,
+      resolveUnknown: async (record, resolution) => {
+        await records.resolveToolCallUnknown({ tenantId: record.tenantId, sourceId: source.id, taskId: record.taskId, stepId: record.stepId,
+          executionId: record.id, approvalId: record.approvalId, resolutionId: `${record.id}:${resolution.expectedRevision}`,
+          operatorId: resolution.operatorId, decision: resolution.decision, note: resolution.note });
+      },
       routing: {
         sourceId: source.id,
         tenantId: source.tenantId,
@@ -568,6 +581,7 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
       handler: async (input, context: ToolContext) => {
         const current = await records.get(source.id, context.task.tenantId);
         if (!current || current.kind !== 'tool-source' || current.status !== 'enabled') throw new Error('外部工具已停用或不属于当前租户。');
+        if (current.data.pinnedDigest !== source.data.pinnedDigest || current.data.version !== source.data.version) throw new Error('The external tool definition changed before execution. Refresh the tool catalog before continuing.');
         const step = context.task.plan?.steps.find((candidate) => candidate.id === context.stepId);
         const identities = new Set([step?.role, step?.agentContract?.agentId, `${step?.role}-${context.stepId}`].filter((item): item is string => Boolean(item)));
         const allowedAgentIds = stringArray(current.data.allowedAgentIds);
@@ -575,13 +589,14 @@ const syncExternalToolSource = (records: BusinessCapabilityStore, tools: ToolReg
         const currentOperation = (Array.isArray(current.data.operations) ? current.data.operations as Operation[] : [])
           .find((candidate) => candidate.operationId === operation.operationId && candidate.method === operation.method);
         if (!currentOperation) throw new Error('固定工具版本中已不存在该操作。');
+        if (operationIsReadOnly(current, currentOperation) !== operationIsReadOnly(source, operation)) throw new Error('The external tool side-effect contract changed before execution. Refresh the tool catalog before continuing.');
         const validationErrors = validateJsonValue(operationInputSchema(currentOperation), input);
         if (validationErrors.length) throw new Error(`工具参数校验失败：${validationErrors.slice(0, 8).join(' ')}`);
         if (currentOperation.risk === 'high' && governance && (await governance.getPolicy(context.task.tenantId)).highRiskPolicy === 'deny') throw new Error('当前租户策略禁止高风险工具调用。');
         const approval = context.task.toolApprovals?.find((item) => item.id === context.approvalId && item.status === 'approved');
         if (currentOperation.risk === 'high' && !approval) throw new Error('该外部写操作需要人工批准后才能执行。');
         const claim = await records.claimToolCall({ tenantId: context.task.tenantId, userId: context.task.userId,
-          sourceId: current.id, approvalId: approval?.id,
+          sourceId: current.id, approvalId: approval?.id, executionId: context.executionId,
           hourlyQuota: Math.min(1_000, Math.max(1, Number(process.env.AXIOM_EXTERNAL_TOOL_CALLS_PER_HOUR ?? 60))),
           data: { signature: approval?.signature, taskId: context.task.id, stepId: context.stepId,
             operationId: currentOperation.operationId, sourceVersion: current.data.version, pinnedDigest: current.data.pinnedDigest } });
@@ -689,6 +704,7 @@ export const createBusinessCapabilityApi = (dependencies: {
   integrationCredentials?: IntegrationCredentialStore;
   enterpriseGovernance?: EnterpriseGovernanceStore;
   integrationFetch?: typeof fetch;
+  bindProviders?: (input: { providerConfig?: ProviderConfig; modelCredentialId?: string; providerBindingId?: string }, tenantId: string, userId: string) => Promise<ProviderBindingReference>;
   createSchedule?: (input: { tenantId: string; userId: string; taskId: string; sessionId: string; title: string; instruction: string; mode: 'analyze' | 'build' | 'decide'; intervalSeconds?: number; runAt?: string }) => Promise<Record<string, unknown>>;
   sendNotification?: (input: { tenantId: string; userId: string; taskId: string; sessionId: string; title: string; message: string; idempotencyKey: string; channelId?: string }) => Promise<Record<string, unknown>>;
 }) => {
@@ -1616,10 +1632,27 @@ export const createBusinessCapabilityApi = (dependencies: {
   api.post('/nexus/:workflowId/test-run', async (c) => {
     const value = principal(c.req.raw.headers); const item = await ownedWorkflow(c.req.param('workflowId'), value);
     if (!item || !item.definition.plan) return c.json({ error: 'Nexus 不存在或没有可执行计划。' }, 404);
+    let body: unknown;
+    try { const text = await c.req.text(); body = text.trim() ? JSON.parse(text) : {}; }
+    catch { return c.json({ error: 'Nexus 测试请求格式无效。' }, 400); }
+    const parsed = z.object({ providerConfig: providerConfigSchema.optional(), modelCredentialId: z.string().uuid().optional(), providerBindingId: z.string().uuid().optional() }).strict().safeParse(body);
+    if (!parsed.success) return c.json({ error: 'Nexus 测试模型配置无效。' }, 400);
+    let binding: ProviderBindingReference | undefined;
+    try { binding = await dependencies.bindProviders?.(parsed.data, value.tenantId, value.userId); }
+    catch { return c.json({ error: 'Nexus 测试模型配置不可用或无权使用。' }, 400); }
+    if (!binding && (parsed.data.providerConfig || parsed.data.modelCredentialId || parsed.data.providerBindingId)) return c.json({ error: '模型配置绑定服务不可用。' }, 503);
     const compiled = await compile(item, value);
     if (compiled.issues.length) return c.json({ error: 'Nexus 未通过结构校验。', issues: compiled.issues }, 409);
     const executablePlan = compiled.plan ?? item.definition.plan;
     if (!executablePlan) return c.json({ error: 'Nexus 没有可执行计划。' }, 409);
+    if (binding?.capabilities) {
+      const serviceKinds = { 'vision-agent': 'vision', 'drawing-agent': 'image', 'video-agent': 'video', 'search-agent': 'search', 'academic-search-agent': 'search', 'github-research-agent': 'search' } as const;
+      const missing = executablePlan.steps.filter((step) => {
+        const kind = serviceKinds[step.agentContract?.agentId as keyof typeof serviceKinds];
+        return kind && !binding.capabilities![kind];
+      });
+      if (missing.length) return c.json({ error: '请先配置测试所需的模型服务。', agents: missing.map((step) => step.title) }, 409);
+    }
     const cases = (await records.list(value.tenantId, 'nexus-test-case', { limit: 500 })).filter((record) => record.data.workflowId === item.id);
     if (!cases.length) return c.json({ error: '请先添加至少一个测试用例。' }, 409);
     let artifactSnapshots: NexusArtifactSnapshot[];
@@ -1628,7 +1661,8 @@ export const createBusinessCapabilityApi = (dependencies: {
     const artifactSetDigest = nexusArtifactSetDigest(artifactSnapshots);
     const runs = [];
     for (const testCase of cases.slice(0, 20)) {
-      const task = await tasks.createTask({ tenantId: value.tenantId, userId: value.userId, sessionId: `agent-nexus-test-${item.id}`, templateId: item.id, title: `${item.name} · 测试`, input: String(testCase.data.input), mode: item.definition.mode, plan: { ...executablePlan, version: item.version }, policy: item.definition.policy });
+      const task = await tasks.createTask({ tenantId: value.tenantId, userId: value.userId, sessionId: `agent-nexus-test-${item.id}`, templateId: item.id, title: `${item.name} · 测试`, input: String(testCase.data.input), mode: item.definition.mode, plan: { ...executablePlan, version: item.version }, policy: item.definition.policy,
+        ...(binding ? { providerBindingId: binding.providerBindingId, model: binding.model } : {}) });
       const run = await records.create({
         tenantId: value.tenantId, userId: value.userId, ownerId: value.userId,
         kind: 'nexus-test-run', status: 'running',
@@ -1773,7 +1807,7 @@ export const createBusinessCapabilityApi = (dependencies: {
     let result: Record<string, unknown> = {};
     if (parsed.data.action === 'continue-analysis' || parsed.data.action === 'model-review') {
       const instruction = parsed.data.instruction?.trim() || (parsed.data.action === 'model-review' ? '使用不同模型独立复核原交付，指出证据缺口与结论差异。' : '沿用已验证上下文继续深入分析，并明确新增结论。');
-      const followUp = await tasks.createTask({ tenantId: value.tenantId, userId: value.userId, sessionId: task.sessionId, title: `${task.title} · ${parsed.data.action === 'model-review' ? '复核' : '继续'}`, input: `原任务：\n${task.input}\n\n原交付：\n${task.result ?? task.error ?? '无'}\n\n本轮要求：\n${instruction}`, mode: parsed.data.action === 'model-review' ? 'decide' : task.mode, model: parsed.data.model, modelCredentialId: task.modelCredentialId });
+      const followUp = await tasks.createTask({ tenantId: value.tenantId, userId: value.userId, sessionId: task.sessionId, title: `${task.title} · ${parsed.data.action === 'model-review' ? '复核' : '继续'}`, input: `原任务：\n${task.input}\n\n原交付：\n${task.result ?? task.error ?? '无'}\n\n本轮要求：\n${instruction}`, mode: parsed.data.action === 'model-review' ? 'decide' : task.mode, model: task.providerBindingId ? task.model : parsed.data.model, modelCredentialId: task.modelCredentialId, providerBindingId: task.providerBindingId });
       coordinator.nudge(); result = { taskId: followUp.id };
     } else if (parsed.data.action === 'save-nexus') {
       if (!templates || !task.plan) return c.json({ error: '当前任务没有可保存的执行计划。' }, 409);

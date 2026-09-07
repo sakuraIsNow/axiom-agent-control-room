@@ -24,6 +24,7 @@ await page.route('**/api/**', (route) => {
   const task = historyTasks.find((item) => pathname === `/api/tasks/${item.id}`);
   let body = { workflows: [], agents: [], tools: [], templates: [], plugins: [], notifications: [], unread: 0, tasks: [], sessions: [], deletedSessionIds: [] };
   if (pathname === '/api/workflows') body = { workflows: [workflow] };
+  if (pathname === `/api/workflows/${workflow.id}/history`) body = { messages: historyTasks.flatMap((task) => [{ id: `${task.id}-user`, role: 'user', content: task.input }, { id: `${task.id}-assistant`, role: 'assistant', content: task.result }]) };
   if (pathname === '/api/tasks') body = { tasks: new URL(request.url()).searchParams.get('limit') === '100' ? historyTasks : [] };
   if (task) body = { task };
   if (pathname.endsWith('/run')) body = { task: { id: 'nexus-new', status: 'completed' } };
@@ -83,6 +84,16 @@ try {
     assert.equal(await latest.count(), 1);
     await latest.click();
     assert.ok(await list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop < 4));
+  });
+  await check('late message layout changes follow latest without pulling an upward reader', async () => {
+    const list = page.locator('.dash-chat-messages');
+    await list.evaluate((element) => { element.lastElementChild.style.paddingBottom = '120px'; });
+    await page.waitForTimeout(150);
+    assert.ok(await list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop < 4), 'Late layout sizing left the history above the bottom.');
+    await list.evaluate((element) => { element.scrollTop = 150; element.dispatchEvent(new Event('scroll')); element.lastElementChild.style.paddingBottom = '220px'; });
+    await page.waitForTimeout(150);
+    assert.ok(await list.evaluate((element) => Math.abs(element.scrollTop - 150) < 4), 'ResizeObserver pulled the reader away from their position.');
+    await page.locator('button[data-conversation-latest]').click();
   });
   await check('Graph telemetry preserves the event panel, rotation, and camera', async () => {
     await page.locator('[data-agent-id="analysis"]').dispatchEvent('click');

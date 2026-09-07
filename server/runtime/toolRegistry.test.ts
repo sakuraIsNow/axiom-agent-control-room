@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { FileArtifactStore } from './artifactStore.js';
-import { allowedHttpHost, ToolApprovalRequiredError, ToolRegistry, type RegisteredTool } from './toolRegistry.js';
+import { allowedHttpHost, ToolApprovalRequiredError, ToolExecutionPendingError, ToolExecutionUnknownError, ToolRegistry, type RegisteredTool } from './toolRegistry.js';
+import { SqliteToolExecutionStore, type ToolExecutionStore } from './toolExecutionStore.js';
 import type { AgentStore, WorkflowTask } from './contracts.js';
 
 const task = (id = 'tool-task'): WorkflowTask => ({
@@ -288,4 +289,150 @@ test('read-only document and table adapters normalize workspace data', async () 
     else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor;
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test('durable invocation replay survives a new registry and precedes artifact persistence', async () => {
+  const previousExecutor = process.env.AXIOM_TOOL_EXECUTOR;
+  process.env.AXIOM_TOOL_EXECUTOR = 'docker';
+  const ledger = new SqliteToolExecutionStore(':memory:');
+  let executions = 0;
+  const current = task('durable-replay');
+  const executor = { execute: async () => { executions += 1; return { stdout: 'original observation', stderr: '', exitCode: 0, durationMs: 1, auditId: 'audit-one' }; } } as never;
+  try {
+    await ledger.initialize();
+    const registry = new ToolRegistry(executor, {
+      kind: 'filesystem', put: async () => {
+        const records = await ledger.listForTask(current.tenantId, current.id);
+        assert.equal(records[0]?.status, 'completed', 'receipt is committed before artifact storage starts');
+        throw new Error('offline artifacts');
+      }, get: async () => null, delete: async () => undefined, health: async () => ({ configured: true, reachable: false, detail: 'offline' }),
+    }, null, null, ledger);
+    const first = await registry.execute(current, 'step', { name: 'workspace.git-status', args: {} }, { invocationId: 'round-1-tool-1' });
+    assert.equal(first.artifactError, 'offline artifacts');
+    const restarted = new ToolRegistry(executor, null, null, null, ledger);
+    const replayed = await restarted.execute(current, 'step', { name: 'workspace.git-status', args: {} }, { invocationId: 'round-1-tool-1' });
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.receiptSource, 'tool');
+    assert.equal(replayed.call.id, first.call.id);
+    assert.equal(replayed.output, first.output);
+    assert.equal(replayed.artifactError, 'offline artifacts');
+    assert.equal(executions, 1);
+    await restarted.execute(current, 'step', { name: 'workspace.git-status', args: {} }, { invocationId: 'round-2-tool-1' });
+    assert.equal(executions, 2, 'a new logical invocation intentionally executes the same arguments');
+  } finally { await ledger.close(); if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR; else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor; }
+});
+
+test('concurrent duplicate invocations have one owner and one pending observer', async () => {
+  const previousExecutor = process.env.AXIOM_TOOL_EXECUTOR;
+  process.env.AXIOM_TOOL_EXECUTOR = 'docker';
+  const ledger = new SqliteToolExecutionStore(':memory:');
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let calls = 0;
+  let running: Promise<unknown> | undefined;
+  try {
+    await ledger.initialize();
+    const registry = new ToolRegistry({ execute: async () => { calls += 1; entered(); await gate; return { stdout: 'done', stderr: '', exitCode: 0, durationMs: 1, auditId: 'audit' }; } } as never, null, null, null, ledger);
+    const invocation = { name: 'workspace.git-status', args: {} };
+    running = registry.execute(task('concurrent'), 'step', invocation, { invocationId: 'one' });
+    await started;
+    await assert.rejects(registry.execute(task('concurrent'), 'step', invocation, { invocationId: 'one' }), (error: unknown) => error instanceof ToolExecutionPendingError && error.record.status === 'executing');
+    release();
+    await running;
+    assert.equal(calls, 1);
+  } finally { release(); await running; await ledger.close(); if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR; else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor; }
+});
+
+test('approval is bound to the logical invocation and cannot approve a later intentional repeat', async () => {
+  const previousExecutor = process.env.AXIOM_TOOL_EXECUTOR;
+  process.env.AXIOM_TOOL_EXECUTOR = 'docker';
+  const ledger = new SqliteToolExecutionStore(':memory:');
+  let calls = 0;
+  try {
+    await ledger.initialize();
+    const registry = new ToolRegistry(undefined, null, null, null, ledger);
+    registry.upsert({ name: 'write.test', description: 'test', risk: 'high', parameters: { type: 'object', properties: {}, additionalProperties: false }, schema: z.object({}).strict(), timeoutMs: 1000,
+      handler: async (_args, context) => { calls += 1; return { stdout: 'written', stderr: '', exitCode: 0, durationMs: 1, auditId: context.auditId }; } });
+    const current = task('approval-identity');
+    const invocation = { name: 'write.test', args: {} };
+    const requested = await registry.execute(current, 'step', invocation, { invocationId: 'one' }).catch((error: unknown) => error);
+    assert.ok(requested instanceof ToolApprovalRequiredError);
+    const approved = { ...current, toolApprovals: [{ ...requested.approval, status: 'approved' as const }] };
+    await registry.execute(approved, 'step', invocation, { invocationId: 'one' });
+    const replayed = await registry.execute(approved, 'step', invocation, { invocationId: 'one' });
+    assert.equal(replayed.replayed, true);
+    await assert.rejects(registry.execute(approved, 'step', invocation, { invocationId: 'two' }), (error: unknown) => error instanceof ToolApprovalRequiredError && error.approval.signature !== requested.approval.signature);
+    assert.equal(calls, 1);
+  } finally { await ledger.close(); if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR; else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor; }
+});
+
+test('a low-risk write with an unknown result is blocked and human confirmation is not a tool receipt', async () => {
+  const previousExecutor = process.env.AXIOM_TOOL_EXECUTOR;
+  process.env.AXIOM_TOOL_EXECUTOR = 'docker';
+  const ledger = new SqliteToolExecutionStore(':memory:');
+  let calls = 0;
+  try {
+    await ledger.initialize();
+    const registry = new ToolRegistry(undefined, null, { createAgent: async () => { calls += 1; throw new Error('Lost connection after draft creation'); } } as unknown as AgentStore, null, ledger);
+    const current = task('unknown-write');
+    const invocation = { name: 'agent.propose', args: { roleId: 'writer', name: 'Writer', systemPromptTemplate: 'Write', whenToUseHint: 'Writing' } };
+    const failed = await registry.execute(current, 'step', invocation, { invocationId: 'one' }).catch((error: unknown) => error);
+    assert.ok(failed instanceof ToolExecutionUnknownError);
+    assert.equal(failed.record.sideEffect, 'write');
+    await assert.rejects(registry.execute(current, 'step', invocation, { invocationId: 'one' }), ToolExecutionUnknownError);
+    assert.equal(calls, 1);
+    await ledger.resolveUnknown({ tenantId: current.tenantId, id: failed.record.id, expectedRevision: failed.record.revision,
+      operatorId: 'reviewer', decision: 'confirmed-completed', note: 'Draft exists; verified its destination record.' });
+    const confirmed = await registry.execute(current, 'step', invocation, { invocationId: 'one' });
+    assert.equal(confirmed.receiptSource, 'human-confirmed');
+    assert.equal(confirmed.humanConfirmation?.operatorId, 'reviewer');
+    assert.match(confirmed.output, /Human-confirmed/);
+    assert.equal(calls, 1);
+    assert.equal((await ledger.get(current.tenantId, failed.record.id))?.receipt, undefined);
+  } finally { await ledger.close(); if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR; else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor; }
+});
+
+test('lease heartbeat loss interrupts dispatch and leaves unknown writes fenced', async () => {
+  const previousExecutor = process.env.AXIOM_TOOL_EXECUTOR;
+  const previousLease = process.env.AXIOM_TOOL_EXECUTION_LEASE_MS;
+  process.env.AXIOM_TOOL_EXECUTOR = 'docker';
+  process.env.AXIOM_TOOL_EXECUTION_LEASE_MS = '1000';
+  const ledger = new SqliteToolExecutionStore(':memory:');
+  let signal: AbortSignal | undefined;
+  try {
+    await ledger.initialize();
+    ledger.renew = async () => false;
+    const registry = new ToolRegistry(undefined, null, null, null, ledger);
+    registry.upsert({ name: 'slow.write', description: 'test', risk: 'low', parameters: { type: 'object', properties: {}, additionalProperties: false }, schema: z.object({}).strict(), timeoutMs: 10_000,
+      handler: async (_args, context) => { signal = context.signal; return new Promise(() => undefined); } });
+    await assert.rejects(registry.execute(task('lease-loss'), 'step', { name: 'slow.write' }, { invocationId: 'one' }), ToolExecutionUnknownError);
+    assert.equal(signal?.aborted, true);
+    assert.equal((await ledger.listForTask('tenant-a', 'lease-loss'))[0]?.status, 'outcome_unknown');
+  } finally {
+    await ledger.close();
+    if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR; else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor;
+    if (previousLease === undefined) delete process.env.AXIOM_TOOL_EXECUTION_LEASE_MS; else process.env.AXIOM_TOOL_EXECUTION_LEASE_MS = previousLease;
+  }
+});
+
+test('ledger claim outages fail before dispatch and lost receipt persistence blocks unsafe retry', async () => {
+  const previousExecutor = process.env.AXIOM_TOOL_EXECUTOR;
+  process.env.AXIOM_TOOL_EXECUTOR = 'docker';
+  const ledger = new SqliteToolExecutionStore(':memory:');
+  let calls = 0;
+  try {
+    await ledger.initialize();
+    const unavailable = { claim: async () => { throw new Error('ledger offline'); } } as unknown as ToolExecutionStore;
+    const blocked = new ToolRegistry({ execute: async () => { calls += 1; throw new Error('must not dispatch'); } } as never, null, null, null, unavailable);
+    await assert.rejects(blocked.execute(task(), 'step', { name: 'workspace.read', args: { path: 'README.md' } }, { invocationId: 'one' }), /ledger offline/);
+    assert.equal(calls, 0);
+    ledger.complete = async () => { throw new Error('receipt persistence unavailable'); };
+    const registry = new ToolRegistry(undefined, null, { createAgent: async () => { calls += 1; return { id: 'draft', roleId: 'writer', status: 'draft' }; } } as unknown as AgentStore, null, ledger);
+    const invocation = { name: 'agent.propose', args: { roleId: 'writer', name: 'Writer', systemPromptTemplate: 'Write', whenToUseHint: 'Writing' } };
+    await assert.rejects(registry.execute(task(), 'step', invocation, { invocationId: 'one' }), ToolExecutionUnknownError);
+    await assert.rejects(registry.execute(task(), 'step', invocation, { invocationId: 'one' }), ToolExecutionUnknownError);
+    assert.equal(calls, 1);
+  } finally { await ledger.close(); if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR; else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor; }
 });

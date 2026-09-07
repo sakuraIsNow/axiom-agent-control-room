@@ -7,6 +7,7 @@ const trackedKeys = [
   'AXIOM_API_KEY',
   'AXIOM_TRUST_PROXY_AUTH',
   'AXIOM_PRINCIPAL_SECRET',
+  'AXIOM_PROVIDER_SECRET',
   'DEEPSEEK_API_KEY',
   'DMX_API_KEY',
   'VIDEO_API_BASE',
@@ -37,10 +38,12 @@ test('readiness identifies production blockers and a fully configured candidate'
     const local = await getRuntimeReadiness();
     assert.equal(local.state, 'blocked');
     assert.ok(local.blockers.includes('沙箱工具执行器'));
+    assert.equal(local.checks.find((check) => check.id === 'provider-bindings')?.state, 'blocked');
 
     process.env.DATABASE_URL = 'postgres://localhost/axiom';
     process.env.AXIOM_API_KEY = 'gateway-key';
     process.env.AXIOM_PRINCIPAL_SECRET = 'principal-secret';
+    process.env.AXIOM_PROVIDER_SECRET = 'provider-secret';
     process.env.DMX_API_KEY = 'image-key';
     process.env.VIDEO_API_BASE = 'http://video:9000';
     process.env.VIDEO_MODEL = 'local-video-model';

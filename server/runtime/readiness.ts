@@ -56,6 +56,13 @@ const computeRuntimeReadiness = async (dependencies: ReadinessDependencies = {})
   const durableScheduler = configured(process.env.DATABASE_URL) || configured(process.env.AXIOM_SCHEDULER_QUEUE_URL);
   const checks: ReadinessCheck[] = [
     {
+      id: 'provider-bindings',
+      label: '任务模型配置保护',
+      state: configured(process.env.AXIOM_PROVIDER_SECRET) ? 'ready' : 'blocked',
+      detail: configured(process.env.AXIOM_PROVIDER_SECRET) ? '任务模型配置可加密保存并在重启后恢复。' : '请配置并备份 AXIOM_PROVIDER_SECRET；任务入队需要加密保存模型配置，所有 Worker 必须使用同一密钥。',
+      required: true,
+    },
+    {
       id: 'persistence',
       label: '持久化存储',
       state: configured(process.env.DATABASE_URL) ? 'ready' : 'degraded',
@@ -227,6 +234,7 @@ const readinessCacheKey = (dependencies: ReadinessDependencies) => [
   process.env.AXIOM_API_KEY ?? '',
   process.env.AXIOM_TRUST_PROXY_AUTH ?? '',
   process.env.AXIOM_PRINCIPAL_SECRET ?? '',
+  process.env.AXIOM_PROVIDER_SECRET ?? '',
   process.env.DEEPSEEK_API_KEY ?? '',
   process.env.DEEPSEEK_MODEL ?? '',
   process.env.DMX_API_KEY ?? '',

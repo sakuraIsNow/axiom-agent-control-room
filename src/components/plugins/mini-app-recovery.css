@@ -1,0 +1,12 @@
+.mini-app-content { display: flex; min-height: 0; flex: 1; overflow: hidden; }
+.mini-app-content > iframe { flex: 1; min-width: 0; height: 100%; }
+.mini-app-task-actions { width: min(320px, 42%); min-width: 220px; overflow-y: auto; overscroll-behavior: contain; padding: 0 14px; border-left: 1px solid var(--dash-line, rgb(255 255 255 / 12%)); }
+.mini-app-task-actions:not(:has(.task-action-panel, .tool-recovery, .mini-app-reconnect)) { display: none; }
+.mini-app-reconnect { display: grid; gap: 10px; padding-block: 16px; font-size: 14px; line-height: 1.6; color: var(--dash-soft); }
+.mini-app-reconnect button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; border: 1px solid var(--dash-line-strong); border-radius: 7px; color: var(--dash-ink); background: rgb(var(--dash-surface-rgb) / 55%); font: inherit; cursor: pointer; }
+.mini-app-reconnect button:disabled { opacity: .5; cursor: default; }
+@media (max-width: 650px) {
+  .mini-app-content:has(.task-action-panel, .tool-recovery, .mini-app-reconnect) { flex-direction: column; overflow-y: auto; }
+  .mini-app-content:has(.task-action-panel, .tool-recovery, .mini-app-reconnect) > iframe { min-height: 220px; height: 40%; flex-shrink: 0; }
+  .mini-app-task-actions { width: 100%; min-width: 0; overflow: visible; border-left: 0; border-top: 1px solid var(--dash-line, rgb(255 255 255 / 12%)); }
+}

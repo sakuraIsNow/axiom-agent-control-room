@@ -267,6 +267,9 @@ export async function deletePlugin(pluginId: string) {
 export async function runPlugin(input: {
   pluginId: string;
   sessionId: string;
+  providerConfig?: import('./taskRuntime').TaskProviderConfig;
+  routing?: import('../types').ChatRouteDecision;
+  signal?: AbortSignal;
   input?: string;
   values?: Record<string, string | number>;
   policy?: Partial<ExecutionPolicy>;
@@ -279,7 +282,8 @@ export async function runPlugin(input: {
       'Content-Type': 'application/json',
       ...(input.idempotencyKey?.trim() ? { 'Idempotency-Key': input.idempotencyKey.trim().slice(0, 160) } : {}),
     },
-    body: JSON.stringify({ sessionId: input.sessionId, input: input.input, values: input.values, policy: input.policy }),
+    body: JSON.stringify({ sessionId: input.sessionId, input: input.input, values: input.values, policy: input.policy, providerConfig: input.providerConfig, routing: input.routing }),
+    signal: input.signal,
   });
   return readJson<{ task: WorkflowTask; eventsUrl: string; pluginId: string; pluginVersion: number }>(response, '插件运行失败');
 }

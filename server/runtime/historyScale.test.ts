@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { Pool } from 'pg';
 import type { PersistedSession, TaskStore } from './contracts.js';
 import type { ModelClient } from './modelClient.js';
 import { EventHub } from './eventHub.js';
@@ -8,9 +9,8 @@ import { PostgresTaskStore } from './postgresTaskStore.js';
 import { SqliteTaskStore } from './sqliteTaskStore.js';
 import { createTaskApi } from './taskApi.js';
 
-const historyContract = async (store: TaskStore) => {
+const historyContract = async (store: TaskStore, tenantId = `history-scale-${randomUUID()}`) => {
   await store.initialize();
-  const tenantId = `history-scale-${randomUUID()}`;
   const userId = 'history-owner';
   const headers = { 'content-type': 'application/json', 'x-axiom-tenant-id': tenantId, 'x-axiom-user-id': userId };
   let modelCalls = 0;
@@ -75,7 +75,15 @@ test('history operations remain complete beyond the recent-page boundary (SQLite
 
 test('history operations remain complete beyond the recent-page boundary (PostgreSQL)', { skip: !process.env.AXIOM_TEST_DATABASE_URL }, async () => {
   const store = new PostgresTaskStore(process.env.AXIOM_TEST_DATABASE_URL!);
-  try { await historyContract(store); } finally { await store.close(); }
+  const tenantId = `history-scale-${randomUUID()}`;
+  const pool = new Pool({ connectionString: process.env.AXIOM_TEST_DATABASE_URL, max: 1 });
+  try { await historyContract(store, tenantId); }
+  finally {
+    try {
+      await pool.query('DELETE FROM tasks WHERE tenant_id=$1', [tenantId]);
+      await pool.query('DELETE FROM sessions WHERE tenant_id=$1', [tenantId]);
+    } finally { await Promise.all([store.close(), pool.end()]); }
+  }
 });
 
 test('session cleanup preserves a task resumed after the relationship lookup', async () => {

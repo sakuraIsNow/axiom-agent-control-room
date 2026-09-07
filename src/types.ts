@@ -240,6 +240,17 @@ export type EvidenceItem = {
   title?: string;
   locator?: string;
   artifactId?: string;
+  auditId?: string;
+  validation?: {
+    version: 1;
+    taskId: string;
+    stepId: string;
+    basis: 'tool-receipt' | 'artifact' | 'none';
+    sourceStatus: 'available' | 'failed' | 'missing';
+    toolCallId?: string;
+    auditId?: string;
+    artifactId?: string;
+  };
   publishedAt?: string;
   retrievedAt?: string;
 };
@@ -342,6 +353,7 @@ export type WorkflowEventType =
   | 'agent.assigned'
   | 'agent.started'
   | 'agent.retrying'
+  | 'agent.tool_loop'
   | 'agent.completed'
   | 'agent.failed'
   | 'agent.message'
@@ -359,6 +371,8 @@ export type WorkflowEventType =
   | 'tool.approval_requested'
   | 'tool.approved'
   | 'tool.rejected'
+  | 'tool.outcome_unknown'
+  | 'tool.outcome_resolved'
   | 'node.retry_requested'
   | 'node.skip_requested'
   | 'node.completed_manually'
@@ -449,6 +463,11 @@ export type WorkflowTask = {
     routingVersion?: string;
     routerModel?: string;
     routerConfidence?: number;
+    inputAttachments?: Array<{
+      artifactRecordId: string; artifactId: string; name: string; mimeType: string; bytes: number; digest: string;
+      storageKey?: string; storageEncoding: 'binary' | 'text' | 'legacy-data-url';
+      sourceAttachmentId: string; sourceMessageId: string; sourceSessionId: string; ownerUserId: string;
+    }>;
   };
   stepResults: Array<{
     stepId: string;
@@ -533,7 +552,11 @@ export type WorkflowTaskSummary = {
   pendingToolApprovals?: number;
   /** Model-independent delivery receipt reconstructed from durable events. */
   evidenceSummary?: {
+    schemaVersion?: 2;
     status: 'verified' | 'partial' | 'unverified' | 'not-required';
+    execution?: 'completed' | 'partial' | 'unverified';
+    acceptance?: 'accepted' | 'not-recorded';
+    evidenceStatus?: 'supported' | 'unverified';
     totalSteps: number;
     completedSteps: number;
     failedSteps: number;
@@ -1126,6 +1149,26 @@ export type PersistedContextSummary = {
   approvalEventIds: string[];
   unresolvedItems: string[];
   durableFacts: string[];
+  structuredContext?: {
+    schemaVersion: 1;
+    entries: Array<{
+      id: string;
+      kind: 'constraint' | 'decision';
+      text: string;
+      status: 'active' | 'superseded' | 'revoked';
+      source: { messageId: string; quote: string; digest: string };
+      replaces?: string;
+      replacedBy?: string;
+      endedBy?: { messageId: string; quote: string; digest: string };
+    }>;
+    coveredMessageIds: string[];
+    sourceDigest: string;
+    status: 'complete' | 'partial' | 'unavailable';
+    pendingMessageIds?: string[];
+    pendingMessageCount?: number;
+    attemptedDigest?: string;
+    model?: string;
+  };
   createdAt: string;
   quality?: {
     schemaVersion: 1;

@@ -591,7 +591,7 @@ test('external Harness approval keeps ownership with the sidecar and does not wa
       status: 'pending' as const,
       requestedAt: new Date().toISOString(),
     };
-    await store.updateTask(seeded.id, { status: 'waiting_for_human', toolApprovals: [approval] });
+    await store.updateTask(seeded.id, { status: 'waiting_for_human', toolApprovals: [approval], review: null });
     const response = await request(api, `/tasks/${seeded.id}/approve-tool`, {
       method: 'POST', headers, body: JSON.stringify({ approvalId: approval.id, note: 'operator confirmed' }),
     });
@@ -1617,7 +1617,7 @@ test('approve-review only resumes a waiting task and persists the operator decis
     const task = await seedTask(store);
     const response = await request(api, `/tasks/${task.id}/approve-review`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-axiom-user-id': 'operator' },
       body: JSON.stringify({ note: '已核对当前证据，接受交付。' }),
     });
     assert.equal(response.status, 202);
@@ -1626,7 +1626,7 @@ test('approve-review only resumes a waiting task and persists the operator decis
     assert.equal(payload.task.review?.approved, true);
     assert.equal((await store.getEvents(task.id)).at(-1)?.type, 'review.approved');
 
-    const invalid = await request(api, `/tasks/${task.id}/approve-review`, { method: 'POST', body: '{}' });
+    const invalid = await request(api, `/tasks/${task.id}/approve-review`, { method: 'POST', headers: { 'x-axiom-user-id': 'operator' }, body: '{}' });
     assert.equal(invalid.status, 409);
   } finally {
     await store.close();
@@ -1639,7 +1639,7 @@ test('reject-review pauses the task and records a durable rejection', async () =
     const task = await seedTask(store);
     const response = await request(api, `/tasks/${task.id}/reject-review`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-axiom-user-id': 'operator' },
       body: JSON.stringify({ note: '请补充边界条件后重新规划。' }),
     });
     assert.equal(response.status, 202);
@@ -1771,7 +1771,7 @@ test('review decisions reject terminal tasks and task listing exposes runtime te
   const { store, api } = await createHarness();
   try {
     const task = await seedTask(store, 'completed');
-    const response = await request(api, `/tasks/${task.id}/reject-review`, { method: 'POST', body: '{}' });
+    const response = await request(api, `/tasks/${task.id}/reject-review`, { method: 'POST', headers: { 'x-axiom-user-id': 'operator' }, body: '{}' });
     assert.equal(response.status, 409);
 
     const listResponse = await request(api, '/tasks?limit=10');
@@ -2567,7 +2567,7 @@ test('schedule insights detect capacity conflicts and only apply a current confi
   }
 });
 
-test('schedule Artifact inputs require verified ownership and remain version-pinned after source deletion', async () => {
+test('schedule Artifact inputs require explicit acceptance or traced evidence and remain version-pinned after source deletion', async () => {
   const root = mkdtempSync(join(tmpdir(), 'axiom-schedule-artifact-'));
   const store = new SqliteTaskStore(':memory:');
   const artifactCatalog = new SqliteArtifactCatalog(':memory:');
@@ -2594,6 +2594,23 @@ test('schedule Artifact inputs require verified ownership and remain version-pin
       },
     });
 
+    const legacyCandidateResponse = await request(api, '/schedules/artifact-inputs', { headers });
+    assert.deepEqual((await legacyCandidateResponse.json() as { artifacts: unknown[] }).artifacts, []);
+    const legacyTasks = await request(api, '/tasks', { headers });
+    const legacySummary = (await legacyTasks.json() as { tasks: Array<{ id: string; evidenceSummary: { status: string; acceptance: string; evidenceStatus: string } }> }).tasks.find((task) => task.id === source.id)?.evidenceSummary;
+    assert.equal(legacySummary?.status, 'unverified');
+    assert.equal(legacySummary?.acceptance, 'not-recorded');
+    assert.equal(legacySummary?.evidenceStatus, 'unverified');
+    await store.appendEvent(completed, {
+      type: 'task.completed',
+      payload: { evidenceSummary: {
+        schemaVersion: 2, status: 'unverified', execution: 'completed', acceptance: 'accepted', evidenceStatus: 'unverified',
+        totalSteps: 1, completedSteps: 1, failedSteps: 0, skippedSteps: 0,
+        acceptanceCriteria: 1, evidenceItems: 1, artifactRefs: 1, toolReceipts: 0,
+        verifiedEvidenceItems: 0, supportedEvidenceItems: 0, unverifiedEvidenceItems: 1,
+        review: 'approved', gaps: [],
+      } },
+    });
     const candidateResponse = await request(api, '/schedules/artifact-inputs', { headers });
     const candidates = await candidateResponse.json() as { artifacts: Array<{ taskId: string; artifactId: string; revision: number }> };
     assert.equal(candidates.artifacts[0]?.taskId, source.id);
@@ -2631,7 +2648,7 @@ test('schedule Artifact inputs require verified ownership and remain version-pin
     });
     assert.equal(runResponse.status, 202);
     const run = await runResponse.json() as { task: { id: string; input: string } };
-    assert.match(run.task.input, /\[已验证日程输入\]/u);
+    assert.match(run.task.input, /\[已固定版本的日程输入\]/u);
     assert.match(run.task.input, /保留这份内容作为下游输入/u);
     const createdEvent = (await store.getEvents(run.task.id)).find((event) => event.type === 'task.created');
     assert.equal((createdEvent?.payload.inputArtifact as { sourceTaskId?: string } | undefined)?.sourceTaskId, source.id);

@@ -1,6 +1,6 @@
 import { chromium } from '@playwright/test';
 
-const baseUrl = process.env.QA_URL ?? 'http://127.0.0.1:4300';
+const baseUrl = process.env.QA_URL ?? 'http://127.0.0.1:8787';
 const qaHeaders = { 'x-axiom-tenant-id': 'qa-session-routing', 'x-axiom-user-id': 'qa-session-routing' };
 const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
 const createdTaskIds = [];
@@ -9,10 +9,14 @@ let observeNavigation = true;
 let navigationCancelRequests = 0;
 const approvedReviewTaskIds = new Set();
 const approvedPlanTaskIds = new Set();
+const routingDiagnostics = [];
+const taskTimeoutMs = Number(process.env.QA_SESSION_ROUTING_TASK_TIMEOUT_MS ?? 480_000);
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
+assert(Number.isFinite(taskTimeoutMs) && taskTimeoutMs >= 30_000 && taskTimeoutMs <= 900_000,
+  'QA_SESSION_ROUTING_TASK_TIMEOUT_MS must be between 30000 and 900000 ms.');
 
 const taskState = async (taskId) => {
   const response = await fetch(`${baseUrl}/api/tasks/${encodeURIComponent(taskId)}`, {
@@ -55,15 +59,23 @@ const advanceApprovalGate = async (task) => {
   return false;
 };
 
-const waitForTerminalTask = async (taskId, timeoutMs = 240_000) => {
+const waitForTerminalTask = async (taskId, timeoutMs = taskTimeoutMs) => {
   const startedAt = Date.now();
+  let lastState;
   while (Date.now() - startedAt < timeoutMs) {
     const task = await taskState(taskId);
+    lastState = {
+      status: task.status,
+      route: task.plan?.profile?.route,
+      steps: task.stepResults?.map((step) => ({ id: step.stepId, status: step.status })),
+      approvedPlan: approvedPlanTaskIds.has(taskId),
+      approvedReview: approvedReviewTaskIds.has(taskId),
+    };
     if (terminalStatuses.has(task.status)) return task;
     await advanceApprovalGate(task);
     await new Promise((resolve) => setTimeout(resolve, 750));
   }
-  throw new Error(`Task ${taskId} did not reach a terminal state within ${timeoutMs} ms.`);
+  throw new Error(`Task ${taskId} did not reach a terminal state within ${timeoutMs} ms. Elapsed: ${Date.now() - startedAt} ms. Last state: ${JSON.stringify(lastState)}. Routing: ${JSON.stringify(routingDiagnostics.slice(-8))}`);
 };
 
 const cleanupTask = async (taskId) => {
@@ -86,6 +98,51 @@ page.on('request', (request) => {
     navigationCancelRequests += 1;
   }
 });
+page.on('response', async (response) => {
+  if (response.request().method() !== 'POST') return;
+  const path = new URL(response.url()).pathname;
+  if (!['/api/chat/route', '/api/tasks', '/api/chat'].includes(path)) return;
+  const diagnostic = { path, status: response.status() };
+  routingDiagnostics.push(diagnostic);
+  if (path === '/api/chat') return;
+  const body = await response.json().catch(() => null);
+  if (path === '/api/chat/route' && body?.decision) {
+    const { source, intent, execution, workflowRoute, scheduler } = body.decision;
+    Object.assign(diagnostic, { source, intent, execution, workflowRoute, activeAgentIds: scheduler?.activeAgentIds });
+  }
+  if (path === '/api/tasks' && body?.task?.id) {
+    const routing = response.request().postDataJSON()?.routing;
+    Object.assign(diagnostic, { source: routing?.source, workflowRoute: routing?.workflowRoute });
+    if (!createdTaskIds.includes(body.task.id)) createdTaskIds.push(body.task.id);
+    if (body.task.sessionId) createdSessionIds.add(body.task.sessionId);
+  }
+  if (!response.ok()) Object.assign(diagnostic, { error: String(body?.error ?? 'Request failed').slice(0, 300) });
+});
+
+const sendWorkflowRequest = async (send) => {
+  const sessionId = await page.locator('.dash-chat-session-item.selected').getAttribute('data-session-id');
+  if (sessionId) createdSessionIds.add(sessionId);
+  const responsePromise = page.waitForResponse(
+    (response) => response.request().method() === 'POST'
+      && ['/api/tasks', '/api/chat'].includes(new URL(response.url()).pathname),
+    { timeout: 60_000 },
+  );
+  await send.click();
+  try {
+    const response = await responsePromise;
+    if (new URL(response.url()).pathname !== '/api/tasks') {
+      throw new Error('The explicit collaboration request entered the direct chat gateway instead of a durable task.');
+    }
+    const body = await response.json();
+    assert(response.ok() && typeof body?.task?.id === 'string', `Task creation failed with HTTP ${response.status()}: ${String(body?.error ?? 'Missing task id').slice(0, 300)}`);
+    if (!createdTaskIds.includes(body.task.id)) createdTaskIds.push(body.task.id);
+    createdSessionIds.add(body.task.sessionId);
+    return body;
+  } catch (error) {
+    const routeText = await page.locator('.dash-route-insight').innerText().catch(() => 'Route insight unavailable');
+    throw new Error(`${error.message}\nRouting diagnostics: ${JSON.stringify(routingDiagnostics.slice(-8))}\nVisible route: ${routeText}`, { cause: error });
+  }
+};
 
 try {
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
@@ -95,19 +152,21 @@ try {
 
   const composer = page.locator('.dash-chat-composer textarea');
   const send = page.locator('.dash-chat-controls .send');
-  const comparisonPrompt = '请基于最新官方资料，比较 PostgreSQL 与 SQLite 在多 worker 部署中的并发、迁移和故障恢复风险，给出选型方案并验证结论';
+  // This suite exercises real Graph/history continuity after collaboration.
+  // Previous input: 请基于最新官方资料，比较 PostgreSQL 与 SQLite 在多 worker 部署中的并发、迁移和故障恢复风险，给出选型方案并验证结论
+  // Router network failures made that mixed retrieval request fall back to a
+  // single search Agent. Compound-retrieval fallback needs separate coverage;
+  // this explicit collaboration prompt does not claim to fix that limitation.
+  const comparisonPrompt = '请用研究员、分析员和审查员协作比较 PostgreSQL 与 SQLite 的多 worker 部署方案。研究员先根据已有知识梳理并发、迁移与恢复约束；分析员据此给出选型表和回滚方案；审查员独立检查两者的结论与缺口。请实际分配这些独立职责并合并交付，仅使用已有知识，尚未验证的事实要明确标注，总交付控制在600字以内。';
   await composer.fill(comparisonPrompt);
-  const firstTaskResponsePromise = page.waitForResponse(
-    (response) => response.request().method() === 'POST' && response.url().endsWith('/api/tasks'),
-    { timeout: 60_000 },
-  );
-  await send.click();
-  const firstTaskBody = await (await firstTaskResponsePromise).json();
+  const comparisonStartedAt = Date.now();
+  const firstTaskBody = await sendWorkflowRequest(send);
   const firstTaskId = firstTaskBody?.task?.id;
   assert(typeof firstTaskId === 'string', 'Comparison request did not create a durable workflow task.');
-  createdTaskIds.push(firstTaskId);
 
   const firstTask = await waitForTerminalTask(firstTaskId);
+  const comparisonDurationMs = Date.now() - comparisonStartedAt;
+  const comparisonRouteSource = routingDiagnostics.find((item) => item.path === '/api/tasks')?.source ?? 'unavailable';
   createdSessionIds.add(firstTask.sessionId);
   assert(firstTask.status === 'completed', `Comparison workflow ended with ${firstTask.status}.`);
   assert(['team', 'full-workflow'].includes(firstTask.plan?.profile?.route), `Comparison workflow routed to ${firstTask.plan?.profile?.route ?? 'unknown'} instead of a multi-Agent route.`);
@@ -182,15 +241,9 @@ try {
   await page.locator('.dash-nav-new').click();
   const runningPrompt = '请设计一个生产级多 worker 数据迁移工作流，包含依赖、失败恢复、验证和回滚策略';
   await composer.fill(runningPrompt);
-  const secondTaskResponsePromise = page.waitForResponse(
-    (response) => response.request().method() === 'POST' && response.url().endsWith('/api/tasks'),
-    { timeout: 60_000 },
-  );
-  await send.click();
-  const secondTaskBody = await (await secondTaskResponsePromise).json();
+  const secondTaskBody = await sendWorkflowRequest(send);
   const secondTaskId = secondTaskBody?.task?.id;
   assert(typeof secondTaskId === 'string', 'Running-workflow navigation test did not create a task.');
-  createdTaskIds.push(secondTaskId);
   if (typeof secondTaskBody?.task?.sessionId === 'string') createdSessionIds.add(secondTaskBody.task.sessionId);
 
   await page.locator('.dash-nav-new').click();
@@ -203,6 +256,10 @@ try {
     ok: true,
     comparisonTaskId: firstTaskId,
     comparisonRoute: firstTask.plan.profile.route,
+    comparisonRouteSource,
+    comparisonFinalStatus: firstTask.status,
+    comparisonDurationMs,
+    taskTimeoutMs,
     comparisonAgentCount: graphBefore.length,
     answerPreserved: firstAnswerAfter === firstAnswerBefore,
     graphPreserved: graphBefore.every((id) => graphAfter.includes(id)),
@@ -218,9 +275,10 @@ try {
   }, null, 2)}\n`);
 } finally {
   observeNavigation = false;
+  // Stop browser persistence before deleting this run's isolated sessions.
+  await browser.close();
   for (const taskId of createdTaskIds) await cleanupTask(taskId);
   for (const sessionId of createdSessionIds) {
     await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE', headers: qaHeaders }).catch(() => undefined);
   }
-  await browser.close();
 }

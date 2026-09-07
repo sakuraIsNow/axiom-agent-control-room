@@ -71,6 +71,8 @@ try {
       'server/runtime/outboundNotifications.postgres.test.ts',
       'server/runtime/scheduler.postgres.test.ts',
       'server/runtime/businessCapabilityStore.postgres.test.ts',
+      'server/runtime/toolExecutionStore.postgres.test.ts',
+      'server/runtime/providerBindings.postgres.test.ts',
     ]);
   } else {
     await run(['--import', 'tsx', '--test', 'server/runtime/businessCapabilityStore.postgres.test.ts']);

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { AgentGraph, AgentMode, AgentPhase, FileAttachment, ImageAttachment, RunEvent, Session, TaskProfile, TopologyAgent, WorkflowTaskSummary } from '../../types';
 import type { UiTheme } from '../../lib/uiTheme';
+import type { TaskProviderConfig } from '../../lib/taskRuntime';
 
 export type ReviewResultState = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
 export type GuidanceState = {
@@ -66,6 +67,7 @@ export type DashboardProps = {
    */
   onDeleteTask: (taskId: string, taskIds?: string[]) => Promise<boolean>;
   onRefreshTasks: () => Promise<void>;
+  onTaskActionChanged?: (taskId: string, afterSequence?: number) => Promise<void>;
   sessionId: string;
   sessions: Session[];
   activeSession: Session;
@@ -78,6 +80,7 @@ export type DashboardProps = {
   readiness: 'ready' | 'degraded' | 'blocked';
   provider: string;
   textModelCredentialId?: string;
+  providerConfig?: TaskProviderConfig;
   onThemeChange: (theme: UiTheme) => void;
   principalUserId?: string;
   onboardingReady: boolean;

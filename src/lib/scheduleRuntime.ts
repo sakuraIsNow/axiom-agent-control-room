@@ -1,4 +1,5 @@
 import type { AgentMode, ScheduleCadence, ScheduleDraft, ScheduleHealthActionAudit, ScheduleInsights, ScheduledTrigger, WorkflowTaskSummary } from '../types';
+import type { TaskProviderConfig } from './taskRuntime';
 
 const readJson = async <T>(response: Response, fallback: string) => {
   const body = await response.json().catch(() => null) as T & { error?: string } | null;
@@ -27,7 +28,7 @@ export async function applyScheduleHealthAction(scheduleId: string, suggestionId
   return readJson<{ schedule: ScheduledTrigger; applied: ScheduleHealthActionAudit }>(response, '日程调整失败');
 }
 
-export async function draftSchedule(input: { request: string; sessionId: string; timezone?: string; modelCredentialId?: string }) {
+export async function draftSchedule(input: { request: string; sessionId: string; timezone?: string; modelCredentialId?: string; providerConfig?: TaskProviderConfig }) {
   const response = await fetch('/api/schedules/draft', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -42,6 +43,7 @@ export async function createSchedule(input: {
   input: string;
   mode: AgentMode;
   modelCredentialId?: string;
+  providerConfig?: TaskProviderConfig;
   inputArtifactTaskId?: string;
   cadence?: ScheduleCadence;
   intervalSeconds?: number;

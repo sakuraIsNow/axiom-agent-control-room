@@ -1,5 +1,6 @@
 import type { AgentMode, ChatAttachment, ChatMessage, ChatRouteDecision, ImageProviderSettings, TextProviderSettings, Usage, VideoProviderSettings } from '../types';
 import { consumeSseBlocks } from './sse';
+import { observeMiniAppTask } from './miniAppExecution';
 
 type StreamHandlers = {
   onStatus: (phase: string, message: string) => void;
@@ -66,6 +67,19 @@ export async function streamAgentResponse(
   if (!response.ok || !response.body) {
     const body = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(body?.error ?? `Agent 网关返回 HTTP ${response.status}。`);
+  }
+
+  if (response.status === 202 && response.headers.get('content-type')?.includes('application/json')) {
+    const accepted = await response.json() as { task?: { id?: string; model?: string } };
+    if (!accepted.task?.id) throw new Error('媒体任务没有返回有效的任务标识。');
+    const startedAt = Date.now();
+    await observeMiniAppTask(accepted.task.id, signal, (progress) => {
+      if (progress.status) handlers.onStatus('inference', progress.status);
+      if (progress.reset) handlers.onReset?.();
+      if (progress.content) handlers.onToken(progress.content);
+    });
+    handlers.onComplete({ durationMs: Date.now() - startedAt, model: accepted.task.model, route: 'single-agent', agentRole: routing?.agentRole });
+    return;
   }
 
   const reader = response.body.getReader();

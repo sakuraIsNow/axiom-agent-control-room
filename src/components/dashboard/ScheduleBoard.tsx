@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { completionSourceStatus, evidenceSourceLabels } from '../../lib/evidencePresentation';
 import {
   Activity,
   Bot,
@@ -74,10 +75,7 @@ const runStatus = (status: WorkflowTaskSummary['status']) => ({
 
 const evidenceText = (run: WorkflowTaskSummary) => {
   if (!run.evidenceSummary) return null;
-  if (run.evidenceSummary.status === 'verified') return '交付已验证';
-  if (run.evidenceSummary.status === 'partial') return '部分验证';
-  if (run.evidenceSummary.status === 'unverified') return '尚未验证';
-  return '无需验证';
+  return evidenceSourceLabels[completionSourceStatus(run.evidenceSummary)];
 };
 
 const healthActionLabel: Record<ScheduleHealthActionAudit['action'], string> = {
@@ -86,7 +84,7 @@ const healthActionLabel: Record<ScheduleHealthActionAudit['action'], string> = {
   reschedule: '已确认调整时间',
 };
 
-export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: string; modelCredentialId?: string }) {
+export function ScheduleBoard({ sessionId, modelCredentialId, providerConfig }: { sessionId: string; modelCredentialId?: string; providerConfig?: import('../../lib/taskRuntime').TaskProviderConfig }) {
   const [schedules, setSchedules] = useState<ScheduledTrigger[]>([]);
   const [latestRuns, setLatestRuns] = useState<Record<string, WorkflowTaskSummary>>({});
   const [insights, setInsights] = useState<ScheduleInsights | null>(null);
@@ -161,7 +159,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     setError(null);
     setDraftResult(null);
     try {
-      const result = await draftSchedule({ request: request.trim(), sessionId, modelCredentialId });
+      const result = await draftSchedule({ request: request.trim(), sessionId, modelCredentialId, providerConfig });
       setDraftResult(result);
     } catch (caught) {
       setError(userFacingError(caught, '日程 Agent 未能生成草案。'));
@@ -176,7 +174,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     setError(null);
     try {
       const { draft } = draftResult;
-      await createSchedule({ sessionId, title: draft.title, input: draft.input, mode: draft.mode, cadence: draft.schedule, modelCredentialId, inputArtifactTaskId: inputArtifactTaskId || undefined });
+      await createSchedule({ sessionId, title: draft.title, input: draft.input, mode: draft.mode, cadence: draft.schedule, modelCredentialId, providerConfig, inputArtifactTaskId: inputArtifactTaskId || undefined });
       setRequest('');
       setDraftResult(null);
       setInputArtifactTaskId('');
@@ -193,7 +191,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     setBusy('advanced');
     setError(null);
     try {
-      await createSchedule({ sessionId, title, input, mode, intervalSeconds: Math.max(15, Math.round(intervalMinutes * 60)), modelCredentialId, inputArtifactTaskId: inputArtifactTaskId || undefined });
+      await createSchedule({ sessionId, title, input, mode, intervalSeconds: Math.max(15, Math.round(intervalMinutes * 60)), modelCredentialId, providerConfig, inputArtifactTaskId: inputArtifactTaskId || undefined });
       setTitle('');
       setInput('');
       setInputArtifactTaskId('');
@@ -317,7 +315,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId }: { sessionId: str
     </div>
 
     {artifactInputs.length > 0 && <label className="schedule-artifact-link">
-      <span><Link2 size={14} />接续已验证结果</span>
+      <span><Link2 size={14} />接续可用结果</span>
       <select value={inputArtifactTaskId} onChange={(event) => setInputArtifactTaskId(event.target.value)}>
         <option value="">不接续，独立执行</option>
         {artifactInputs.map((artifact) => <option key={artifact.taskId} value={artifact.taskId}>{artifact.title}</option>)}

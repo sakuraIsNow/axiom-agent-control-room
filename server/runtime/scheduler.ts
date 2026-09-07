@@ -18,6 +18,7 @@ export type ScheduledTrigger = {
   input: string;
   mode: 'analyze' | 'build' | 'decide';
   modelCredentialId?: string;
+  providerBindingId?: string;
   inputArtifact?: ScheduleArtifactInput;
   cadence: ScheduleCadence;
   /** Compatibility and retry-backoff value for schedules created before cadence support. */
@@ -84,7 +85,7 @@ export class ScheduleHealthActionConflictError extends Error {
   }
 }
 
-export type ScheduledTriggerInput = Pick<ScheduledTrigger, 'tenantId' | 'userId' | 'sessionId' | 'title' | 'input' | 'mode' | 'modelCredentialId' | 'inputArtifact' | 'enabled'> & {
+export type ScheduledTriggerInput = Pick<ScheduledTrigger, 'tenantId' | 'userId' | 'sessionId' | 'title' | 'input' | 'mode' | 'modelCredentialId' | 'providerBindingId' | 'inputArtifact' | 'enabled'> & {
   id?: string;
   cadence?: ScheduleCadence;
   intervalSeconds?: number;
@@ -345,7 +346,7 @@ export class InMemoryScheduler implements Scheduler {
 }
 
 const triggerFromRow = (row: {
-  id: string; tenant_id: string; user_id: string; session_id: string; title: string; input: string; model_credential_id?: string | null;
+  id: string; tenant_id: string; user_id: string; session_id: string; title: string; input: string; model_credential_id?: string | null; provider_binding_id?: string | null;
   mode: ScheduledTrigger['mode']; interval_seconds: number; enabled: boolean; next_run_at: Date | string; created_at: Date | string;
   cadence_json?: unknown; last_run_at?: Date | string | null; failure_count?: number | string; last_error?: string | null;
   last_run_status?: ScheduledRunStatus | null; dead_lettered_at?: Date | string | null; input_artifact_json?: unknown;
@@ -371,6 +372,7 @@ const triggerFromRow = (row: {
   input: row.input,
   mode: row.mode,
   modelCredentialId: row.model_credential_id ?? undefined,
+  providerBindingId: row.provider_binding_id ?? undefined,
   ...(inputArtifact ? { inputArtifact } : {}),
   cadence,
   intervalSeconds: cadenceIntervalSeconds(cadence),
@@ -459,6 +461,7 @@ export class PostgresScheduler implements Scheduler {
         );
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failure_count INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS model_credential_id UUID;
+        ALTER TABLE schedules ADD COLUMN IF NOT EXISTS provider_binding_id UUID;
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS input_artifact_json JSONB;
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS cadence_json JSONB;
         ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_run_at TIMESTAMPTZ;
@@ -509,15 +512,15 @@ export class PostgresScheduler implements Scheduler {
     await this.ready();
     const item = createTrigger(input);
     const result = await this.pool.query(`
-      INSERT INTO schedules (id, tenant_id, user_id, session_id, title, input, mode, model_credential_id, input_artifact_json, interval_seconds, cadence_json, enabled, next_run_at, created_at, claimed_until, failure_count, last_run_at, last_error, last_run_status, dead_lettered_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14,NULL,0,NULL,NULL,NULL,NULL)
+      INSERT INTO schedules (id, tenant_id, user_id, session_id, title, input, mode, model_credential_id, input_artifact_json, interval_seconds, cadence_json, enabled, next_run_at, created_at, provider_binding_id, claimed_until, failure_count, last_run_at, last_error, last_run_status, dead_lettered_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15,NULL,0,NULL,NULL,NULL,NULL)
       ON CONFLICT (id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id, user_id=EXCLUDED.user_id, session_id=EXCLUDED.session_id,
-        title=EXCLUDED.title, input=EXCLUDED.input, mode=EXCLUDED.mode, model_credential_id=EXCLUDED.model_credential_id, input_artifact_json=EXCLUDED.input_artifact_json, interval_seconds=EXCLUDED.interval_seconds,
+        title=EXCLUDED.title, input=EXCLUDED.input, mode=EXCLUDED.mode, model_credential_id=EXCLUDED.model_credential_id, provider_binding_id=EXCLUDED.provider_binding_id, input_artifact_json=EXCLUDED.input_artifact_json, interval_seconds=EXCLUDED.interval_seconds,
         cadence_json=EXCLUDED.cadence_json, enabled=EXCLUDED.enabled, next_run_at=EXCLUDED.next_run_at,
         failure_count=0, last_run_at=NULL, last_error=NULL, last_run_status=NULL, dead_lettered_at=NULL,
         claimed_until=NULL, claim_token=NULL, revision=schedules.revision+1
       RETURNING *
-    `, [item.id, item.tenantId, item.userId, item.sessionId, item.title, item.input, item.mode, item.modelCredentialId ?? null, item.inputArtifact ? JSON.stringify(item.inputArtifact) : null, item.intervalSeconds, JSON.stringify(item.cadence), item.enabled, item.nextRunAt, item.createdAt]);
+    `, [item.id, item.tenantId, item.userId, item.sessionId, item.title, item.input, item.mode, item.modelCredentialId ?? null, item.inputArtifact ? JSON.stringify(item.inputArtifact) : null, item.intervalSeconds, JSON.stringify(item.cadence), item.enabled, item.nextRunAt, item.createdAt, item.providerBindingId ?? null]);
     return triggerFromRow(result.rows[0]);
   }
 

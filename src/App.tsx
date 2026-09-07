@@ -40,6 +40,9 @@ import remarkGfm from 'remark-gfm';
 import { streamAgentResponse } from './lib/agentStream';
 import { generateImage, readImageAsDataUrl } from './lib/imageGeneration';
 import { approveWorkflowPlan, approveWorkflowReview, approveWorkflowTool, cancelWorkflowTask, controlWorkflowNode, createWorkflowTask, deleteWorkflowTask, getCurrentPrincipal, getWorkflowArtifact, getWorkflowTask, listWorkflowTasks, pauseWorkflowTask, rejectWorkflowPlan, rejectWorkflowReview, rejectWorkflowTool, replanWorkflowTask, resumeWorkflowTask, retryWorkflowTask, sendTaskGuidance, sendTaskNote, streamWorkflowEvents } from './lib/taskRuntime';
+import { taskProviderConfig } from './lib/taskRuntime';
+import { miniAppNeedsTask, observeMiniAppTask } from './lib/miniAppExecution';
+import { invalidateEditedCredentials, sameProviderFields } from './lib/providerSettings';
 import { createTemplateFromCatalog, exportWorkflowTemplate, importWorkflowTemplate, listBuiltInTemplates, listWorkflowTemplates, publishWorkflowTemplate, shareWorkflowTemplate } from './lib/templateRuntime';
 import { createPlugin, deletePlugin as deleteUserPluginRequest, inspectPluginCompatibility, installPlugin, launchMiniApp, listPluginMarketplace, listPluginMarketSubmissions, listPluginReviewQueue, listPlugins, publishPlugin, reviewPluginMarketRelease, revokePluginMarketRelease, rollbackPlugin, runPlugin, streamPluginWithAgent, submitPluginToMarket, uninstallPlugin, updatePlugin, upgradePlugin } from './lib/pluginRuntime';
 import { loadUiTheme, type UiTheme } from './lib/uiTheme';
@@ -278,6 +281,7 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'agent.completed': `${eventAgentName}已完成`,
     'agent.failed': `${eventAgentName}执行失败`,
     'agent.message': `${eventAgentName}发送了协作消息`,
+    'agent.tool_loop': event.payload.phase === 'decision' ? `${eventAgentName}正在决定下一步行动` : event.payload.phase === 'observation' ? `${eventAgentName}正在读取工具结果` : 'Agent 工具循环',
     'agent.conflict': '并行 Agent 结论出现冲突，等待验证',
     'agent.interrupted': `${eventAgentName}已中断`,
     'agent.resumed': `${eventAgentName}已恢复`,
@@ -289,6 +293,8 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'tool.started': `${String(event.payload.name ?? '工具')} 开始执行`,
     'tool.completed': `${String(event.payload.name ?? '工具')} 执行完成`,
     'tool.failed': `${String(event.payload.name ?? '工具')} 执行失败`,
+    'tool.outcome_unknown': '工具结果待核对',
+    'tool.outcome_resolved': '工具结果已核对',
     'tool.approval_requested': `${String(event.payload.name ?? '工具')} 等待人工批准`,
     'tool.approved': `${String(event.payload.name ?? '工具')} 已获人工批准`,
     'tool.rejected': `${String(event.payload.name ?? '工具')} 已拒绝`,
@@ -651,7 +657,7 @@ function ProviderVaultAction({ kind, name, settings, state, onSave }: {
   state: 'idle' | 'saving' | 'saved' | 'error';
   onSave: (kind: ProviderCredentialKind, settings: ProviderSettings[ProviderCredentialKind], name: string) => void;
 }) {
-  const label = state === 'saving' ? '保存中…' : state === 'saved' ? '已安全保存' : state === 'error' ? '重试保存' : settings.credentialId ? '更新安全凭据' : '安全保存凭据';
+  const label = state === 'saving' ? '保存中…' : state === 'saved' && settings.credentialId ? '已安全保存' : state === 'error' ? '重试保存' : settings.credentialId ? '更新安全凭据' : '安全保存凭据';
   return <button
     className={`provider-vault-action ${state}`}
     type="button"
@@ -672,7 +678,10 @@ function App() {
     ? initialUrlState.sessionId
     : sessions[0]!.id;
   const [activeSessionId, setActiveSessionId] = useState(() => initialSessionId);
-  const [providerSettings, setProviderSettings] = useState<ProviderSettings>(loadProviderSettings);
+  const [providerSettings, setProviderSettingsRaw] = useState<ProviderSettings>(loadProviderSettings);
+  const setProviderSettings = useCallback((update: (current: ProviderSettings) => ProviderSettings) => {
+    setProviderSettingsRaw((current) => invalidateEditedCredentials(current, update(current)));
+  }, []);
   const [providerSaveState, setProviderSaveState] = useState<Record<ProviderCredentialKind, 'idle' | 'saving' | 'saved' | 'error'>>({ text: 'idle', vision: 'idle', image: 'idle', video: 'idle' });
   const [providerSaveMessage, setProviderSaveMessage] = useState('');
   const [uiTheme, setUiTheme] = useState<UiTheme>(() => loadUiTheme(THEME_KEY));
@@ -777,7 +786,7 @@ function App() {
     setProviderSaveMessage('');
     try {
       const credential = await saveProviderCredential({ kind, name, settings });
-      setProviderSettings((current) => ({
+      setProviderSettingsRaw((current) => !sameProviderFields(current[kind], settings) ? current : ({
         ...current,
         [kind]: { ...current[kind], credentialId: credential.id, apiKey: '' },
       }));
@@ -1408,6 +1417,16 @@ function App() {
     onProgress: (progress: MiniAppAgentProgress) => void,
   ) => {
     const routing = await routeChatMessage(prompt, plugin.definition.mode, [], providerSettings.text, signal);
+    if (miniAppNeedsTask(routing)) {
+      const requestId = makeId();
+      const result = await runPlugin({
+        pluginId: plugin.id, sessionId: `plugin-${plugin.id}-${requestId}`, input: prompt,
+        providerConfig: taskProviderConfig(providerSettings), routing,
+        idempotencyKey: `miniapp:${plugin.id}:${requestId}`, signal,
+      });
+      void refreshTaskCatalog();
+      return observeMiniAppTask(result.task.id, signal, onProgress);
+    }
     const instruction = plugin.definition.agentInstructions?.trim();
     const content = [
       `你正在响应 Mini App“${plugin.name}”内的用户请求。`,
@@ -1439,7 +1458,7 @@ function App() {
     if (reportedError) throw new Error(reportedError);
     if (!output.trim()) throw new Error('平台 Agent 没有返回内容。');
     return output;
-  }, [providerSettings.image, providerSettings.text, providerSettings.video, providerSettings.vision]);
+  }, [providerSettings, refreshTaskCatalog]);
 
   const publishUserPlugin = useCallback(async (plugin: UserPlugin) => {
     if (pluginBusy) return;
@@ -1624,6 +1643,7 @@ function App() {
       const result = await runPlugin({
         pluginId: selectedPlugin.id,
         sessionId: activeSession.id,
+        providerConfig: taskProviderConfig(providerSettings),
         input: userInput,
         values: pluginValues,
         idempotencyKey: `plugin:${selectedPlugin.id}:${activeSession.id}:${assistantId}`,
@@ -1645,7 +1665,7 @@ function App() {
       if (abortRef.current === controller) abortRef.current = null;
       updateSession(activeSession.id, (session) => ({ ...session, messages: session.messages.map((message) => message.id === assistantId ? { ...message, pending: false } : message), updatedAt: Date.now() }));
     }
-  }, [activeSession, isRunning, pluginBusy, pluginFreeform, pluginValues, refreshTaskCatalog, selectedPlugin, updateSession]);
+  }, [activeSession, isRunning, pluginBusy, pluginFreeform, pluginValues, providerSettings, refreshTaskCatalog, selectedPlugin, updateSession]);
 
   const handleTemplateImport = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1728,8 +1748,8 @@ function App() {
       if (revision !== sessionRuntimeRevisionRef.current) return;
       const terminal = ['completed', 'failed', 'cancelled'].includes(task.status);
       const historyState = taskHistoryState(task);
-      const nexusTask = isNexusWorkflowTask(task);
-      // Nexus has an independent runner history. Opening it from the task
+      const nexusTask = isNexusWorkflowTask(task) || task.sessionId.startsWith('plugin-');
+      // Nexus and Mini Apps have independent runner histories. Opening them from the task
       // board must never create a regular conversation session as a side
       // effect; only ordinary tasks are projected into the chat transcript.
       const targetSessionId = nexusTask ? activeSessionIdRef.current : (fallbackSession?.id ?? task.sessionId);
@@ -2915,11 +2935,8 @@ function App() {
           skillIds: routing.scheduler.selectedSkillIds,
           source: routing.source,
         });
-        // A saved credential can be bound to a durable workflow task. A
-        // one-time API key cannot be persisted safely, so those requests stay
-        // on the direct gateway compatibility path.
         const usesDirectGateway = routing.execution === 'gateway'
-          || (providerSettings.text.useCustom && !providerSettings.text.credentialId);
+          && !['image-generation', 'video-generation'].includes(routing.intent);
         usedDirectGateway = usesDirectGateway;
         directGraphAgentId = `${routing.agentRole}-${activeSession.id}`;
         // A conversation may span multiple routed tasks. Keep the graph from
@@ -3132,23 +3149,7 @@ function App() {
             routing,
           );
         } else {
-          const persistedSummary = activeSession.contextSummary;
-          const persistedCoverageValid = Boolean(
-            persistedSummary?.coveredMessageIds.length
-            && persistedSummary.coveredMessageIds.every((id, index) => requestMessages[index]?.id === id),
-          );
-          const workflowContextSource = persistedCoverageValid
-            ? [
-                {
-                  id: persistedSummary!.summaryId,
-                  role: 'assistant' as const,
-                  content: persistedSummary!.content,
-                  createdAt: activeSession.messages[0]?.createdAt ?? Date.now(),
-                },
-                ...requestMessages.slice(persistedSummary!.coveredMessageIds.length),
-              ]
-            : requestMessages;
-          const workflowContext = buildConversationContext(workflowContextSource);
+          const workflowContext = buildConversationContext(requestMessages);
           if (workflowContext.summaryApplied) {
             addRunEvent('context', `已自动整理最早的 ${workflowContext.summarizedMessages} 条消息，保留最新上下文执行。`);
           }
@@ -3163,10 +3164,13 @@ function App() {
             mode,
             templateId: selectedTemplateId ?? undefined,
             modelCredentialId: providerSettings.text.useCustom ? providerSettings.text.credentialId : undefined,
+            providerConfig: taskProviderConfig(providerSettings),
             // assistantId is created once for this user turn and remains stable
             // if the task POST is retried or the stream reconnects.
             idempotencyKey: `conversation:${activeSession.id}:${assistantId}`,
             routing,
+            contextMessages: requestMessages,
+            ...(requestMessages.at(-1)?.attachments?.length ? { inputSource: { messageId: requestMessages.at(-1)!.id, attachments: requestMessages.at(-1)!.attachments! } } : {}),
             signal: controller.signal,
           });
           workflowTaskCreated = true;
@@ -3649,6 +3653,26 @@ function App() {
             onOpenTask={(taskId) => { void openCatalogTask({ id: taskId }); }}
             onDeleteTask={deleteTask}
             onRefreshTasks={refreshTaskCatalog}
+            onTaskActionChanged={async (taskId, afterSequence) => {
+              if (typeof afterSequence === 'number') resumeAfterSequenceRef.current.set(taskId, afterSequence);
+              const sessionId = activeSessionIdRef.current;
+              const revision = sessionRuntimeRevisionRef.current;
+              const workspace = useDashboardStore.getState();
+              const selectedTaskId = workspace.selectedTaskId;
+              await refreshTaskCatalog();
+              if (sessionId !== activeSessionIdRef.current || revision !== sessionRuntimeRevisionRef.current) return;
+              const currentWorkspace = useDashboardStore.getState();
+              if (workspace.nav !== currentWorkspace.nav || selectedTaskId !== currentWorkspace.selectedTaskId) return;
+              if (currentWorkspace.nav === 'tasks' && (selectedTaskId === taskId || !selectedTaskId && taskCatalog[0]?.id === taskId)) {
+                await openCatalogTask({ id: taskId });
+                return;
+              }
+              const selected = sessions.find((session) => session.id === sessionId);
+              if (selected && (selected.activeTaskId === taskId || selected.messages.some((message) => message.taskId === taskId))) {
+                resumeAttemptsRef.current.delete(taskId);
+                await openCatalogTask({ id: taskId }, selected);
+              }
+            }}
             sessionId={activeSession.id}
             sessions={sessions}
             activeSession={activeSession}
@@ -3679,6 +3703,7 @@ function App() {
             readiness={readiness.state}
             provider={activeProvider}
             textModelCredentialId={providerSettings.text.useCustom ? providerSettings.text.credentialId : undefined}
+            providerConfig={taskProviderConfig(providerSettings)}
             onThemeChange={setUiTheme}
             onboardingReady={sessionsReady && taskCatalogReady}
           />
@@ -4100,7 +4125,7 @@ function App() {
           </section>
         </div>
       )}
-      {miniAppPlugin && <MiniAppWindow plugin={miniAppPlugin} onClose={() => setMiniAppPlugin(null)} onAgentRequest={runMiniAppAgentRequest} />}
+      {miniAppPlugin && <MiniAppWindow plugin={miniAppPlugin} onClose={() => setMiniAppPlugin(null)} onAgentRequest={runMiniAppAgentRequest} onAgentResume={observeMiniAppTask} />}
     </div>
   );
 }

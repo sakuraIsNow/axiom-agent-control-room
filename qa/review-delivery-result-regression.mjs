@@ -20,6 +20,7 @@ let result;
 let approveCalls = 0;
 let requestedAfter = null;
 const task = () => ({
+  revision: approveCalls + 1,
   id: taskId, runId: 'qa-review-delivery-run', sessionId, title: '审批结果回填回归', input: '生成一份可交付结果。', mode: 'build', model: 'qa-model', status,
   plan: { summary: '执行并审核。', routingReason: '复杂任务需要质量门禁。', profile, steps: [], graph, version: 1, approvalStatus: 'approved' },
   stepResults: [{ stepId: 'delivery', agentId: 'builder-delivery', role: 'builder', status: 'completed', output: '阶段结果', evidence: [], confidence: 0.8, attempts: 1, durationMs: 10 }],
@@ -67,7 +68,8 @@ await page.route(`**/api/tasks/${taskId}/events?after=*`, async (route) => {
   const event = { id: 'completed-event', type: 'task.completed', version: 1, taskId, runId: 'qa-review-delivery-run', sequence: 74, timestamp: new Date().toISOString(), payload: { result: finalResult, route: 'full-workflow', profile, graph } };
   await route.fulfill({ status: 200, contentType: 'text/event-stream; charset=utf-8', body: `id: 74\nevent: runtime\ndata: ${JSON.stringify(event)}\n\n` });
 });
-await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task: task() }) }));
+await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ task: task(), actionPermissions: { canManage: true } }) }));
+await page.route(`**/api/tasks/${taskId}/tools/executions`, (route) => route.fulfill({ json: { enabled: true, executions: [], canResume: false } }));
 await page.route('**/api/sessions?limit=50', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: [session], deletedSessionIds: [] }) }));
 await page.route(`**/api/sessions/${sessionId}`, async (route) => {
   if (route.request().method() === 'PUT') {
