@@ -34,7 +34,8 @@ import { measuredSpecialistTokens, specialistUsage } from './specialistExecution
 import { routeSkillIds, runtimeSkillCatalog, skillInstructions } from './skillCatalog.js';
 import { evaluateWorkflowConditions, explainWorkflowConditions } from './workflowConditions.js';
 import { analyzeWorkflowDag, workflowDagIssueText } from './workflowDag.js';
-import { summarizeCompletionEvidence } from './completionEvidence.js';
+import { hasCurrentHumanAcceptance, summarizeCompletionEvidence } from './completionEvidence.js';
+import { formatDependencyContext, reviewMadeProgress } from './executionEfficiency.js';
 import { validateEvidence } from './evidenceValidation.js';
 import { parseToolLoopRecord, runAgentToolLoop, toolInvocationDigest, toolLoopScope } from './agentToolLoop.js';
 import { selectNonConflictingSteps } from './workflowConcurrency.js';
@@ -1199,24 +1200,42 @@ export class WorkflowOrchestrator {
       });
     };
     const modelClient = await this.modelForTask(task);
-    const completion = await modelClient.complete({
-      ...request,
-      model: request.model ?? task.model,
-      onDelta: async (delta) => {
-        if (request.streamDeltas === false) return;
-        bufferedContent += delta.content ?? '';
-        bufferedReasoning += delta.reasoning ?? '';
-        if (Date.now() - lastDeltaFlushAt >= 45 || bufferedContent.length >= 1_024) await flushDelta();
-      },
-      onRetry: async (nextAttempt) => {
-        await flushDelta();
-        await this.emit(task, {
-          type: 'model.delta',
-          agentId: streamAgentId,
-          payload: { stage, reset: true, attempt: nextAttempt },
-        });
-      },
-    });
+    const callStartedAt = Date.now();
+    let firstDeltaAt: number | undefined;
+    let callAttempts = 1;
+    let completion: Awaited<ReturnType<ModelClient['complete']>>;
+    try {
+      completion = await modelClient.complete({
+        ...request,
+        model: request.model ?? task.model,
+        onDelta: async (delta) => {
+          if (firstDeltaAt === undefined && (delta.content || delta.reasoning)) firstDeltaAt = Date.now();
+          if (request.streamDeltas === false) return;
+          bufferedContent += delta.content ?? '';
+          bufferedReasoning += delta.reasoning ?? '';
+          if (Date.now() - lastDeltaFlushAt >= 45 || bufferedContent.length >= 1_024) await flushDelta();
+        },
+        onRetry: async (nextAttempt) => {
+          callAttempts = nextAttempt;
+          await flushDelta();
+          await this.emit(task, {
+            type: 'model.delta',
+            agentId: streamAgentId,
+            payload: { stage, reset: true, attempt: nextAttempt },
+          });
+        },
+      });
+    } catch (error) {
+      await flushDelta();
+      await this.emit(task, { type: 'model.failed', agentId: streamAgentId, payload: {
+        stage, spanId, model: request.model ?? task.model ?? modelClient.model,
+        attempts: callAttempts, durationMs: Date.now() - callStartedAt,
+        usageStatus: 'unknown', promptCharacters: request.system.length + request.user.length,
+        firstDeltaMs: firstDeltaAt === undefined ? null : firstDeltaAt - callStartedAt,
+        cancelled: request.signal.aborted,
+      } });
+      throw error;
+    }
     await flushDelta();
     const measuredUsage = specialistUsage(completion.usage);
     const measuredTokens = measuredSpecialistTokens(measuredUsage);
@@ -1238,12 +1257,15 @@ export class WorkflowOrchestrator {
     const after = { tokens: before.tokens + totalTokens, costUsd: before.costUsd + estimatedCostUsd };
     await this.emit(task, {
       type: 'model.completed',
+      agentId: streamAgentId,
       payload: {
         stage,
         spanId,
         model: request.model ?? task.model ?? modelClient.model,
         attempts: completion.attempts,
         durationMs: completion.durationMs,
+        promptCharacters: request.system.length + request.user.length,
+        firstDeltaMs: firstDeltaAt === undefined ? null : firstDeltaAt - callStartedAt,
         usageStatus: measuredTokens === undefined ? 'unknown' : 'measured',
         ...(promptTokens !== undefined ? { promptTokens } : {}),
         ...(completionTokens !== undefined ? { completionTokens } : {}),
@@ -1513,11 +1535,7 @@ Do not claim tools or evidence that are not available.`,
       });
     }
     const dependencyContext = dependencyResults
-      .map((result) => {
-        const message = dependencyMessages.find((candidate) => candidate.fromAgentId === result.agentId);
-        const handoff = message?.handoff;
-        return `### ${result.stepId} (${result.role})\n交接状态：${handoff?.status ?? 'complete'}\n交接摘要：${handoff?.summary ?? limitText(result.output, this.stepResultPreviewChars)}\n按连线传递的内容：${message?.content ?? handoff?.summary ?? limitText(result.output, this.stepResultPreviewChars)}\n未决问题：${handoff?.openQuestions.join('；') || '无'}\n证据引用：${handoff?.evidenceIds.join(', ') || '无'}\nresult_ref: ${result.resultRef?.id ?? 'None.'}\nArtifact refs: ${handoff?.artifactIds.join(', ') || (result.artifacts ?? []).map((artifact) => artifact.id).join(', ') || 'None.'}`;
-      })
+      .map((result, index) => formatDependencyContext(result, dependencyMessages[index], this.stepResultPreviewChars))
       .join('\n\n');
     const specialistId = step.agentContract?.agentId;
     if (specialistId && isWorkflowSpecialist(specialistId)) {
@@ -1553,6 +1571,7 @@ Do not claim tools or evidence that are not available.`,
         } catch (caught) {
           lastSpecialistError = caught;
           if (caught instanceof ToolExecutionUnknownError || caught instanceof ToolExecutionPendingError || caught instanceof ToolExecutionIdentityConflictError) throw caught;
+          // This boundary also includes configuration and attachment preflight, so it cannot establish a model call.
           if (signal.aborted) throw signal.reason ?? caught;
           if (specialistAttempt >= attemptsAllowed) throw caught;
           await this.emit(task, {
@@ -2416,7 +2435,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
         await this.emit(task, {
           type: 'routing.decided',
           agentId: 'router-agent',
-          payload: { ...routingDecision, profile, routingVersion: task.plan?.routingVersion, routerModel: task.plan?.routerModel },
+          payload: { ...routingDecision, profile, source: task.plan?.routingSource, routingVersion: task.plan?.routingVersion, routerModel: task.plan?.routerModel },
         });
         await this.emit(task, {
           type: 'scheduling.started',
@@ -2757,6 +2776,11 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
                 diagnosis: failureLabel(outcome.reason),
                 skipped: failed.skipped === true,
                 failureStrategy: step.failureStrategy ?? 'retry',
+                ...(step.agentContract?.agentId && isWorkflowSpecialist(step.agentContract.agentId) ? {
+                  serviceAgent: step.agentContract.agentId,
+                  callKind: 'specialist-service',
+                  usageStatus: 'not-observed',
+                } : {}),
               },
             });
           }
@@ -2932,7 +2956,16 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
             payload: { iteration: loopIteration, phase: 'review-correction', round, readySteps: [correction.stepId] },
           });
           task = await this.store.updateTask(task.id, { stepResults: results });
+          const previousReview = review;
           review = await this.review(task, results, signal, round + 1);
+          if (!reviewMadeProgress(previousReview, review)) {
+            await this.emit(task, { type: 'loop.iteration', payload: {
+              iteration: loopIteration, phase: 'review-stopped', round, reason: 'no-progress',
+              previousScore: previousReview.score, score: review.score,
+              preservedCompletedSteps: results.filter((item) => item.status === 'completed').map((item) => item.stepId),
+            } });
+            break;
+          }
         }
       } else {
         review = {
@@ -2991,7 +3024,7 @@ Be complete, executable, and direct. Preserve every verified source URL, Markdow
           graph: finalGraph,
           evidenceSummary: summarizeCompletionEvidence(plan, results, review, profile.requiresReview, {
             taskId: task.id,
-            humanAccepted: (await this.store.getEvents(task.id)).filter((event) => event.type === 'review.approved' || event.type === 'review.rejected').at(-1)?.type === 'review.approved',
+            humanAccepted: hasCurrentHumanAcceptance(task, await this.store.getEvents(task.id)),
           }),
           partial: unresolvedWorkflowFailures.length > 0 || results.some((item) => item.handoff && item.handoff.status !== 'complete'),
           ...(unresolvedWorkflowFailures.length ? {

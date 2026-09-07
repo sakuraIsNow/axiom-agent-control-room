@@ -4,7 +4,7 @@
 
 > 把一句话交给一组真正会分工的 Agent。Axiom 会判断任务难度、安排合适的 Agent、展示实时进度，并在交付前帮你检查结果。
 
-当前源码版本：**v2.3.0-rc.6**（执行恢复与人工协作候选版）
+当前源码版本：**v2.3.0-rc.7**（路由、交付质量与交互收口候选版）
 
 对话、查资料、读文件、制作内容，或让多个 Agent 协作完成一项任务。Axiom 把执行进度、人工确认和最终成果放在同一个工作空间中。
 
@@ -82,6 +82,8 @@ Axiom 是一个可以自己安排工作的 AI 控制台。
 
 ### 任务执行闭环
 
+- **路由暂时不可用，也不丢后半段要求**：前后端使用同一套降级契约，需要搜索、附件、分析或验证时保留对应依赖，不把“查资料并分析验证”变成只有搜索；简单问题仍走轻量路径。
+- **减少重复，保留真实用量**：相同交接文本只传一次；审核反复提出相同问题又没有改善时停止自动修正，按原配置进入恢复或人工处理。任务诊断分别记录已知与未知用量、重试、人工介入和交付状态。
 - **一次交给多份资料**：图片和文档为本轮补齐对应分析能力，不会把已经安排的研究、分析或构建 Agent 覆盖掉。任务保存这一轮附件的固定副本，避免恢复时读错文件。
 - **Agent 能接着工具结果继续做**：先读取、观察结果，再决定下一步查询或操作；每轮都有记录，重复调用或没有进展时会停止，不会无限重试。
 - **中断后不盲目重复操作**：已有成功回执可以复用。外部写入结果不确定时，任务详情会提供核对入口，填写核对依据后再明确继续任务。
@@ -122,24 +124,28 @@ Synthesizer：汇总成果、来源和未解决事项
 
 ## ✅ 当前版本验收结果
 
-2026-09-07 的 `v2.3.0-rc.6` 验收结果：
+2026-09-07 的 `v2.3.0-rc.7` 验收结果：
 
 ```text
 npm run check       通过
-npm test            611 tests / 597 passed / 0 failed / 14 PostgreSQL skipped
+npm test            644 tests / 630 passed / 0 failed / 14 PostgreSQL skipped
 PostgreSQL 隔离专项  16 passed / 0 failed / 0 skipped
 npm run build       通过
-人工协作界面专项    13 passed / 0 failed
+确定性路由故障      137 passed / 0 failed
+在线 Router/Scheduler 7 passed / 0 failed
+固定交付质量        14 passed / 0 failed
+有数据双语交互      10 passed / 0 failed
+真实 Agent Graph    22 passed / 0 failed
 npm run qa:visual   172 项断言通过
 npm run qa:mcp-business
                     44 passed / 0 failed
 npm run qa:all:local
-                    35 passed / 0 failed / 3 skipped
+                    37 passed / 0 failed / 3 skipped
 ```
 
-默认测试跳过的 14 个 PostgreSQL 用例已在独立数据库中补跑。完整门禁包含旧库迁移、Worker 故障接管、MinIO 跨实例读写、Fake MCP 30 个 P0 + 14 个 P1，以及桌面和移动端交互回归。
+默认测试跳过的 14 个 PostgreSQL 用例已在独立数据库中补跑。完整门禁自动创建临时 API、另一套 PostgreSQL 专项库及临时 Artifact，不再把测试记录写进日常任务列表；覆盖旧库迁移、Worker 故障接管、MinIO 跨实例读写、Fake MCP 30 个 P0 + 14 个 P1，以及桌面和移动端交互。
 
-这次不是所有检查一次通过：最终门禁的一项在线路由评测首次降级，重试后通过。此前的迁移、界面夹具、翻译与等待超时问题及修复依据均保留在[本批验收记录](docs/cross-entry-consistency-20260907.md)。路由模型不可用时，复合检索仍可能降为单搜索，不能保证保留原定分工；该边界已列为后续 P0，不算本批完成。
+首轮完整门禁发现了英文 Readiness 动态告警漏翻译，修复后重新执行全部检查，最终轮没有重试。两轮结果、Graph 性能修复和实际测量边界均保留在[rc.7 验收记录](docs/rc7-product-quality-20260907.md)。固定交付测试只验证明确标注的要求和引用配对，不等于任意回答事实正确；真实复杂任务仍可能需要人工审核或明确接受部分结果，这些不会记作自动首次成功。
 
 仍未现场验收的是 3 项需要额外端点或进程的能力：TencentDB MemoryCore HTTP、Axiom MemoryCore 适配器和 Harness/Codex sidecar。目标部署仍须用自己的 MinIO/S3/COS bucket 重跑对象存储门禁；本机 MinIO 通过不等于云端权限、网络和生命周期策略已经验收。跳过不等于通过，也不影响本地记忆、Artifact 目录和协议级 Harness/Codex 回归。
 

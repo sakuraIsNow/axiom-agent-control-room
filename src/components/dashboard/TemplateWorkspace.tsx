@@ -75,9 +75,9 @@ export function TemplateWorkspace(props: TemplateWorkspaceProps) {
           return <article className={`dash-template-item glass-panel ${template.status} ${selected ? 'selected' : ''}`} key={template.id}>
             <span className={`dash-template-status ${template.status}`} />
             <div className="dash-template-copy">
-              <strong>{template.name}</strong>
+              <strong data-i18n-ignore="true">{template.name}</strong>
               <small>{template.visibility === 'team' ? '团队共享' : '仅自己'} · v{template.version} · {statusLabel[template.status]}</small>
-              <p>{template.description || '未填写模板说明'}</p>
+              <p data-i18n-ignore={Boolean(template.description)}>{template.description || '未填写模板说明'}</p>
             </div>
             <div className="dash-template-actions">
               {template.status === 'published' && <button type="button" className={selected ? 'selected' : 'primary'} onClick={() => onUse(template)} disabled={busy}>{selected ? '已选择' : '使用'}</button>}

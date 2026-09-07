@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Bot, LoaderCircle, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import type { ChatAttachment, UserPlugin } from '../../types';
 import { secureArtifactDocument } from '../../lib/chatArtifacts';
@@ -21,6 +21,7 @@ type Props = {
 type PluginAgentRequest = { type: 'axiom.plugin.agent.request'; requestId: string; prompt: string };
 
 export function MiniAppWindow({ plugin, onClose, onAgentRequest, onAgentResume }: Props) {
+  const titleId = useId();
   const { language } = useUiLanguage();
   const zh = language === 'zh-CN';
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -134,14 +135,14 @@ export function MiniAppWindow({ plugin, onClose, onAgentRequest, onAgentResume }
   }, [plugin.id, srcDoc]);
 
   return <div className="mini-app-backdrop" role="presentation">
-    <section className={`mini-app-window ${taskView?.pluginId === plugin.id ? 'has-task-actions' : ''}`} style={style} role="dialog" aria-modal="true" aria-label={plugin.name}>
+    <section className={`mini-app-window ${taskView?.pluginId === plugin.id ? 'has-task-actions' : ''}`} style={style} role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <header className="mini-app-window-bar">
         <span className="mini-app-window-mark">{plugin.definition.agentEnabled ? <Bot size={14} /> : <ShieldCheck size={14} />}</span>
-        <strong>{plugin.name}</strong>
+        <strong id={titleId} data-i18n-ignore="true">{plugin.name}</strong>
         <small>{plugin.definition.agentEnabled ? '平台 Agent 已连接' : '隔离运行'}</small>
         <button type="button" aria-label="关闭插件" onClick={onClose}><X size={17} /></button>
       </header>
-      <div className="mini-app-content"><iframe ref={frameRef} title={plugin.name} srcDoc={srcDoc} sandbox="allow-scripts" referrerPolicy="no-referrer" />
+      <div className="mini-app-content"><iframe ref={frameRef} title={plugin.name} data-i18n-ignore="true" srcDoc={srcDoc} sandbox="allow-scripts" referrerPolicy="no-referrer" />
       {taskView?.pluginId === plugin.id && <aside className="mini-app-task-actions">{taskView.reconnect && <div className="mini-app-reconnect" data-i18n-ignore="true"><span>{zh ? '连接中断，原任务已保留' : 'Connection lost. Your task is preserved.'}</span><button type="button" disabled={reconnecting || !onAgentResume} onClick={() => void resumeTask(taskView.taskId)}>{reconnecting ? <LoaderCircle size={14} /> : <RefreshCw size={14} />}{zh ? '重新连接' : 'Reconnect'}</button></div>}<TaskActionPanel taskId={taskView.taskId} refreshKey={taskView.status} onChanged={resumeTask} /></aside>}</div>
     </section>
   </div>;

@@ -293,7 +293,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId, providerConfig }: 
       <div className="schedule-next-run">
         <Clock3 size={15} />
         <span>{nextSchedule ? '下一项' : '当前'}</span>
-        <strong>{nextSchedule ? nextSchedule.title : '暂无待执行日程'}</strong>
+        <strong data-i18n-ignore={Boolean(nextSchedule)}>{nextSchedule ? nextSchedule.title : '暂无待执行日程'}</strong>
         {nextSchedule && <time>{new Date(nextSchedule.nextRunAt).toLocaleString()}</time>}
       </div>
     </div>
@@ -318,7 +318,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId, providerConfig }: 
       <span><Link2 size={14} />接续可用结果</span>
       <select value={inputArtifactTaskId} onChange={(event) => setInputArtifactTaskId(event.target.value)}>
         <option value="">不接续，独立执行</option>
-        {artifactInputs.map((artifact) => <option key={artifact.taskId} value={artifact.taskId}>{artifact.title}</option>)}
+        {artifactInputs.map((artifact) => <option key={artifact.taskId} value={artifact.taskId} data-i18n-ignore="true">{artifact.title}</option>)}
       </select>
       {inputArtifactTaskId && <small>执行时会校验来源版本；原结果变化时自动停止，不会静默使用新内容。</small>}
     </label>}
@@ -331,7 +331,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId, providerConfig }: 
         <button type="button" aria-label="关闭草案" onClick={() => setDraftResult(null)}><X size={15} /></button>
       </header>
       <div className="schedule-draft-grid">
-        <div><small>日程</small><strong>{draftResult.draft.title}</strong><p>{draftResult.draft.input}</p></div>
+        <div><small>日程</small><strong data-i18n-ignore="true">{draftResult.draft.title}</strong><p data-i18n-ignore="true">{draftResult.draft.input}</p></div>
         <div className="schedule-draft-facts">
           <span><CalendarClock size={14} />{cadenceText(draftResult.draft.schedule)}</span>
           <span><Bot size={14} />Agent 自动编排</span>
@@ -377,7 +377,7 @@ export function ScheduleBoard({ sessionId, modelCredentialId, providerConfig }: 
                 onClick={() => document.getElementById(`schedule-${occurrence.scheduleId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
               >
                 <time>{new Date(occurrence.startsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
-                <span>{occurrence.title}</span>
+                <span data-i18n-ignore="true">{occurrence.title}</span>
               </button>)}
               {dayOccurrences.length === 0 && calendarMode === 'week' && <small>空闲</small>}
               {dayOccurrences.length > (calendarMode === 'week' ? 4 : 2) && <em>+{dayOccurrences.length - (calendarMode === 'week' ? 4 : 2)}</em>}
@@ -431,13 +431,13 @@ export function ScheduleBoard({ sessionId, modelCredentialId, providerConfig }: 
         return <article id={`schedule-${schedule.id}`} key={schedule.id} className={`dash-agent-card schedule-card ${schedule.lastRunStatus === 'dead-letter' ? 'schedule-dead-letter' : ''}`}>
           <div className="schedule-card-main">
             <div className="dash-agent-card-head">
-              <strong>{schedule.title}</strong>
+              <strong data-i18n-ignore="true">{schedule.title}</strong>
               <span>{modeLabel[schedule.mode]}</span>
               <em className={`schedule-status ${schedule.lastRunStatus ?? (schedule.enabled ? 'success' : 'paused')}`}>
                 {completedOnce ? '已完成' : schedule.lastRunStatus === 'dead-letter' ? '已暂停' : schedule.lastRunStatus === 'failed' ? `重试中 · ${schedule.failureCount}` : schedule.enabled ? '已启用' : '已停用'}
               </em>
             </div>
-            <p className="schedule-objective">{schedule.input}</p>
+            <p className="schedule-objective" data-i18n-ignore="true">{schedule.input}</p>
             <div className="schedule-meta">
               <span><CalendarClock size={13} />{cadenceText(schedule.cadence)}</span>
               <span><Bot size={13} />自动编排</span>

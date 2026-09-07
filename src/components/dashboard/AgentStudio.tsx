@@ -109,8 +109,8 @@ export function AgentStudio() {
     <div className="dash-agent-studio-list">
       {agents.length === 0 && <div className="dash-empty">暂无自定义 Agent，点击“新建 Agent”开始。</div>}
       {agents.map((agent) => <div key={agent.id} className={`dash-agent-card status-${agent.status}`}>
-        <div className="dash-agent-card-head"><strong>{agent.name}</strong><span>{agent.roleId}</span><em>{publicationStatusLabel(agent.status)}</em></div>
-        <p>{agent.description || agent.definition.whenToUseHint}</p>
+        <div className="dash-agent-card-head"><strong data-i18n-ignore="true">{agent.name}</strong><span data-i18n-ignore="true">{agent.roleId}</span><em>{publicationStatusLabel(agent.status)}</em></div>
+        <p data-i18n-ignore="true">{agent.description || agent.definition.whenToUseHint}</p>
         <div className="dash-agent-card-actions">
           {agent.status !== 'published' && <button type="button" disabled={busy} onClick={() => void publish(agent.id)}><Rocket size={13} />发布</button>}
           {agent.status !== 'archived' && <button type="button" disabled={busy} onClick={() => void archive(agent.id)}><Archive size={13} />归档</button>}

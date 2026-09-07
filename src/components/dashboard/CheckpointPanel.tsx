@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { GitBranch, GitCompare, GitMerge, LoaderCircle, RefreshCw } from 'lucide-react';
 import { branchWorkflowCheckpoint, compareWorkflowCheckpoint, listWorkflowCheckpoints, mergeWorkflowCheckpoint } from '../../lib/taskRuntime';
 import type { WorkflowCheckpointBranch, WorkflowCheckpointDiff, WorkflowCheckpointSummary, WorkflowTaskSummary } from '../../types';
+import { useUiLanguage } from '../../lib/uiLanguage';
 
 type CheckpointState = {
   currentRevision: number;
@@ -13,6 +14,7 @@ export function CheckpointPanel({ task, onTaskCreated }: {
   task: WorkflowTaskSummary;
   onTaskCreated: (taskId: string) => Promise<void>;
 }) {
+  const { t } = useUiLanguage();
   const [state, setState] = useState<CheckpointState | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [selectedBranchId, setSelectedBranchId] = useState('');
@@ -152,7 +154,7 @@ export function CheckpointPanel({ task, onTaskCreated }: {
           </div>}
           {branches.length > 0 && <div className="dash-checkpoint-compare">
             <select value={selectedBranchId} onChange={(event) => { setSelectedBranchId(event.target.value); setDiff(null); setConflicts([]); }} aria-label="选择分支方案">
-              {branches.map((branch) => <option key={branch.taskId} value={branch.taskId}>{branch.title} · {branch.status === 'completed' ? '已完成' : branch.status === 'paused' ? '已暂停' : '执行中'}</option>)}
+              {branches.map((branch) => <option key={branch.taskId} value={branch.taskId} data-i18n-ignore="true">{branch.title} · {t(branch.status === 'completed' ? '已完成' : branch.status === 'paused' ? '已暂停' : '执行中')}</option>)}
             </select>
             <div className="dash-checkpoint-actions">
               <button type="button" disabled={Boolean(busy)} onClick={() => void compare()}><GitCompare size={12} />比较</button>

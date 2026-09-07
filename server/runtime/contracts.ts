@@ -190,6 +190,7 @@ export type WorkflowPlan = {
   routingDecision?: TurnRoutingDecision;
   schedulingDecision?: TurnSchedulingDecision;
   routingVersion?: string;
+  routingSource?: 'router-agent' | 'semantic-model' | 'deterministic-fallback';
   routerModel?: string;
   routerConfidence?: number;
   /** Immutable exact-turn input artifacts, persisted before queue admission. */
@@ -826,6 +827,7 @@ export type RuntimeEventType =
   | 'memory.policy_updated'
   | 'model.delta'
   | 'model.completed'
+  | 'model.failed'
   | 'budget.exceeded'
   | 'budget.constrained'
   | 'estimate.updated'

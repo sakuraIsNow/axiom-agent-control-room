@@ -169,7 +169,7 @@ export class HarnessTaskBridge {
     };
     this.active.set(task.id, delegation);
     try {
-      const running = await this.store.updateTask(task.id, { status: 'running', error: null, cancelRequested: false });
+      const running = await this.store.updateTask(task.id, { status: 'running', error: null, cancelRequested: false, review: null });
       await this.emit(running, 'harness.connected', { harness: this.adapter.kind, protocol: capabilities.protocol, threadId: thread.threadId, source: 'external-harness' });
       delegation.consume = this.consume(delegation);
       const turn = await this.adapter.startTurn({ taskId: task.id, threadId: thread.threadId, runId: task.runId, input: input.slice(0, 80_000), model: options.model }, controller.signal);

@@ -71,6 +71,12 @@ if (Test-Path -LiteralPath $bundledDemo) {
   Remove-Item -LiteralPath $bundledDemo -Recurse -Force
 }
 
+# TypeScript also emits test files; a runtime archive must not ship test fixtures.
+$bundledServer = Join-Path $stagingRoot "server-dist"
+Get-ChildItem -LiteralPath $bundledServer -Filter "*.test.js" -Recurse -File | ForEach-Object {
+  Remove-Item -LiteralPath $_.FullName -Force
+}
+
 $installNote = @"
 # Axiom v$version deployment bundle
 

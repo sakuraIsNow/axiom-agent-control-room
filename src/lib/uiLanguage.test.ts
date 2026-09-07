@@ -39,3 +39,37 @@ test('Readiness translates blocked and provider protection states without weaken
   const customDiagnostic = '模型返回原文：文本模型服务健康检查失败。 trace=provider-42';
   assert.equal(translateUiText(customDiagnostic, 'en'), customDiagnostic);
 });
+
+test('dynamic action labels preserve user names even when a name matches a UI translation', () => {
+  const cases = [
+    ['删除会话 研究员', 'Delete conversation 研究员'],
+    ['删除任务 任务管理', 'Delete task 任务管理'],
+    ['打开插件 运行中', 'Open plugin 运行中'],
+    ['删除日程', 'Delete 日程'],
+    ['从 分析员 开始连线', 'Start a connection from 分析员'],
+    ['连接到 输出', 'Connect to 输出'],
+    ['发布插件 审查员', 'Publish plugin 审查员'],
+    ['研究员的阶段调用未完成', "研究员's stage call did not complete"],
+  ];
+  for (const [source, expected] of cases) {
+    assert.equal(translateUiText(source, 'en'), expected);
+    assert.equal(translateUiText(source, 'zh-CN'), source);
+  }
+});
+
+test('populated execution states remain distinct in both languages', () => {
+  const cases = [
+    ['Agent 目标', 'Agent goal'],
+    ['Agent Nexus 正在执行', 'Agent Nexus is running'],
+    ['执行计划等待你的确认', 'The execution plan awaits your approval'],
+    ['Agent Nexus 等待你处理', 'Agent Nexus needs your decision'],
+    ['Agent Nexus 已保存部分结果', 'Agent Nexus saved a partial result'],
+    ['Agent Nexus 执行未完成', 'Agent Nexus execution incomplete'],
+    ['执行：进行中', 'Execute: In progress'],
+    ['交付：未完成', 'Deliver: Incomplete'],
+  ];
+  for (const [source, expected] of cases) {
+    assert.equal(translateUiText(source, 'en'), expected);
+    assert.equal(translateUiText(source, 'zh-CN'), source);
+  }
+});

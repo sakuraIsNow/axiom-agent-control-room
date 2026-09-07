@@ -1189,6 +1189,7 @@
 .dash-agent-graph-stage.dense .dash-agent-node-meta { max-width: 84px; gap: 3px; }
 .dash-agent-graph-stage.dense .dash-agent-node-meta em { max-width: 65px; font-size: 9px; }
 .dash-agent-graph-stage.dense .dash-agent-node-meta > svg { width: 11px; height: 11px; }
+.dash-agent-graph-stage.dense.live .dash-agent-graph-world > svg path { animation: none; }
 @keyframes dash-agent-spark { 0%, 100% { transform: translate(0, 4px) scale(.55); opacity: .35; } 50% { transform: translate(3px, -4px) scale(1.2); opacity: 1; } }
 .dash-task-row-status { display: inline-flex; align-items: center; gap: 4px; }
 .dash-task-row-status > svg { flex: 0 0 auto; color: var(--dash-selected); filter: drop-shadow(0 0 5px rgb(43 234 120 / 32%)); }
@@ -1308,11 +1309,13 @@
 .dash-agent-graph-world {
   transform-style: preserve-3d;
   perspective: 980px;
+  pointer-events: none;
 }
 .dash-agent-signal-node {
   transform: translate(-50%, -50%) translateZ(var(--dash-node-depth, 0px)) rotateX(var(--dash-graph-pitch-inverse, 0deg)) rotateY(var(--dash-graph-yaw-inverse, 0deg));
   transform-style: preserve-3d;
   backface-visibility: visible;
+  pointer-events: auto;
 }
 .dash-agent-sphere {
   overflow: visible;
@@ -1351,6 +1354,15 @@
 }
 
 /* Production graph controls: CSS 3D remains available without a WebGL context. */
+.dash-agent-signal-graph {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* Keep the glass in a static layer, outside the rotating subtree. */
+.dash-agent-signal-graph::before {
+  backdrop-filter: blur(32px) saturate(145%) contrast(104%);
+  -webkit-backdrop-filter: blur(32px) saturate(145%) contrast(104%);
+}
 .dash-agent-graph-actions button:disabled { opacity: .34; cursor: not-allowed; }
 .dash-agent-signal-node:hover .dash-agent-sphere,
 .dash-agent-signal-node:focus-visible .dash-agent-sphere {
@@ -1372,9 +1384,11 @@
     radial-gradient(90% 75% at 6% -18%, rgb(255 255 255 / 17%), transparent 48%),
     linear-gradient(148deg, rgb(var(--dash-surface-rgb) / 96%), rgb(var(--dash-surface-strong-rgb) / 99%));
   box-shadow: 0 0 0 100vmax rgb(0 0 0 / 62%), 0 35px 120px rgb(0 0 0 / 82%), inset 0 1px 0 rgb(255 255 255 / 18%);
-  backdrop-filter: blur(36px) saturate(138%);
-  -webkit-backdrop-filter: blur(36px) saturate(138%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
+/* The full-screen surface is already opaque over its modal scrim. */
+.dash-agent-signal-graph.is-expanded::before { backdrop-filter: none; -webkit-backdrop-filter: none; }
 .dash-agent-signal-graph.is-expanded > header { padding: 0 18px; }
 .dash-agent-signal-graph.is-expanded .dash-agent-graph-stage { perspective: 1300px; }
 .dash-agent-signal-graph.is-expanded .dash-agent-signal-node { width: 132px; }
@@ -1386,6 +1400,16 @@
 .dash-agent-signal-graph.is-expanded .dash-agent-ribbon { top: 41px; width: 108px; height: 40px; }
 .dash-agent-signal-graph.is-expanded .dash-agent-ribbon.ribbon-b { width: 94px; height: 55px; }
 .dash-agent-signal-graph.is-expanded .dash-agent-node-meta em { max-width: 104px; font-size: 12px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-signal-node { width: 84px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-sphere { width: 48px; height: 48px; filter: none; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-sphere::before { display: none; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-eye { top: 17px; width: 4px; height: 9px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-eye.eye-left { left: 14px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-eye.eye-right { right: 14px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-mouth { top: 31px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-ribbon { top: 24px; width: 66px; height: 25px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-ribbon.ribbon-b { width: 58px; height: 34px; }
+.dash-agent-signal-graph.is-expanded .dense .dash-agent-node-meta > svg { filter: none; }
 .dash-agent-graph-panel {
   position: absolute;
   z-index: 20;
@@ -1408,6 +1432,7 @@
   animation: dash-agent-panel-in .18s cubic-bezier(.2,.8,.2,1) both;
 }
 .dash-agent-graph-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 8px 0 13px; border-bottom: 1px solid var(--dash-line); }
+.dash-agent-graph-panel.panel-events { height: min(360px, calc(100% - 63px)); }
 .dash-agent-graph-panel > header > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .dash-agent-graph-panel > header svg { color: var(--dash-selected); }
 .dash-agent-graph-panel > header strong { overflow: hidden; color: var(--dash-ink); font-size: 13px; font-weight: 640; text-overflow: ellipsis; white-space: nowrap; }

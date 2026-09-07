@@ -1,28 +1,14 @@
-import { z } from 'zod';
-import type { AgentGraph, TaskDifficulty, TaskKind, TaskProfile, TurnRoutingDecision, TurnSchedulingDecision, TurnSchedulingStep, WorkflowPlan, WorkflowStep } from './contracts.js';
-import type { ModelClient } from './modelClient.js';
-import { classifyTask } from './orchestrator.js';
-import { routeSkillIds, runtimeSkillCatalog } from './skillCatalog.js';
+import { chatRouteDecisionSchema, routerAgentDecisionSchema, schedulerAgentDecisionSchema } from '../shared/chatRoutingSchema.js';
+export { chatRouteDecisionSchema, routerAgentDecisionSchema, schedulerAgentDecisionSchema } from '../shared/chatRoutingSchema.js';
+import type { AgentGraph, TaskDifficulty, TaskProfile, TurnSchedulingDecision, TurnSchedulingStep, WorkflowPlan, WorkflowStep } from './contracts.js';
+import type { ModelClient, ModelCompletionRequest } from './modelClient.js';
+import { runtimeSkillCatalog } from './skillCatalog.js';
+import { attachmentRequirements, fallbackChatRoute as sharedFallbackChatRoute, intentAgent, schedulingWaves as executionWaves } from '../shared/chatRoutingFallback.js';
+import type { ChatIntent, ChatRouteDecision } from '../shared/chatRoutingFallback.js';
+export type { ChatIntent, ChatRouteDecision, ReportExportDecision } from '../shared/chatRoutingFallback.js';
 
-export type ReportExportDecision = { scope: 'last-answer' | 'conversation'; format: 'md' | 'docx' | 'tex' | 'pdf'; title?: string };
-export type ChatIntent = 'conversation' | 'agent-registry' | 'web-search' | 'academic-search' | 'github-research' | 'image-generation' | 'video-generation' | 'image-analysis' | 'document-analysis' | 'report-export' | 'task';
 export type RoutingAgentDirectoryEntry = { id: string; label: string; description: string; capabilities: string[]; available?: boolean };
 export type RoutingSkillDirectoryEntry = { id: string; label: string; description: string };
-export type ChatRouteDecision = {
-  intent: ChatIntent;
-  execution: 'gateway' | 'workflow';
-  agentRole: string;
-  workflowRoute: 'direct' | 'single-agent' | 'team' | 'full-workflow';
-  requiresSearch: boolean;
-  reason: string;
-  source: 'router-agent' | 'semantic-model' | 'deterministic-fallback';
-  skillIds: string[];
-  routingVersion: string;
-  routerModel?: string;
-  reportExport?: ReportExportDecision;
-  router: TurnRoutingDecision & { intent: ChatIntent };
-  scheduler: TurnSchedulingDecision;
-};
 export type ChatRouteInput = {
   message: string;
   mode: 'analyze' | 'build' | 'decide';
@@ -32,73 +18,15 @@ export type ChatRouteInput = {
   availableAgents?: RoutingAgentDirectoryEntry[];
   availableSkills?: RoutingSkillDirectoryEntry[];
   onFallback?: (error: unknown) => void;
+  onModelCall?: (measurement: RoutingModelCall) => void;
+};
+
+export type RoutingModelCall = {
+  stage: 'router' | 'scheduler'; status: 'completed' | 'failed'; durationMs: number;
+  attempts: number; promptCharacters: number; totalTokens: number | null;
 };
 
 const routingVersion = 'router-scheduler/v1';
-const intentSchema = z.enum(['conversation', 'agent-registry', 'web-search', 'academic-search', 'github-research', 'image-generation', 'video-generation', 'image-analysis', 'document-analysis', 'report-export', 'task']);
-const reportExportDecisionSchema = z.object({
-  scope: z.enum(['last-answer', 'conversation']),
-  format: z.enum(['md', 'docx', 'tex', 'pdf']),
-  title: z.string().min(1).max(120).optional(),
-}).strict();
-const routeSchema = z.enum(['direct', 'single-agent', 'team', 'full-workflow']);
-const taskKindSchema = z.enum(['conversation', 'question', 'research', 'implementation', 'decision', 'creative', 'operations']);
-const difficultySchema = z.enum(['trivial', 'easy', 'moderate', 'hard', 'complex']);
-// Models commonly emit `null` for an optional object even when the prompt says
-// to omit it. Normalize that harmless representation instead of discarding
-// the complete Router/Scheduler decision and falling back to regex triage.
-const optionalReportExportSchema = z.preprocess(
-  (value) => value === null ? undefined : value,
-  reportExportDecisionSchema.optional(),
-);
-
-export const routerAgentDecisionSchema = z.object({
-  intent: intentSchema,
-  taskKind: taskKindSchema,
-  difficulty: difficultySchema,
-  requiresExternalFacts: z.boolean(),
-  requiredCapabilities: z.array(z.string().min(1).max(80)).max(12),
-  candidateAgentIds: z.array(z.string().min(1).max(80)).min(1).max(12),
-  candidateSkillIds: z.array(z.string().min(1).max(80)).max(12),
-  confidence: z.number().min(0).max(1),
-  rationale: z.string().min(1).max(600),
-  reportExport: optionalReportExportSchema,
-}).strict();
-const schedulingStepSchema = z.object({
-  id: z.string().min(1).max(64),
-  title: z.string().min(1).max(120),
-  agentId: z.string().min(1).max(80),
-  objective: z.string().min(1).max(2_000),
-  dependsOn: z.array(z.string().min(1).max(64)).max(8),
-  skillIds: z.array(z.string().min(1).max(80)).max(8),
-}).strict();
-export const schedulerAgentDecisionSchema = z.object({
-  route: routeSchema,
-  activeAgentIds: z.array(z.string().min(1).max(80)).min(1).max(10),
-  skippedAgentIds: z.array(z.string().min(1).max(120)).max(24),
-  appendAgentIds: z.array(z.string().min(1).max(80)).max(10),
-  selectedSkillIds: z.array(z.string().min(1).max(80)).max(12),
-  executionWaves: z.array(z.array(z.string().min(1).max(64)).min(1).max(8)).max(8),
-  steps: z.array(schedulingStepSchema).max(8),
-  requiresReview: z.boolean(),
-  synthesisAgentId: z.literal('synthesizer'),
-  reason: z.string().min(1).max(600),
-}).strict();
-export const chatRouteDecisionSchema = z.object({
-  intent: intentSchema,
-  execution: z.enum(['gateway', 'workflow']),
-  agentRole: z.string().min(1).max(80),
-  workflowRoute: routeSchema,
-  requiresSearch: z.boolean(),
-  reason: z.string().min(1).max(600),
-  source: z.enum(['router-agent', 'semantic-model', 'deterministic-fallback']),
-  skillIds: z.array(z.string().min(1).max(80)).max(12),
-  routingVersion: z.string().min(1).max(80),
-  routerModel: z.string().min(1).max(160).optional(),
-  reportExport: reportExportDecisionSchema.optional(),
-  router: routerAgentDecisionSchema,
-  scheduler: schedulerAgentDecisionSchema,
-}).strict();
 
 const defaultAgents: RoutingAgentDirectoryEntry[] = [
   { id: 'direct-responder', label: '对话 Agent', description: '简短问答与自然对话。', capabilities: ['conversation', 'answer'] },
@@ -116,11 +44,6 @@ const defaultAgents: RoutingAgentDirectoryEntry[] = [
   { id: 'builder', label: '工程师', description: '形成可执行实现与验收步骤。', capabilities: ['implementation', 'testing'] },
   { id: 'reviewer', label: '审查员', description: '执行质量门禁并指出缺口。', capabilities: ['quality-review', 'verification'] },
 ];
-const intentAgent: Record<Exclude<ChatIntent, 'task'>, string> = {
-  conversation: 'direct-responder', 'agent-registry': 'registry-agent', 'web-search': 'search-agent', 'academic-search': 'academic-search-agent',
-  'github-research': 'github-research-agent', 'image-generation': 'drawing-agent', 'video-generation': 'video-agent', 'image-analysis': 'vision-agent', 'document-analysis': 'document-agent',
-  'report-export': 'report-agent',
-};
 const extractJson = (content: string) => {
   const unfenced = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
   const start = unfenced.indexOf('{');
@@ -132,16 +55,6 @@ const withSystemSynthesizer = (value: unknown): unknown => {
   return { ...value, synthesisAgentId: 'synthesizer' };
 };
 const unique = <T>(values: T[]) => [...new Set(values)];
-const attachmentRequirements = (input: ChatRouteInput) => {
-  const image = (attachment: NonNullable<ChatRouteInput['attachments']>[number]) => attachment.kind === 'image'
-    || attachment.mimeType?.startsWith('image/')
-    || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(attachment.name ?? '');
-  const attachments = input.attachments ?? [];
-  return [
-    ...(attachments.some(image) ? [{ capability: 'image-analysis', agentId: 'vision-agent' }] : []),
-    ...(attachments.some((attachment) => !image(attachment)) ? [{ capability: 'document-analysis', agentId: 'document-agent' }] : []),
-  ];
-};
 const requireAttachmentCapabilities = (router: ChatRouteDecision['router'], input: ChatRouteInput): ChatRouteDecision['router'] => {
   const requirements = attachmentRequirements(input);
   if (!requirements.length || router.intent === 'report-export'
@@ -175,129 +88,7 @@ const directories = (input: ChatRouteInput) => ({
   skills: (input.availableSkills?.length ? input.availableSkills : runtimeSkillCatalog.map(({ id, label, description }) => ({ id, label, description }))).filter((skill, index, all) => all.findIndex((candidate) => candidate.id === skill.id) === index).slice(0, 64),
 });
 const currentGraphRoles = (input: ChatRouteInput) => unique((input.currentGraph?.nodes ?? []).map((node) => node.role).filter((value): value is string => typeof value === 'string' && !['orchestrator', 'synthesizer'].includes(value)));
-const executionWaves = (steps: TurnSchedulingStep[]) => {
-  const remaining = new Map(steps.map((step) => [step.id, step]));
-  const completed = new Set<string>();
-  const waves: string[][] = [];
-  while (remaining.size) {
-    const ready = [...remaining.values()].filter((step) => step.dependsOn.every((dependency) => completed.has(dependency)));
-    if (!ready.length) throw new Error('Scheduler Agent returned a cyclic dependency graph.');
-    waves.push(ready.map((step) => step.id));
-    ready.forEach((step) => { remaining.delete(step.id); completed.add(step.id); });
-  }
-  return waves;
-};
-
-const fallbackSteps = (message: string, mode: ChatRouteInput['mode'], route: ChatRouteDecision['workflowRoute']): TurnSchedulingStep[] => {
-  if (route === 'direct') return [];
-  if (route === 'single-agent') {
-    const agentId = mode === 'build' ? 'builder' : 'analyst';
-    return [{ id: 'focused-response', title: agentId === 'builder' ? '形成可执行结果' : '完成专注分析', agentId, objective: message, dependsOn: [], skillIds: routeSkillIds(message, agentId) }];
-  }
-  const research: TurnSchedulingStep = { id: 'research', title: '梳理事实与约束', agentId: 'researcher', objective: `收集完成目标所需的事实、约束与证据：${message}`, dependsOn: [], skillIds: routeSkillIds(message, 'researcher') };
-  const analysis: TurnSchedulingStep = { id: 'analysis', title: '分析方案与取舍', agentId: 'analyst', objective: `分析目标、边界、方案与风险：${message}`, dependsOn: [], skillIds: routeSkillIds(message, 'analyst') };
-  if (route === 'team') return [research, analysis];
-  const build: TurnSchedulingStep = { id: 'delivery', title: '形成可执行交付', agentId: 'builder', objective: `根据研究和分析形成可执行交付：${message}`, dependsOn: ['research', 'analysis'], skillIds: routeSkillIds(message, 'builder') };
-  const review: TurnSchedulingStep = { id: 'quality-review', title: '验证交付质量', agentId: 'reviewer', objective: '检查完整性、证据、风险和验收标准。', dependsOn: ['delivery'], skillIds: ['quality-review'] };
-  return [research, analysis, build, review];
-};
-const fallbackDecision = (input: ChatRouteInput, intent: ChatIntent, workflowRoute: ChatRouteDecision['workflowRoute'], reason: string, reportExport?: ReportExportDecision): ChatRouteDecision => {
-  const profile = classifyTask(input.message, input.mode);
-  const steps = intent === 'task' ? fallbackSteps(input.message, input.mode, workflowRoute) : [];
-  const activeAgentIds = intent === 'task' ? workflowRoute === 'direct' ? ['direct-responder'] : unique(steps.map((step) => step.agentId)) : [intentAgent[intent]];
-  // Route Skills from the user's turn. For ordinary specialist intents the
-  // rationale can add useful semantic context (for example, an external
-  // "事实" lookup needs evidence handling), but Registry rationale must not
-  // leak the word "实时" into the web-research matcher.
-  const skillRoutingText = intent === 'agent-registry'
-    ? `${intent} ${input.message}`
-    : `${intent} ${input.message} ${reason}`;
-  const selectedSkillIds = intent === 'task'
-    ? unique(steps.flatMap((step) => step.skillIds))
-    : intent === 'agent-registry'
-      ? []
-      : routeSkillIds(skillRoutingText, activeAgentIds[0]!);
-  const existing = currentGraphRoles(input);
-  const scheduler: TurnSchedulingDecision = {
-    route: workflowRoute, activeAgentIds, skippedAgentIds: existing.filter((id) => !activeAgentIds.includes(id)), appendAgentIds: activeAgentIds.filter((id) => !existing.includes(id)), selectedSkillIds,
-    executionWaves: executionWaves(steps), steps, requiresReview: workflowRoute === 'full-workflow', synthesisAgentId: 'synthesizer', reason,
-  };
-  const router: ChatRouteDecision['router'] = {
-    intent, taskKind: (intent === 'task' ? profile.kind : intent === 'conversation' ? 'conversation' : 'question') as TaskKind,
-    difficulty: (intent === 'task' ? profile.difficulty : intent === 'conversation' ? 'trivial' : 'easy') as TaskDifficulty,
-    requiresExternalFacts: ['web-search', 'academic-search', 'github-research'].includes(intent) || selectedSkillIds.includes('web-research') || selectedSkillIds.includes('github-inspection'), requiredCapabilities: activeAgentIds,
-    candidateAgentIds: activeAgentIds, candidateSkillIds: selectedSkillIds, confidence: 0, rationale: reason,
-    ...(reportExport ? { reportExport } : {}),
-  };
-  return {
-    intent, execution: intent === 'task' && workflowRoute !== 'direct' ? 'workflow' : 'gateway', agentRole: intent === 'task' && workflowRoute !== 'direct' ? 'orchestrator' : activeAgentIds[0]!,
-    workflowRoute, requiresSearch: router.requiresExternalFacts || activeAgentIds.some((id) => ['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id)), reason, source: 'deterministic-fallback', skillIds: selectedSkillIds, routingVersion, router, scheduler,
-    ...(reportExport ? { reportExport } : {}),
-  };
-};
-
-const fallbackReportExport = (text: string): ReportExportDecision => {
-  const format: ReportExportDecision['format'] = /(?:latex|\.tex\b|tex\s*格式)/i.test(text)
-    ? 'tex'
-    : /(?:markdown|\.md\b|md\s*格式)/i.test(text)
-      ? 'md'
-      : /(?:pdf)/i.test(text)
-        ? 'pdf'
-        : 'docx';
-  const scope: ReportExportDecision['scope'] = /(?:完整|全部|整个|整段|全量).{0,12}(?:对话|会话|聊天|历史)|(?:对话|会话|聊天|历史).{0,12}(?:完整|全部|整个|全量)|full\s+(?:conversation|chat)|entire\s+(?:conversation|chat)/i.test(text)
-    ? 'conversation'
-    : 'last-answer';
-  return { scope, format };
-};
-
-/** Regex-based routing is retained only as the model-unavailable fallback. */
-const baseFallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
-  const text = input.message.trim();
-  const required = attachmentRequirements(input);
-  const hasImage = required.some((item) => item.agentId === 'vision-agent');
-  const hasDocument = required.some((item) => item.agentId === 'document-agent');
-  const videoGeneration = /(?:生成|制作|创建|剪辑|合成).{0,18}(?:视频|短片|动画|影片)|(?:generate|create|make|edit).{0,18}(?:video|movie|clip|animation)/i.test(text);
-  const imageGeneration = /(?:生成|绘制|画|制作|设计|编辑|修改).{0,16}(?:图片|图像|海报|插画|封面)|(?:draw|generate|create|edit).{0,16}(?:image|picture|poster|illustration)/i.test(text);
-  const agentRegistry = /(?:有哪些|哪几个|列出|查看|介绍|可用).{0,20}(?:agent|智能体|子智能体)|(?:agent|agents).{0,20}(?:available|list|registry|catalog)/i.test(text);
-  const capabilityRegistry = /(?:你有.{0,24}(?:能力|功能)(?:吗|么)?|你(?:能|可以|会)(?:进行|使用|调用)?.{0,20}(?:吗|么)|你(?:支持|提供)(?:联网搜索|搜索|图片识别|视觉分析|文档分析|绘图|视频生成|工具)|有哪些能力|支持哪些功能)/i.test(text);
-  const reportExport = /(?:导出|下载|另存为|保存为|输出为).{0,30}(?:以上|上述|回答|内容|对话|会话|聊天|报告|文档|文件|markdown|md|word|docx|latex|tex|pdf)|(?:把|将).{0,30}(?:以上|上述|回答|内容|对话|会话|聊天).{0,20}(?:导出|下载|另存|保存|生成).{0,15}(?:报告|文档|文件|markdown|md|word|docx|latex|tex|pdf)|(?:生成|制作).{0,8}(?:word|docx|latex|tex|pdf|markdown|md)(?:格式)?(?:报告|文档|文件)/i.test(text);
-  const academicSearch = /(?:论文|文献|期刊|学术|arxiv|doi|paper|literature|academic|journal)/i.test(text);
-  const githubResearch = /(?:github|开源仓库|代码仓库|repository|repo)|(?:开源|open[ -]?source).{0,30}(?:agent|智能体|项目|框架|工具|仓库)/i.test(text);
-  const webSearch = /(?:天气|气温|预报|新闻|价格|股价|汇率|联网|上网|搜索|查找|网页|最新|目前|现在|今天|实时|weather|forecast|news|price|current|latest|today|internet)/i.test(text);
-  const workflowSignals = /(?:多智能体|multi[- ]?agent|agent\s*graph|工作流|协作|协同|先由|首先由|再由|然后由|接着由|最后由|分别由|first|then|next|finally|followed by|->)/i.test(text);
-  const workflowRoleCount = [/(?:搜索|研究|检索|search|research(?:er)?)\s*agent/i, /(?:架构|分析|方案|analyst|architect(?:ure)?)\s*agent/i, /(?:数据库|数据|database|db)\s*agent/i, /(?:实现|开发|构建|编程|builder|developer)\s*agent/i, /(?:审查|审核|评审|reviewer|review)\b/i, /(?:汇总|综合|整合|synthesizer|synthesis)\b/i].filter((pattern) => pattern.test(text)).length;
-  const conversation = /^(?:你在吗|在吗|你好|您好|嗨|谢谢|感谢|再见|hi|hello|hey|thanks|bye)[？?！!。,\.\s]*$/i.test(text);
-  if (workflowSignals && workflowRoleCount >= 2) return fallbackDecision(input, 'task', 'full-workflow', '兜底规则检测到明确的多 Agent 协作顺序。');
-  if (reportExport) return fallbackDecision(input, 'report-export', 'direct', '兜底规则检测到明确的会话报告导出动作。', fallbackReportExport(text));
-  if (videoGeneration) return fallbackDecision(input, 'video-generation', 'direct', '兜底规则检测到视频生成目标。');
-  if (imageGeneration) return fallbackDecision(input, 'image-generation', 'direct', '兜底规则检测到图像生成目标。');
-  if (hasImage && hasDocument) return fallbackDecision(input, 'task', 'direct', '图片与文档附件需要组合分析能力。');
-  if (hasImage) return fallbackDecision(input, 'image-analysis', 'direct', '图片附件要求视觉能力。');
-  if (hasDocument) return fallbackDecision(input, 'document-analysis', 'direct', '文档附件要求文档解析能力。');
-  if (academicSearch) return fallbackDecision(input, 'academic-search', 'direct', '兜底规则检测到学术检索目标。');
-  if (githubResearch) return fallbackDecision(input, 'github-research', 'direct', '兜底规则检测到 GitHub 检索目标。');
-  if (agentRegistry || capabilityRegistry) return fallbackDecision(input, 'agent-registry', 'direct', '兜底规则检测到实时 Agent 能力查询。');
-  if (webSearch) return fallbackDecision(input, 'web-search', 'direct', '兜底规则检测到外部实时事实。');
-  if (conversation) return fallbackDecision(input, 'conversation', 'direct', '短对话无需建立工作流。');
-  const profile = classifyTask(text, input.mode);
-  return fallbackDecision(input, 'task', profile.route, `兜底分类为 ${profile.kind} / ${profile.difficulty}。`);
-};
-
-export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
-  const decision = baseFallbackChatRoute(input);
-  const router = requireAttachmentCapabilities(decision.router, input);
-  if (router.intent !== 'task' || !attachmentRequirements(input).length) return { ...decision, router };
-  const specialist = decision.intent === 'task' || decision.intent === 'conversation' ? undefined : intentAgent[decision.intent];
-  const initial = specialist && !decision.scheduler.steps.length ? {
-    ...decision.scheduler,
-    steps: [{ id: 'specialist-delivery', title: decision.reason.slice(0, 120), agentId: specialist, objective: input.message, dependsOn: [], skillIds: decision.skillIds }],
-  } : decision.scheduler;
-  const prepared = requireAttachmentSteps(initial, router, input);
-  const route = routeForScheduledSteps(prepared.route, router.difficulty, prepared.steps.length);
-  const existing = currentGraphRoles(input);
-  const scheduler = { ...prepared, route, executionWaves: executionWaves(prepared.steps), appendAgentIds: prepared.activeAgentIds.filter((id) => !existing.includes(id)), skippedAgentIds: existing.filter((id) => !prepared.activeAgentIds.includes(id)) };
-  return { ...decision, intent: 'task', execution: 'workflow', agentRole: 'orchestrator', workflowRoute: route, router, scheduler };
-};
+export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => sharedFallbackChatRoute(input);
 
 /**
  * Applies server-side constraints to a decision returned by the browser's
@@ -308,6 +99,7 @@ export const fallbackChatRoute = (input: ChatRouteInput): ChatRouteDecision => {
  */
 export const enforceChatRouteSafety = (routing: ChatRouteDecision, input: ChatRouteInput): ChatRouteDecision => {
   const fallback = fallbackChatRoute(input);
+  if (routing.source === 'deterministic-fallback' && routing.routingVersion !== fallback.routingVersion) return fallback;
   if (['image-generation', 'video-generation'].includes(routing.intent)
     && attachmentRequirements(input).every((item) => item.agentId === 'vision-agent')) return durableMediaRoute(routing, input.message);
   const hardSpecialistIntents = new Set<ChatIntent>([
@@ -517,6 +309,25 @@ const validateScheduler = (scheduler: TurnSchedulingDecision, router: ChatRouteD
 };
 
 export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient, signal: AbortSignal): Promise<ChatRouteDecision> => {
+  const recordModelCall = (measurement: RoutingModelCall) => {
+    try { input.onModelCall?.(measurement); } catch { /* Diagnostics must not alter routing. */ }
+  };
+  const completeRoute = async (stage: RoutingModelCall['stage'], request: ModelCompletionRequest) => {
+    const startedAt = Date.now();
+    let attempts = 1;
+    try {
+      const completion = await model.complete({ ...request, onRetry: (attempt) => { attempts = attempt; } });
+      const tokenValue = completion.usage?.total_tokens;
+      recordModelCall({ stage, status: 'completed', durationMs: Date.now() - startedAt, attempts: completion.attempts,
+        promptCharacters: request.system.length + request.user.length,
+        totalTokens: typeof tokenValue === 'number' && Number.isFinite(tokenValue) && tokenValue >= 0 ? tokenValue : null });
+      return completion;
+    } catch (error) {
+      recordModelCall({ stage, status: 'failed', durationMs: Date.now() - startedAt, attempts,
+        promptCharacters: request.system.length + request.user.length, totalTokens: null });
+      throw error;
+    }
+  };
   let fallback: ChatRouteDecision | undefined;
   const deterministicFallback = () => fallback ??= fallbackChatRoute(input);
   const { agents, skills } = directories(input);
@@ -524,7 +335,7 @@ export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient,
   const skillIds = new Set(skills.map((skill) => skill.id));
   const graph = { nodes: (input.currentGraph?.nodes ?? []).map(({ id, agentId, role, title, status }) => ({ id, agentId, role, title, status })), edges: input.currentGraph?.edges ?? [] };
   try {
-    const routerCompletion = await model.complete({
+    const routerCompletion = await completeRoute('router', {
       signal, responseFormat: 'json', temperature: 0, maxTokens: 900,
       system: `You are the Router Agent for a production Agent platform. Classify and select candidates only; never answer or schedule.
 Use the latest turn, compact conversation context, attachments, live Agent/Skill directories, and cumulative session Graph. Choose only supplied IDs and the smallest sufficient candidate set. Existing Graph Agents need not run again. Add capabilities only when this turn needs them.
@@ -539,7 +350,7 @@ Return JSON only: {"intent":"...","taskKind":"conversation|question|research|imp
       input,
     ), input);
     validateRouter(router, input, agentIds, skillIds);
-    const schedulerCompletion = await model.complete({
+    const schedulerCompletion = await completeRoute('scheduler', {
       signal, responseFormat: 'json', temperature: 0, maxTokens: 1_800,
       system: `You are the Scheduler Agent for a production multi-Agent runtime. Do not answer and do not change Router intent.
 Use only Router candidate IDs. Activate only Agents useful this turn; do not run every Agent already in the Graph. skippedAgentIds lists prior unused Agent roles. appendAgentIds lists genuinely new active roles.
@@ -614,6 +425,6 @@ export const workflowPlanFromChatRoute = (inputDecision: ChatRouteDecision): Wor
   return {
     summary: `调度 Agent 已为本轮选择 ${steps.length} 个执行步骤。`, routingReason: decision.reason, steps, profile, graph: graphForSteps(steps), version: 1,
     approvalStatus: 'approved', approvedAt: new Date().toISOString(), approvedBy: 'router-scheduler-control-plane', routingDecision: decision.router,
-    schedulingDecision: decision.scheduler, routingVersion: decision.routingVersion, routerModel: decision.routerModel, routerConfidence: decision.router.confidence,
+    schedulingDecision: decision.scheduler, routingSource: decision.source, routingVersion: decision.routingVersion, routerModel: decision.routerModel, routerConfidence: decision.router.confidence,
   };
 };

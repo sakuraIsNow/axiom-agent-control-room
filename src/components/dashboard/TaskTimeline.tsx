@@ -76,7 +76,7 @@ export function TaskTimeline({ tasks }: { tasks: WorkflowTaskSummary[] }) {
           const tone = taskStatusColor(task.status);
           return <div className="dash-day-row" key={task.id}>
             <div className="dash-day-task">
-              <strong title={task.title}>{task.title}</strong>
+              <strong title={task.title} data-i18n-ignore="true">{task.title}</strong>
               <span>{taskRouteLabel(task.profile?.route ?? task.mode)} · {taskStatusLabels[task.status]}</span>
             </div>
             <div className="dash-day-track">

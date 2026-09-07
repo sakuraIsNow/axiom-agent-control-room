@@ -27,7 +27,7 @@ import { createAgentStore } from './runtime/agentStore.js';
 import { agentCatalog, appendMissingAgentDirectory, supplementAgentDirectoryResponse } from './runtime/agentCatalog.js';
 import { deepSeekCapabilityInfo } from './runtime/providerCapabilities.js';
 import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
-import { chatRouteDecisionSchema, durableMediaRoute, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision } from './runtime/chatRouter.js';
+import { chatRouteDecisionSchema, durableMediaRoute, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision, type RoutingModelCall } from './runtime/chatRouter.js';
 import { isOriginAllowed } from './runtime/originPolicy.js';
 import { defaultProviderLocation, normalizeProviderBaseUrl } from './runtime/providerLocation.js';
 import { buildContextWindow, estimateTokens, validatePersistedContextSummary, type DurableContextSourceMessage, type PersistedContextSummary } from './runtime/contextSummary.js';
@@ -1321,6 +1321,8 @@ app.post('/api/chat/route', async (c) => {
       available: true,
     })),
   ];
+  const routeStartedAt = Date.now();
+  const routeCalls: RoutingModelCall[] = [];
   const decision = await routeChatIntent({
     message,
     mode,
@@ -1334,8 +1336,9 @@ app.post('/api/chat/route', async (c) => {
     availableAgents,
     availableSkills: runtimeSkillCatalog.map((skill) => ({ id: skill.id, label: skill.label, description: skill.description })),
     onFallback: (error) => logger.warn({ err: error, model: routeModel.model }, 'Router/Scheduler Agent output was rejected; deterministic fallback selected'),
+    onModelCall: (measurement) => routeCalls.push(measurement),
   }, routeModel, c.req.raw.signal);
-  return c.json({ decision });
+  return c.json({ decision, diagnostics: { scope: 'server-route-request', durationMs: Date.now() - routeStartedAt, calls: routeCalls } });
 });
 
 app.post('/api/chat', async (c) => {

@@ -72,6 +72,7 @@ import { isNexusTaskExecuting, isNexusTaskTerminal, nexusTaskActivity } from '..
 import { TaskActionPanel } from './TaskActionPanel';
 import { ChatMessageMarkdown } from './ChatArtifact';
 import { taskHasPartialDelivery } from '../../lib/taskDelivery';
+import { useUiLanguage } from '../../lib/uiLanguage';
 import '../../styles/workflow-release.css';
 
 type CanvasSelection = { type: 'node'; id: string } | { type: 'edge'; id: string } | null;
@@ -80,14 +81,14 @@ type RunnerMessage = { id: string; role: 'user' | 'assistant'; content: string; 
 
 const makeId = (prefix: string) => `${prefix}-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`;
 
-const defaultCanvas = (): WorkflowCanvas => ({
+const defaultCanvas = (t: (source: string) => string): WorkflowCanvas => ({
   schemaVersion: 1,
   nodes: [
-    { id: 'input-main', type: 'input', name: '输入', position: { x: 90, y: 150 } },
+    { id: 'input-main', type: 'input', name: t('输入'), position: { x: 90, y: 150 } },
     {
       id: 'agent-main',
       type: 'agent',
-      name: '分析员',
+      name: t('分析员'),
       description: '理解输入并生成可交付结果。',
       position: { x: 390, y: 135 },
       agentRef: { source: 'builtin', id: 'analyst' },
@@ -97,7 +98,7 @@ const defaultCanvas = (): WorkflowCanvas => ({
       toolNames: [],
       failureStrategy: 'retry',
     },
-    { id: 'output-main', type: 'output', name: '输出', position: { x: 720, y: 150 } },
+    { id: 'output-main', type: 'output', name: t('输出'), position: { x: 720, y: 150 } },
   ],
   edges: [
     { id: 'edge-input-agent', source: 'input-main', target: 'agent-main', kind: 'flow' },
@@ -127,7 +128,6 @@ const iconForIdentity = (identity: string) => {
 };
 
 const agentIcon = (node: WorkflowCanvasNode) => node.icon || iconForIdentity(`${node.agentRef?.id ?? ''} ${node.name}`);
-const nexusDisplayName = (value: string) => value.replaceAll('工作流', 'Nexus');
 
 const toolPresentation: Record<string, { label: string; description: string }> = {
   'agent.propose': { label: '创建 Agent 草稿', description: '生成待审核的自定义 Agent，不会自动发布。' },
@@ -163,12 +163,13 @@ const edgePath = (source: WorkflowCanvasNode, target: WorkflowCanvasNode, kind: 
 };
 
 export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProviderConfig }) {
+  const { t } = useUiLanguage();
   const [workflows, setWorkflows] = useState<SavedAgentWorkflow[]>([]);
   const [workflowId, setWorkflowId] = useState<string | null>(null);
-  const [name, setName] = useState('新的 Agent Nexus');
+  const [name, setName] = useState(() => t('新的 Agent Nexus'));
   const [description, setDescription] = useState('');
   const [visibility, setVisibility] = useState<'private' | 'team'>('private');
-  const [canvas, setCanvas] = useState<WorkflowCanvas>(defaultCanvas);
+  const [canvas, setCanvas] = useState<WorkflowCanvas>(() => defaultCanvas(t));
   const [builtinAgents, setBuiltinAgents] = useState<BuiltinWorkflowAgent[]>([]);
   const [platformAgents, setPlatformAgents] = useState<UserDefinedAgent[]>([]);
   const [tools, setTools] = useState<Array<{ name: string; description: string }>>([]);
@@ -334,7 +335,7 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
     setRunningTaskId(null); setActiveRunTask(null); setStreamTarget(null); setHistoryReadyId(null); setStartingRun(false);
     setHistoryRevision((value) => value + 1);
     setWorkflowId(workflow.id);
-    setName(nexusDisplayName(workflow.name));
+    setName(workflow.name);
     setDescription(workflow.description);
     setVisibility(workflow.visibility);
     setCanvas(workflow.definition.workflow);
@@ -356,9 +357,9 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
 
   const createNewWorkflow = () => {
     if (runningTaskId) return;
-    const next = defaultCanvas();
+    const next = defaultCanvas(t);
     setWorkflowId(null);
-    setName('新的 Agent Nexus');
+    setName(t('新的 Agent Nexus'));
     setDescription('');
     setVisibility('private');
     setCanvas(next);
@@ -865,7 +866,7 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
           <div className="workflow-pane-title"><span>Agent Nexus</span><em>{workflows.length}</em></div>
           <div className="workflow-saved-list">
             {workflows.map((workflow) => <button type="button" key={workflow.id} className={workflow.id === workflowId ? 'active' : ''} onClick={() => openSavedWorkflow(workflow)}>
-              <span><Workflow size={14} /><strong>{nexusDisplayName(workflow.name)}</strong></span><small>v{workflow.version}</small>
+              <span><Workflow size={14} /><strong data-i18n-ignore="true">{workflow.name}</strong></span><small>v{workflow.version}</small>
             </button>)}
             {workflows.length === 0 && <p>尚未保存 Agent Nexus</p>}
           </div>
@@ -877,7 +878,7 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
                <span className={`workflow-agent-source kind-${agent.kind}`}><b className="workflow-agent-emoji" aria-hidden="true">{iconForIdentity(`${agent.id} ${agent.label}`)}</b></span><span><strong>{agent.label}</strong><small>{agent.available === false ? agent.unavailableReason : agent.description}</small></span>{agent.available === false ? <AlertCircle size={13} /> : <Plus size={13} />}
             </button>)}
             {platformAgents.map((agent) => <button type="button" key={`platform-${agent.id}`} onClick={() => addAgentNode('platform', agent)}>
-               <span className="workflow-agent-source custom"><b className="workflow-agent-emoji" aria-hidden="true">{iconForIdentity(`${agent.roleId} ${agent.name}`)}</b></span><span><strong>{agent.name}</strong><small>{agent.description || agent.definition.whenToUseHint}</small></span><Plus size={13} />
+               <span className="workflow-agent-source custom"><b className="workflow-agent-emoji" aria-hidden="true">{iconForIdentity(`${agent.roleId} ${agent.name}`)}</b></span><span data-i18n-ignore="true"><strong>{agent.name}</strong><small>{agent.description || agent.definition.whenToUseHint}</small></span><Plus size={13} />
             </button>)}
           </div>
         </section>
@@ -890,7 +891,7 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
             <input value={scopedDraft.tools} onChange={(event) => setScopedDraft((value) => ({ ...value, tools: event.target.value }))} placeholder="工具名，逗号分隔" />
             <button type="button" className="primary" onClick={createScopedAgent}>创建并加入画布</button>
           </div>}
-          <div className="workflow-scoped-list">{canvas.scopedAgents.map((agent) => <button type="button" key={agent.id} onClick={() => addAgentNode('workflow', agent)}><b className="workflow-agent-emoji" aria-hidden="true">{agent.icon || '🧩'}</b><span>{agent.name}</span><Plus size={12} /></button>)}</div>
+          <div className="workflow-scoped-list">{canvas.scopedAgents.map((agent) => <button type="button" key={agent.id} onClick={() => addAgentNode('workflow', agent)}><b className="workflow-agent-emoji" aria-hidden="true">{agent.icon || '🧩'}</b><span data-i18n-ignore="true">{agent.name}</span><Plus size={12} /></button>)}</div>
         </section>
       </aside>
 
@@ -948,7 +949,7 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
               >
                 {node.type !== 'input' && <button type="button" className={`workflow-port input ${connectingFrom ? 'ready' : ''}`} aria-label={`连接到 ${node.name}`} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => { event.stopPropagation(); if (connectingFrom) connectTo(node.id); }} onClick={() => connectTo(node.id)} />}
                 <div className="workflow-node-head"><span>{node.type === 'agent' ? <b className="workflow-agent-emoji" aria-hidden="true">{agentIcon(node)}</b> : node.type === 'input' ? <MessageSquareText size={14} /> : <ChevronRight size={14} />}{nodeTone[node.type]}</span>{status && <em>{status === 'running' ? <LoaderCircle className="spin" size={12} /> : status === 'completed' ? <Check size={12} /> : status === 'failed' ? <AlertCircle size={12} /> : <Circle size={10} />}{statusLabel[status]}</em>}</div>
-                <strong>{node.name}</strong>
+                <strong data-i18n-ignore="true">{node.name}</strong>
                 {node.type === 'agent' && <small>{sourceName} Agent</small>}
                 {node.type !== 'output' && <button type="button" className={`workflow-port output ${connectingFrom === node.id ? 'active' : ''}`} aria-label={`从 ${node.name} 开始连线`} onPointerDown={(event) => event.stopPropagation()} onClick={() => setConnectingFrom((current) => current === node.id ? null : node.id)} />}
               </div>;
@@ -976,7 +977,7 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
             {selectedEdge.kind === 'loop' && <label><span>最大执行轮次</span><input type="number" min={2} max={12} value={selectedEdge.maxIterations ?? 2} onChange={(event) => commitCanvas((current) => ({ ...current, edges: current.edges.map((edge) => edge.id === selectedEdge.id ? { ...edge, maxIterations: Math.min(12, Math.max(2, Number(event.target.value))) } : edge) }))} /></label>}
             <label><span>传递内容</span><select value={selectedEdge.transfer?.mode ?? 'summary'} onChange={(event) => commitCanvas((current) => ({ ...current, edges: current.edges.map((edge) => edge.id === selectedEdge.id ? { ...edge, transfer: { ...edge.transfer, mode: event.target.value as 'summary' | 'full' | 'fields' | 'reference' } } : edge) }))}><option value="summary">结构化摘要</option><option value="full">完整内容</option><option value="fields">指定字段</option><option value="reference">仅 Artifact 引用</option></select></label>
             {(selectedEdge.transfer?.mode ?? 'summary') === 'fields' && <label><span>字段名</span><input value={(selectedEdge.transfer?.fields ?? []).join(', ')} placeholder="summary, risks, actions" onChange={(event) => commitCanvas((current) => ({ ...current, edges: current.edges.map((edge) => edge.id === selectedEdge.id ? { ...edge, transfer: { mode: 'fields', fields: event.target.value.split(',').map((field) => field.trim()).filter(Boolean).slice(0, 32) } } : edge) }))} /></label>}
-            <p>{canvas.nodes.find((node) => node.id === selectedEdge.source)?.name} <ChevronRight size={13} /> {canvas.nodes.find((node) => node.id === selectedEdge.target)?.name}</p>
+            <p data-i18n-ignore="true">{canvas.nodes.find((node) => node.id === selectedEdge.source)?.name} <ChevronRight size={13} /> {canvas.nodes.find((node) => node.id === selectedEdge.target)?.name}</p>
           </div> : null}
           {issues.length > 0 && <div className="workflow-issues"><strong>需要处理</strong>{issues.slice(0, 6).map((issue, index) => <button type="button" key={`${issue.code}-${index}`} onClick={() => { if (issue.nodeIds?.[0]) setSelection({ type: 'node', id: issue.nodeIds[0] }); else if (issue.edgeIds?.[0]) setSelection({ type: 'edge', id: issue.edgeIds[0] }); setInspectorOpen(true); }}><AlertCircle size={13} /><span>{issue.message}</span></button>)}</div>}
           <footer className="workflow-inspector-actions"><button type="button" className="primary" disabled={busy} onClick={() => void saveInspector()}><Check size={14} />保存并关闭</button></footer>

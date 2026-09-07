@@ -35,6 +35,8 @@ const checks = [
   ['单元与集成测试', 'test'],
   ['生产构建', 'build'],
   ['多格式报告导出', 'qa:report-export'],
+  ['复合路由故障降级', 'qa:routing-resilience'],
+  ['交付质量与执行效率', 'qa:execution-quality'],
   ['运行时 SSE 与 Artifact', 'qa:runtime'],
   ['聊天与多模态', 'qa:chat'],
   ['直达聊天流式重试', 'qa:direct-stream'],

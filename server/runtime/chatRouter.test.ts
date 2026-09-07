@@ -45,6 +45,33 @@ const schedulerOutput = (overrides: Record<string, unknown> = {}) => JSON.string
   ...overrides,
 });
 
+test('routing diagnostics measure Router and Scheduler separately without exposing prompts', async () => {
+  const measurements: Array<Record<string, unknown>> = [];
+  const decision = await routeChatIntent({ message: 'Design a platform', mode: 'build', onModelCall: (measurement) => measurements.push({ ...measurement }) },
+    new RouteModel([routerOutput(), schedulerOutput()]), new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.deepEqual(measurements.map((item) => item.stage), ['router', 'scheduler']);
+  assert.ok(measurements.every((item) => item.status === 'completed' && item.totalTokens === null && Number(item.promptCharacters) > 0));
+  assert.ok(measurements.every((item) => !('user' in item) && !('system' in item)));
+  const failed: Array<Record<string, unknown>> = [];
+  const degraded = await routeChatIntent({ message: 'Compare official sources and verify the recommendation.', mode: 'decide', onModelCall: (measurement) => failed.push({ ...measurement }) },
+    { model: 'unavailable', async complete() { throw new Error('Injected disconnect'); } }, new AbortController().signal);
+  assert.equal(degraded.source, 'deterministic-fallback');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0]!.status, 'failed');
+  assert.equal(failed[0]!.totalTokens, null);
+});
+
+test('diagnostic observers cannot turn a healthy model route into fallback', async () => {
+  let observed = 0;
+  const decision = await routeChatIntent({ message: 'Design a platform', mode: 'build', onModelCall: () => {
+    observed += 1;
+    throw new Error('Injected diagnostic observer failure');
+  } }, new RouteModel([routerOutput(), schedulerOutput()]), new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(observed, 2);
+});
+
 test('Router Agent and Scheduler Agent produce the durable graph that executes this turn', async () => {
   const decision = await routeChatIntent(
     {
@@ -131,15 +158,19 @@ test('server route safety keeps a model-selected retrieval workflow intact', () 
   const fallback = fallbackChatRoute(input);
   const taskDecision = {
     ...fallbackChatRoute({ message: '设计一个平台', mode: 'analyze' }),
+    source: 'router-agent' as const,
     intent: 'task' as const,
     execution: 'workflow' as const,
     agentRole: 'orchestrator',
     workflowRoute: 'team' as const,
   };
   const guarded = enforceChatRouteSafety(taskDecision, input);
-  assert.equal(fallback.intent, 'web-search');
+  assert.equal(fallback.intent, 'task');
+  assert.equal(fallback.requiresSearch, true);
+  assert.ok(fallback.scheduler.steps.find((step) => step.agentId === 'analyst')?.dependsOn.includes('research'));
   assert.equal(guarded.intent, 'task');
   assert.equal(guarded.execution, 'workflow');
+  assert.deepEqual(guarded.scheduler.steps, taskDecision.scheduler.steps);
 });
 
 test('server route safety normalizes task execution to match its workflow route', () => {
@@ -563,4 +594,44 @@ test('mixed fallback needs only attachment capabilities and old graph roles do n
   assert.equal(followup.source, 'router-agent');
   assert.equal(followup.workflowRoute, 'direct');
   assert.deepEqual(followup.scheduler.activeAgentIds, ['direct-responder']);
+});
+
+test('router timeout preserves evidence, comparison delivery, and verification for the original failure', async () => {
+  const message = '请基于最新官方资料，比较 PostgreSQL 与 SQLite 在多 worker 部署中的并发、迁移和故障恢复风险，给出选型方案并验证结论';
+  let fallbacks = 0;
+  const decision = await routeChatIntent({ message, mode: 'decide', onFallback: () => { fallbacks += 1; } }, {
+    model: 'injected-timeout',
+    complete: async () => { throw new DOMException('Injected Router timeout', 'TimeoutError'); },
+  }, new AbortController().signal);
+  assert.equal(fallbacks, 1);
+  assert.equal(decision.intent, 'task');
+  assert.equal(decision.execution, 'workflow');
+  assert.equal(decision.source, 'deterministic-fallback');
+  assert.equal(decision.requiresSearch, true);
+  assert.deepEqual(decision.scheduler.activeAgentIds, ['search-agent', 'analyst', 'reviewer']);
+  assert.deepEqual(decision.scheduler.executionWaves, [['research'], ['analysis'], ['quality-review']]);
+  assert.ok(decision.scheduler.steps.every((step) => step.objective.includes(message)));
+  assert.ok(decision.skillIds.includes('web-research'));
+  assert.ok(decision.skillIds.includes('evidence-research'));
+  const plan = workflowPlanFromChatRoute(decision)!;
+  assert.equal(plan.routingSource, 'deterministic-fallback');
+  assert.equal(plan.steps[0]?.agentContract?.agentId, 'search-agent');
+  assert.deepEqual(plan.steps[1]?.dependsOn, ['research']);
+  assert.deepEqual(plan.steps[2]?.dependsOn, ['research', 'analysis']);
+});
+
+test('old browser fallback decisions are re-evaluated with the current shared contract', () => {
+  const stale = { ...fallbackChatRoute({ message: '今天的天气', mode: 'analyze' }), routingVersion: 'router-scheduler/local-fallback-v1' };
+  const input = { message: '查询最新官方资料，比较数据库选型并验证结论', mode: 'decide' as const };
+  assert.deepEqual(enforceChatRouteSafety(stale, input), fallbackChatRoute(input));
+});
+
+test('fallback only selects current-turn capabilities after search is explicitly stopped', () => {
+  const previous = fallbackChatRoute({ message: '搜索 GitHub 最新项目，比较方案并验证结论', mode: 'decide' });
+  const current = fallbackChatRoute({ message: '本轮不再检索，只根据已有结论给出选型方案。', mode: 'decide', currentGraph: workflowPlanFromChatRoute(previous)?.graph });
+  assert.equal(current.requiresSearch, false);
+  assert.equal(current.skillIds.includes('web-research'), false);
+  assert.equal(current.skillIds.includes('github-inspection'), false);
+  assert.equal(current.scheduler.activeAgentIds.includes('github-research-agent'), false);
+  assert.equal(current.scheduler.activeAgentIds.includes('reviewer'), false);
 });

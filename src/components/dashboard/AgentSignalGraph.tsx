@@ -7,6 +7,8 @@ import type { AgentGraph, AgentPhase, RunEvent, TopologyAgent } from '../../type
 import { agentDisplayName } from '../../lib/agentPresentation';
 import { graphVirtualWindow, shouldReduceGraphMotion, type GraphRuntimeSignals } from '../../lib/graphRuntime';
 import { visibleGraphNodes } from '../../lib/workflowGraphState';
+import { useUiLanguage } from '../../lib/uiLanguage';
+import { translateRunEventLabel } from '../../lib/runEventPresentation';
 
 type SignalNode = {
   id: string;
@@ -34,6 +36,7 @@ type NavigatorRuntime = Navigator & {
 const TAU = Math.PI * 2;
 const EVENT_ROW_HEIGHT = 40;
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const hasCustomLabel = (node: Pick<SignalNode, 'label' | 'role'>) => /[\u3400-\u9fff]/u.test(node.role) || node.label !== agentDisplayName(node.role);
 
 const readRuntimeSignals = (): GraphRuntimeSignals => {
   if (typeof window === 'undefined') return { prefersReducedMotion: false };
@@ -120,6 +123,7 @@ const formatDuration = (durationMs?: number) => {
 };
 
 function VirtualEventList({ events }: { events: RunEvent[] }) {
+  const { language } = useUiLanguage();
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(240);
@@ -152,7 +156,7 @@ function VirtualEventList({ events }: { events: RunEvent[] }) {
     {orderedEvents.slice(windowRange.start, windowRange.end).map((event) => <div className="dash-agent-event-row" key={event.id}>
       <i className={`phase-${event.phase}`} />
       <time>{new Date(event.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
-      <strong title={event.label}>{event.label}</strong>
+      <strong title={translateRunEventLabel(event, language)} data-i18n-ignore="true">{translateRunEventLabel(event, language)}</strong>
     </div>)}
     <div style={{ height: windowRange.paddingBottom }} aria-hidden="true" />
   </div>;
@@ -166,6 +170,7 @@ export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId,
   selectedNodeId: string | null;
   onSelectAgent: (id: string) => void;
 }) {
+  const { t } = useUiLanguage();
   const stageRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const [runtimeSignals, setRuntimeSignals] = useState(readRuntimeSignals);
@@ -231,6 +236,7 @@ export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId,
   const positionById = useMemo(() => new Map(nodes.map((node, index) => [node.id, positions[index]!])), [nodes, positions]);
   const edges = useMemo(() => (graph?.edges ?? []).filter((edge) => positionById.has(edge.from) && positionById.has(edge.to)), [graph, positionById]);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const displayNodeLabel = (node: SignalNode) => hasCustomLabel(node) ? node.label : t(node.label);
   const live = phase === 'routing' || phase === 'context' || phase === 'inference';
 
   const applyWorldTransform = useCallback(() => {
@@ -295,22 +301,26 @@ export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId,
     const state = stateRef.current;
     state.lastFrame = performance.now();
     applyWorldTransform();
-    if (reducedMotion || !stageVisible) return undefined;
+    if (reducedMotion || !stageVisible || !autoRotate) return undefined;
     let frame = 0;
     const tick = (timestamp: number) => {
       const delta = Math.min(.05, Math.max(.001, (timestamp - state.lastFrame) / 1000));
       state.lastFrame = timestamp;
-      if (!document.hidden && state.auto && !state.dragging && !state.hovering) state.yaw += delta * 3.3;
-      applyWorldTransform();
+      if (!document.hidden && state.auto && !state.dragging && !state.hovering) {
+        state.yaw += delta * 3.3;
+        applyWorldTransform();
+      }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [applyWorldTransform, expanded, nodes.length, reducedMotion, stageVisible]);
+  }, [applyWorldTransform, autoRotate, expanded, nodes.length, reducedMotion, stageVisible]);
 
   useEffect(() => {
     if (!selectedNodeId) {
+      const wasFocused = focusedSelectionRef.current !== null;
       focusedSelectionRef.current = null;
+      if (wasFocused) focusNode(null);
       return;
     }
     if (focusedSelectionRef.current === selectedNodeId || !positionById.has(selectedNodeId)) return;
@@ -436,14 +446,15 @@ export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId,
             key={node.id}
             type="button"
             data-agent-id={node.id}
+            data-i18n-ignore="true"
             className={`dash-agent-signal-node status-${node.status} variant-${index % 5} ${active ? 'active' : ''} ${selected ? 'selected' : ''}`}
             style={{
               left: `${position.x}%`,
               top: `${position.y}%`,
               '--dash-node-depth': `${(Math.cos(position.angle) * 24).toFixed(2)}px`,
             } as CSSProperties}
-            title={`${node.label} · ${statusLabels[node.status]}`}
-            aria-label={`${node.label}，${statusLabels[node.status]}`}
+            title={`${displayNodeLabel(node)} · ${t(statusLabels[node.status])}`}
+            aria-label={`${displayNodeLabel(node)}，${t(statusLabels[node.status])}`}
             aria-pressed={selected}
             onPointerEnter={() => { stateRef.current.hovering = true; }}
             onPointerLeave={() => { stateRef.current.hovering = false; }}
@@ -462,28 +473,31 @@ export function AgentSignalGraph({ agents, graph, phase, events, selectedNodeId,
               <span className="dash-agent-mouth" />
               <b className="dash-agent-status-dot" />
             </span>
-            <span className="dash-agent-node-meta"><MorphIcon icon={statusIcon(node.status)} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" /><em>{node.label}</em></span>
+            <span className="dash-agent-node-meta"><MorphIcon icon={statusIcon(node.status)} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" /><em>{displayNodeLabel(node)}</em></span>
           </button>;
         })}
       </div>
     </div>}
     {panel && <aside className={`dash-agent-graph-panel panel-${panel}`} aria-label={panel === 'events' ? '运行事件' : 'Agent 详情'}>
       <header>
-        <div>{panel === 'events' ? <><Activity size={14} /><strong>运行事件</strong><small>{events.length}</small></> : <><Network size={14} /><strong>{selectedNode?.label ?? 'Agent 详情'}</strong></>}</div>
+        <div>{panel === 'events' ? <><Activity size={14} /><strong>运行事件</strong><small>{events.length}</small></> : <><Network size={14} /><strong data-i18n-ignore="true">{selectedNode ? displayNodeLabel(selectedNode) : t('Agent 详情')}</strong></>}</div>
         <div>
           {panel === 'node' && nodes.length > 1 && <><button type="button" title="上一个 Agent" onClick={() => selectRelativeNode(-1)}><ChevronLeft size={14} /></button><button type="button" title="下一个 Agent" onClick={() => selectRelativeNode(1)}><ChevronRight size={14} /></button></>}
           <button type="button" title="关闭" onClick={() => setPanel(null)}><X size={14} /></button>
         </div>
       </header>
       {panel === 'events' ? <VirtualEventList events={events} /> : selectedNode ? <div className="dash-agent-node-detail">
-        <div className="dash-agent-node-state"><i className={`status-${selectedNode.status}`} /><strong>{statusLabels[selectedNode.status]}</strong><span>{agentDisplayName(selectedNode.role)}</span></div>
+        <div className="dash-agent-node-state"><i className={`status-${selectedNode.status}`} /><strong>{statusLabels[selectedNode.status]}</strong><span data-i18n-ignore="true">{/[\u3400-\u9fff]/u.test(selectedNode.role) ? selectedNode.role : t(agentDisplayName(selectedNode.role))}</span></div>
         <dl>
           <div><dt>Token</dt><dd>{selectedNode.tokens?.toLocaleString() ?? '—'}</dd></div>
           <div><dt>耗时</dt><dd>{formatDuration(selectedNode.durationMs)}</dd></div>
           <div><dt>尝试</dt><dd>{selectedNode.attempts ?? 0}</dd></div>
           <div><dt>工具</dt><dd>{selectedNode.toolCalls ?? 0}</dd></div>
         </dl>
-        {selectedNode.dependsOn.length > 0 && <div className="dash-agent-node-links"><span>上游</span>{selectedNode.dependsOn.map((id) => <button type="button" key={id} disabled={!positionById.has(id)} onClick={() => selectNode(id)}>{nodes.find((node) => node.id === id)?.label ?? id}</button>)}</div>}
+        {selectedNode.dependsOn.length > 0 && <div className="dash-agent-node-links"><span>上游</span>{selectedNode.dependsOn.map((id) => {
+          const upstream = nodes.find((node) => node.id === id);
+          return <button type="button" key={id} data-i18n-ignore="true" disabled={!positionById.has(id)} onClick={() => selectNode(id)}>{upstream ? displayNodeLabel(upstream) : id}</button>;
+        })}</div>}
         {selectedNode.skillIds.length > 0 && <p><span>Skill</span>{selectedNode.skillIds.join(' · ')}</p>}
         {selectedNode.failureReason && <p className="failure"><span>原因</span>{selectedNode.failureReason}</p>}
       </div> : <div className="dash-agent-panel-empty">选择一个 Agent 查看执行详情</div>}

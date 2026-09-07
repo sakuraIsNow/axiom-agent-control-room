@@ -1,4 +1,5 @@
 import { chromium } from '@playwright/test';
+import { runPopulatedLanguageSmoke } from './ui-language-populated-smoke.mjs';
 
 const baseUrl = (process.env.QA_URL ?? 'http://127.0.0.1:4300').replace(/\/$/, '');
 const tenant = `qa-i18n-${Date.now()}`;
@@ -131,5 +132,6 @@ for (const secretConfigured of [true, false]) {
 }
 if (consoleErrors.length) throw new Error(`Browser console errors: ${consoleErrors.join(' | ')}`);
 
-console.log(JSON.stringify({ status: 'passed', defaultLanguage: 'en', persistedLanguage: 'zh-CN', workspaces: navButtons.map(([name]) => name), blockedReadinessScenarios: 2 }, null, 2));
 await browser.close();
+const populated = await runPopulatedLanguageSmoke();
+console.log(JSON.stringify({ status: 'passed', defaultLanguage: 'en', persistedLanguage: 'zh-CN', workspaces: navButtons.map(([name]) => name), blockedReadinessScenarios: 2, populated }, null, 2));

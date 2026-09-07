@@ -324,6 +324,7 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'memory.policy_updated': '本轮记忆策略已更新',
     'model.delta': `${eventAgentName}正在组织阶段结果`,
     'model.completed': `${eventAgentName}已完成阶段输出`,
+    'model.failed': `${eventAgentName}的阶段调用未完成`,
     'budget.exceeded': '任务执行预算已达到上限',
     'budget.constrained': '预算接近上限，已压缩并行步骤',
     'estimate.updated': '已根据实际执行进度更新剩余时间',
@@ -1940,14 +1941,14 @@ function App() {
 
   const formatTaskDuration = (duration: number) => duration < 1_000 ? '不足 1 秒' : `${(duration / 1_000).toFixed(duration >= 60_000 ? 0 : 1)} 秒`;
 
-  const addRunEvent = useCallback((eventPhase: AgentPhase, label: string) => {
+  const addRunEvent = useCallback((eventPhase: AgentPhase, label: string, labelSource: RunEvent['labelSource'] = 'system') => {
     setRunEvents((current) => {
       const at = Date.now();
       const previous = current[current.length - 1];
-      if (previous?.phase === eventPhase && previous.label === label && at - previous.at < 1_000) {
+      if (previous?.phase === eventPhase && previous.label === label && previous.labelSource === labelSource && at - previous.at < 1_000) {
         return [...current.slice(0, -1), { ...previous, at }];
       }
-      return [...current, { id: makeId(), phase: eventPhase, label, at }].slice(-500);
+      return [...current, { id: makeId(), phase: eventPhase, label, labelSource, at }].slice(-500);
     });
   }, []);
 
@@ -3083,7 +3084,7 @@ function App() {
                 const validPhase = nextPhase as AgentPhase;
                 setPhase(validPhase);
                 setAgentActivity(gatewayAgentActivity(routing.agentRole, validPhase, message));
-                addRunEvent(validPhase, message);
+                addRunEvent(validPhase, message, 'verbatim');
               },
               onToken: (token) => {
                 setAgentActivity(`${agentDisplayName(routing.agentRole)}正在组织回答`);

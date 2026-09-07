@@ -1,5 +1,6 @@
 import type { AgentGraph, AgentMode, ChatMessage, ChatRouteDecision, FileAttachment, ImageAttachment, TextProviderSettings } from '../types';
 import { fallbackChatRoute } from './chatRoutingFallback';
+import { chatRouteDecisionSchema } from '../../server/shared/chatRoutingSchema';
 
 const routeTimeoutMs = 12_000;
 const routeMaxAttempts = 2;
@@ -59,7 +60,9 @@ export async function routeChatMessage(
       if (!response.ok || !body?.decision) {
         throw Object.assign(new Error(body?.error ?? `Semantic routing returned HTTP ${response.status}.`), { retryable: retryableStatus(response.status) });
       }
-      return body.decision;
+      const decision = chatRouteDecisionSchema.safeParse(body.decision);
+      if (!decision.success) throw Object.assign(new Error('Routing returned an invalid decision.'), { retryable: false });
+      return decision.data as ChatRouteDecision;
     } catch (error) {
       if (isAbort(error, signal)) {
         if (signal.aborted) throw signal.reason ?? error;

@@ -4,7 +4,7 @@
 
 > A workspace for asking questions, researching topics, creating content, and building reusable Agent tools. See who is working, follow the result, and step in when a decision is needed.
 
-**Version: v2.3.0-rc.6** · [Release notes](CHANGELOG.md) · [Upgrade guide](docs/migration-v2.3.md)
+**Version: v2.3.0-rc.7** · [Release notes](CHANGELOG.md) · [Upgrade guide](docs/migration-v2.3.md)
 
 ![Axiom Control Room](docs/images/overview.png)
 
@@ -70,6 +70,8 @@ Long tasks use structured handoffs and Artifact references instead of repeatedly
 
 ### Reliable execution
 
+- **A routing outage does not erase the rest of the request.** Shared browser and server fallback keeps research, attachments, analysis, and verification connected when needed. A simple question still takes a lightweight path.
+- **Less repeated work, clearer measurements.** Duplicate handoff text is sent once. Reviews that repeat the same unresolved issues without progress stop for the configured recovery or human-review path. Task diagnostics separate measured usage, unknown usage, retries, and human intervention.
 - **One request can use several inputs.** An image and a document add the required capabilities without replacing the rest of the Agent plan. Tasks keep an immutable copy of the exact turn's attachments.
 - **Agents can take a useful next step.** A tool result can lead to another lookup or action. Decisions and results are checkpointed, with limits that stop repeated calls and stalled work.
 - **Recovery does not blindly repeat actions.** Successful tool receipts can be reused after an interruption. When a write may have happened but its result is unknown, task details let you record what you checked, then explicitly continue.
@@ -224,31 +226,38 @@ npm run qa:i18n               # English default and Chinese switch regression
 npm run qa:visual             # Desktop and mobile visual regression
 npm run qa:business           # Segmented business-flow evaluation
 npm run qa:mcp-business       # 30 P0 + 14 P1 Fake MCP cases
+npm run qa:routing-resilience # Deterministic Router/Scheduler failure cases
+npm run qa:execution-quality  # Fixed delivery and review-loop quality cases
+npm run qa:agentgraph3d       # Real component interactions and frame budgets
 npm run qa:object-storage:local
 npm run qa:postgres:local
 npm run qa:all:local          # PostgreSQL + MinIO local release gate
 ```
 
-Latest `v2.3.0-rc.6` acceptance on 2026-09-07:
+Latest `v2.3.0-rc.7` acceptance on 2026-09-07:
 
 ```text
 npm run check          passed
-npm test               611 tests / 597 passed / 0 failed / 14 PostgreSQL skipped
+npm test               644 tests / 630 passed / 0 failed / 14 PostgreSQL skipped
 npm run build          passed
 PostgreSQL isolation   16 passed / 0 failed / 0 skipped
-Human-action UI        13 passed / 0 failed
+Routing resilience     137 passed / 0 failed
+Live Router/Scheduler  7 passed / 0 failed
+Fixed delivery quality 14 passed / 0 failed
+Populated bilingual UI 10 passed / 0 failed
+Real Agent Graph       22 passed / 0 failed
 npm run qa:visual      172 assertions passed
 npm run qa:mcp-business 44 passed / 0 failed
-npm run qa:all:local   35 passed / 0 failed / 3 skipped
+npm run qa:all:local   37 passed / 0 failed / 3 skipped
 ```
 
-The 14 PostgreSQL cases skipped by the default test command were rerun in an isolated database. The final full gate passed, but was not a first-attempt clean run: one online-routing case fell back on its first attempt, then passed on retry. Earlier migration, UI-fixture, translation, and timeout failures are recorded in the [acceptance log](docs/cross-entry-consistency-20260907.md).
+The 14 PostgreSQL cases skipped by the default test command were rerun in isolation. The local full gate now creates a temporary API, a separate database for PostgreSQL contracts, and temporary Artifacts. It does not populate your regular task history. The first full run caught an English Readiness-label defect; after repair, the entire gate passed again with no retries in the final run. Both runs are documented in the [acceptance log](docs/rc7-product-quality-20260907.md).
 
-The three skipped live checks require deployment-specific TencentDB MemoryCore and Harness/Codex sidecar configuration. A skipped check is not a pass. Compound research requests can still lose their intended Agent division when the routing model is unavailable; that fallback boundary remains a P0 follow-up, not a completed feature.
+The three skipped live checks require deployment-specific TencentDB MemoryCore and Harness/Codex sidecar configuration. A skipped check is not a pass. Fixed delivery tests validate authored requirements and exact source pairs, not the factual accuracy of arbitrary answers. Live complex tasks can still need human review and may deliver explicitly accepted partial results; these are not counted as automatic first-pass success.
 
 ## 📈 Local API baseline
 
-Historical baseline from 2026-09-04, measured on one Windows node with 25 concurrent clients and 200 requests per endpoint. These figures measure Axiom's API, scheduler, and database path; they do not include model generation or Internet latency. The smaller rc.6 smoke test is recorded separately in the acceptance log and is not a capacity guarantee.
+Historical baseline from 2026-09-04, measured on one Windows node with 25 concurrent clients and 200 requests per endpoint. These figures measure Axiom's API, scheduler, and database path; they do not include model generation or Internet latency. The rc.7 UI and live-model measurements are recorded separately in the acceptance log and are not a production-capacity guarantee.
 
 | Endpoint | Throughput | P95 latency |
 | --- | ---: | ---: |

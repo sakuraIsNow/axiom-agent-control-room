@@ -174,7 +174,9 @@ const qualityReport = {
   durationMs: Math.max(0, new Date(taskBody.task.updatedAt).getTime() - new Date(taskBody.task.createdAt).getTime()),
   totalTokens: result.tokens?.total ?? 0,
   evidenceCount: taskBody.task.stepResults.reduce((total, step) => total + (Array.isArray(step.evidence) ? step.evidence.length : 0), 0),
-  manualTakeover: Boolean(taskBody.task.review && !taskBody.task.review.approved),
+  manualTakeover: events.some((event) => event.type === 'review.approval_requested' || event.type === 'tool.outcome_unknown'),
+  executionQuality: taskBody.executionQuality ?? null,
+  measurementScope: 'single-live-provider-smoke-not-population-benchmark',
   reviewScore: taskBody.task.review?.score ?? null,
   streaming: result.streaming,
 };
@@ -182,7 +184,8 @@ await mkdir(resolve(process.cwd(), 'qa'), { recursive: true });
 await writeFile(resolve(process.cwd(), 'qa', 'runtime-results.json'), `${JSON.stringify(qualityReport, null, 2)}\n`);
 
 process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-if (terminal.type !== 'task.completed' || result.streaming.deltaEvents === 0 || result.streaming.lastDeltaBeforeTerminal === 0) process.exitCode = 1;
+if (terminal.type !== 'task.completed' || result.streaming.deltaEvents === 0 || result.streaming.lastDeltaBeforeTerminal === 0
+  || taskBody.executionQuality?.schemaVersion !== 1 || taskBody.executionQuality?.usage?.calls < 1) process.exitCode = 1;
 } finally {
   if (cleanupTaskId) {
     const cleanupSignal = AbortSignal.timeout(30_000);

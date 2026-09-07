@@ -27,6 +27,7 @@ class ContextModel implements ModelClient {
   readonly model = 'context-extraction-fixture';
   extractionCalls = 0;
   documentInput = '';
+  analystInputs: string[] = [];
   async complete(input: ModelCompletionRequest) {
     let content: string;
     if (input.system.includes('Extract durable USER')) {
@@ -44,6 +45,10 @@ class ContextModel implements ModelClient {
     } else if (input.system.includes('文档分析 Agent')) {
       this.documentInput = input.user;
       content = 'The source document requires 37 retained records.';
+    } else if (input.system.includes('You are a analyst')) {
+      this.analystInputs.push(input.user);
+      content = JSON.stringify({ output: 'The image supplies a source marker, while the document requires 37 retained records.', evidence: [], confidence: 0.9,
+        handoff: { summary: 'Compared the image marker with the document retention requirement.', status: 'complete', artifactIds: [], evidenceIds: [], openQuestions: [], completionCriteria: [] } });
     } else if (input.system.includes('synthesizer')) content = 'The image and document have both been analyzed.';
     else content = JSON.stringify({ approved: true, score: 95, summary: 'Complete.', gaps: [], requiredCorrections: [] });
     return { content, attempts: 1, durationMs: 1 };
@@ -212,12 +217,27 @@ test('ordinary mixed-attachment workflow delivers saved exact-turn bytes to real
     assert.equal(response.status, 202, await response.clone().text());
     const task = (await response.json() as { task: WorkflowTask }).task;
     assert.equal(task.plan?.inputAttachments?.length, 2);
+    const inputSteps = task.plan!.steps.filter((step) => ['vision-agent', 'document-agent'].includes(step.role));
+    const comparisonStep = task.plan!.steps.find((step) => step.role === 'analyst');
+    assert.equal(inputSteps.length, 2);
+    assert.ok(comparisonStep, 'comparing two parsed inputs requires a dependent comparison stage');
+    assert.deepEqual([...comparisonStep.dependsOn].sort(), inputSteps.map((step) => step.id).sort());
     const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }), undefined, undefined, undefined, undefined, new FileArtifactStore(join(directory, 'artifacts'))).run(task, new AbortController().signal);
     assert.equal(result.status, 'completed', result.error);
     assert.ok(visualRequest.some((part) => part.image_url?.url === imageUrl));
     assert.match(model.documentInput, /Retain exactly 37 records/);
     assert.doesNotMatch(model.documentInput, /base64/);
-    assert.deepEqual(result.stepResults.map((step) => step.role).sort(), ['document-agent', 'vision-agent']);
+    assert.deepEqual(result.stepResults.map((step) => step.role).sort(), ['analyst', 'document-agent', 'vision-agent']);
+    assert.equal(model.analystInputs.length, 1);
+    assert.match(model.analystInputs[0]!, /The supplied image contains a source marker/);
+    assert.match(model.analystInputs[0]!, /The source document requires 37 retained records/);
+    const executionEvents = await store.getEvents(task.id);
+    const comparisonStarted = executionEvents.find((event) => event.type === 'agent.started' && event.payload.stepId === comparisonStep.id);
+    assert.ok(comparisonStarted);
+    for (const inputStep of inputSteps) {
+      const inputCompleted = executionEvents.find((event) => event.type === 'agent.completed' && event.payload.stepId === inputStep.id);
+      assert.ok(inputCompleted && inputCompleted.sequence < comparisonStarted.sequence, `${inputStep.role} must complete before comparison starts`);
+    }
     await store.updateTask(task.id, { status: 'failed', error: 'Retry fixture failure after initial outputs.' });
     const denied = await request(api, `/tasks/${task.id}/retry`, undefined, 'POST', { ...headers, 'x-axiom-user-id': 'another-owner' });
     assert.equal(denied.status, 404);
@@ -241,10 +261,14 @@ test('ordinary mixed-attachment workflow delivers saved exact-turn bytes to real
     for (const attachment of restoredInputs) assert.equal((await artifactCatalog.get(task.tenantId, attachment.artifactId))?.referenceCount, 1);
     visualRequest = [];
     model.documentInput = '';
+    model.analystInputs = [];
     const retryResult = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }), undefined, undefined, undefined, undefined, new FileArtifactStore(join(directory, 'artifacts'))).run(retried, new AbortController().signal);
     assert.equal(retryResult.status, 'completed', retryResult.error);
     assert.ok(visualRequest.some((part) => part.image_url?.url === imageUrl));
     assert.match(model.documentInput, /Retain exactly 37 records/);
+    assert.equal(model.analystInputs.length, 1);
+    assert.match(model.analystInputs[0]!, /The supplied image contains a source marker/);
+    assert.match(model.analystInputs[0]!, /The source document requires 37 retained records/);
   } finally {
     globalThis.fetch = originalFetch;
     for (const [key, value] of previous) {

@@ -14,6 +14,7 @@ import { downloadReportAttachment, exportConversationReport } from '../../lib/re
 import { userFacingError } from '../../lib/errorPresentation';
 import { agentDisplayName } from '../../lib/agentPresentation';
 import { evidenceSourceLabels, evidenceSourceStatus } from '../../lib/evidencePresentation';
+import { useUiLanguage } from '../../lib/uiLanguage';
 import '../../styles/task-capabilities.css';
 
 const activeStatuses = new Set(['queued', 'planning', 'running', 'reviewing', 'paused', 'waiting_for_human', 'awaiting_approval']);
@@ -26,13 +27,14 @@ const durationLabel = (milliseconds: number) => milliseconds < 60_000
   : `${Math.max(1, Math.round(milliseconds / 60_000))} 分钟`;
 
 function EvidenceGraph({ items, taskId }: { items: EvidenceItem[]; taskId: string }) {
+  const { t } = useUiLanguage();
   if (!items.length) return null;
   return <section className="task-evidence-graph" aria-label="证据图">
-    <div className="task-capability-head"><span><FileCheck2 size={14} />证据图</span><small>{items.length} 条</small></div>
+    <div className="task-capability-head"><span><FileCheck2 size={14} />证据图</span><small>{t(`${items.length} 条`)}</small></div>
     <div className="task-evidence-list">{items.slice(0, 24).map((item) => <article key={item.id} className={evidenceSourceStatus(item, taskId)}>
-      <div className="task-evidence-source"><span>{evidenceKindLabel[item.kind]}</span><strong>{item.title ?? item.source}</strong>{item.locator && <small>{item.locator}</small>}{(item.publishedAt || item.retrievedAt) && <time>{new Date(item.publishedAt ?? item.retrievedAt!).toLocaleString('zh-CN')}</time>}</div>
+      <div className="task-evidence-source"><span>{evidenceKindLabel[item.kind]}</span><strong data-i18n-ignore="true">{item.title ?? item.source}</strong>{item.locator && <small data-i18n-ignore="true">{item.locator}</small>}{(item.publishedAt || item.retrievedAt) && <time>{new Date(item.publishedAt ?? item.retrievedAt!).toLocaleString('zh-CN')}</time>}</div>
       <ArrowRight size={13} />
-      <div className="task-evidence-claim"><span>{evidenceSourceLabels[evidenceSourceStatus(item, taskId)]}</span><p>{item.claim}</p><footer>{item.artifactId && <em>Artifact：{item.artifactId}</em>}{item.uri && <a href={item.uri} target="_blank" rel="noreferrer">查看来源<ExternalLink size={11} /></a>}</footer></div>
+      <div className="task-evidence-claim"><span>{evidenceSourceLabels[evidenceSourceStatus(item, taskId)]}</span><p data-i18n-ignore="true">{item.claim}</p><footer>{item.artifactId && <em>Artifact：{item.artifactId}</em>}{item.uri && <a href={item.uri} target="_blank" rel="noreferrer">查看来源<ExternalLink size={11} /></a>}</footer></div>
     </article>)}</div>
   </section>;
 }
@@ -41,6 +43,7 @@ export function TaskCapabilityPanel({ task, onTaskCreated }: {
   task: WorkflowTaskSummary;
   onTaskCreated: (taskId: string) => Promise<void>;
 }) {
+  const { t } = useUiLanguage();
   const [detail, setDetail] = useState<WorkflowTask | null>(null);
   const [actions, setActions] = useState<TaskAction[]>([]);
   const [selectedStepId, setSelectedStepId] = useState('');
@@ -179,8 +182,8 @@ export function TaskCapabilityPanel({ task, onTaskCreated }: {
 
     {detail?.plan?.steps?.length ? <section className="task-agent-control">
       <div className="task-capability-head"><span><BrainCircuit size={14} />Agent 干预</span><small>{detail.plan.steps.length} 个 Agent</small></div>
-      <select aria-label="选择 Agent" value={selectedStepId} onChange={(event) => setSelectedStepId(event.target.value)}>{detail.plan.steps.map((step) => <option key={step.id} value={step.id}>{step.title} · {agentDisplayName(step.role)}</option>)}</select>
-      {selectedStep && <p>{selectedResult ? `${selectedResult.status === 'completed' ? '已完成' : '未完成'} · ${selectedResult.durationMs} ms · ${selectedResult.tokens ?? 0} Token` : detail.status === 'paused' ? '已暂停，等待恢复' : '等待执行'}</p>}
+      <select aria-label="选择 Agent" value={selectedStepId} onChange={(event) => setSelectedStepId(event.target.value)}>{detail.plan.steps.map((step) => <option key={step.id} value={step.id} data-i18n-ignore="true">{step.title} · {t(agentDisplayName(step.role))}</option>)}</select>
+      {selectedStep && <p>{selectedResult ? `${t(selectedResult.status === 'completed' ? '已完成' : '未完成')} · ${typeof selectedResult.durationMs === 'number' ? `${selectedResult.durationMs} ms` : t('耗时未提供')} · ${typeof selectedResult.tokens === 'number' ? `${selectedResult.tokens} Token` : t('用量未提供')}` : detail.status === 'paused' ? '已暂停，等待恢复' : '等待执行'}</p>}
       <div className="task-agent-buttons">
         <button type="button" disabled={!canPause || Boolean(busy)} onClick={() => control('pause')}><CirclePause size={13} />暂停</button>
         <button type="button" disabled={!canResume || Boolean(busy)} onClick={() => control('resume')}><CirclePlay size={13} />恢复</button>
@@ -190,7 +193,7 @@ export function TaskCapabilityPanel({ task, onTaskCreated }: {
       <div className="task-agent-replace"><input value={replacementModel} onChange={(event) => setReplacementModel(event.target.value)} placeholder="替换模型名称" /><button type="button" disabled={!replacementModel.trim() || Boolean(busy)} onClick={() => control('replace')}>替换</button></div>
     </section> : null}
 
-    {handoffs.length > 0 && <section className="task-handoff-list"><div className="task-capability-head"><span><GitBranch size={14} />Agent 交接</span><small>{handoffs.length} 次</small></div>{handoffs.slice(-6).map(({ stepId, agentId, handoff }) => <article key={`${stepId}-${agentId}`}><header><strong>{agentDisplayName(agentId)}</strong><span className={handoff.status}>{handoff.status === 'complete' ? '完整' : handoff.status === 'partial' ? '部分完成' : '受阻'}</span></header><p>{handoff.summary}</p><footer><span>{handoff.evidenceIds.length} 条证据</span><span>{handoff.artifactIds.length} 个 Artifact</span><span>{handoff.openQuestions.length} 个未决问题</span></footer>{handoff.openQuestions.length > 0 && <small>{handoff.openQuestions.join('；')}</small>}</article>)}</section>}
+    {handoffs.length > 0 && <section className="task-handoff-list"><div className="task-capability-head"><span><GitBranch size={14} />Agent 交接</span><small>{handoffs.length} 次</small></div>{handoffs.slice(-6).map(({ stepId, agentId, handoff }) => <article key={`${stepId}-${agentId}`}><header><strong>{agentDisplayName(agentId)}</strong><span className={handoff.status}>{handoff.status === 'complete' ? '完整' : handoff.status === 'partial' ? '部分完成' : '受阻'}</span></header><p data-i18n-ignore="true">{handoff.summary}</p><footer><span>{handoff.evidenceIds.length} 条证据</span><span>{handoff.artifactIds.length} 个 Artifact</span><span>{handoff.openQuestions.length} 个未决问题</span></footer>{handoff.openQuestions.length > 0 && <small data-i18n-ignore="true">{handoff.openQuestions.join('；')}</small>}</article>)}</section>}
 
     <EvidenceGraph items={evidenceItems} taskId={task.id} />
 
@@ -202,7 +205,7 @@ export function TaskCapabilityPanel({ task, onTaskCreated }: {
       <div className="task-feedback-issues">{Object.entries(feedbackIssues).map(([id, label]) => <button type="button" key={id} className={feedbackIssueTypes.includes(id) ? 'active' : ''} onClick={() => setFeedbackIssueTypes((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])}>{label}</button>)}</div>
       <div className="task-feedback-note"><input value={feedbackNote} onChange={(event) => setFeedbackNote(event.target.value)} placeholder="哪里做得好，哪里需要改进" /><button type="button" disabled={!score || Boolean(busy)} onClick={submitFeedback}><Check size={13} /></button></div>
       <textarea rows={2} value={revisedAnswer} onChange={(event) => setRevisedAnswer(event.target.value)} placeholder="修订答案（可选）" />
-      {evidenceItems.length > 0 && <div className="task-evidence-correction"><select value={evidenceCorrectionId} onChange={(event) => setEvidenceCorrectionId(event.target.value)}><option value="">纠正证据（可选）</option>{evidenceItems.map((item) => <option key={item.id} value={item.id}>{item.claim.slice(0, 32)}</option>)}</select><input value={evidenceCorrection} onChange={(event) => setEvidenceCorrection(event.target.value)} placeholder="说明正确事实或来源" /></div>}
+      {evidenceItems.length > 0 && <div className="task-evidence-correction"><select value={evidenceCorrectionId} onChange={(event) => setEvidenceCorrectionId(event.target.value)}><option value="">纠正证据（可选）</option>{evidenceItems.map((item) => <option key={item.id} value={item.id} data-i18n-ignore="true">{item.claim.slice(0, 32)}</option>)}</select><input value={evidenceCorrection} onChange={(event) => setEvidenceCorrection(event.target.value)} placeholder="说明正确事实或来源" /></div>}
     </section>}
     {message && <p className="task-capability-message success"><Check size={12} />{message}</p>}
     {error && <p className="task-capability-message error">{error}</p>}

@@ -147,7 +147,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
     const conversation = selectedPlugin.definition.designConversation ?? [];
     return <div className="dash-plugin-workspace dash-plugin-designer">
       <header className="dash-workspace-heading dash-plugin-designer-heading">
-        <div><button type="button" className="dash-plugin-back" onClick={() => onSelect(null)}><ArrowLeft size={15} />返回插件</button><h1>{selectedPlugin.name}</h1></div>
+        <div><button type="button" className="dash-plugin-back" onClick={() => onSelect(null)}><ArrowLeft size={15} />返回插件</button><h1 data-i18n-ignore="true">{selectedPlugin.name}</h1></div>
         <div className="dash-workspace-actions">
           <button type="button" className="labeled" onClick={() => onOpenMiniApp(selectedPlugin)}><ExternalLink size={15} />打开</button>
           <button type="button" className="labeled" aria-expanded={sizeEditorOpen} onClick={() => setSizeEditorOpen((open) => !open)}><Maximize2 size={15} />窗口大小</button>
@@ -202,7 +202,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
   if (selectedPlugin) {
     return <div className="dash-plugin-workspace">
       <header className="dash-workspace-heading">
-        <div><button type="button" className="dash-plugin-back" onClick={() => onSelect(null)}><ArrowLeft size={15} />返回插件</button><h1>{selectedPlugin.name}</h1></div>
+        <div><button type="button" className="dash-plugin-back" onClick={() => onSelect(null)}><ArrowLeft size={15} />返回插件</button><h1 data-i18n-ignore="true">{selectedPlugin.name}</h1></div>
         <div className="dash-workspace-actions">
           <button type="button" className="labeled" aria-expanded={lifecycleOpen} onClick={toggleLifecycle}><History size={15} />版本与权限</button>
           {selectedPlugin.status === 'draft' && <button type="button" className="primary labeled" onClick={() => onPublish(selectedPlugin)} disabled={busy}><Check size={15} />发布</button>}
@@ -215,7 +215,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
       {error && <div className="dash-plugin-error">{error}</div>}
       {lifecyclePanel}
       <section className="dash-plugin-run glass-panel">
-        <p>{selectedPlugin.description || '填写本次任务内容，然后交给 Agent 执行。'}</p>
+        <p data-i18n-ignore={Boolean(selectedPlugin.description)}>{selectedPlugin.description || '填写本次任务内容，然后交给 Agent 执行。'}</p>
         <div className="dash-plugin-run-fields">
           {(selectedPlugin.definition.inputSchema?.fields ?? []).map((field) => <PluginField key={field.id} field={field} values={values} onValuesChange={onValuesChange} />)}
           <label className="wide"><span>任务内容</span><textarea rows={7} value={freeform} onChange={(event) => onFreeformChange(event.target.value)} placeholder="输入这次要处理的内容" /></label>
@@ -277,7 +277,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
           <button type="button" className="dash-plugin-launch" aria-label={`打开插件 ${plugin.name}`} onClick={() => plugin.kind === 'mini-app' ? onOpenMiniApp(plugin) : canOpen ? onSelect(plugin) : undefined}>
             <PluginGlyph appearance={appearance} />
           </button>
-          <strong>{plugin.name}</strong>
+          <strong data-i18n-ignore="true">{plugin.name}</strong>
           <small className="dash-plugin-version">v{installedEntry?.installation?.pluginVersion ?? plugin.version}{installedEntry ? ' · 已安装' : plugin.status === 'draft' ? ' · 草稿' : submission?.status === 'pending' ? ' · 审核中' : submission?.status === 'rejected' ? ' · 需修改' : marketEntry ? ' · 已上架' : ''}</small>
           <div className="dash-plugin-tile-actions">
             {isOwned && plugin.kind === 'mini-app' && <button type="button" title="通过 Agent 修改" aria-label={`修改插件 ${plugin.name}`} onClick={() => onSelect(plugin)}><Pencil size={13} /></button>}
@@ -302,7 +302,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
           const restoringSafeVersion = Boolean(entry.installation && entry.installation.pluginVersion > entry.release.pluginVersion);
           return <article className="dash-plugin-market-card glass-panel" key={`${entry.release.pluginId}-${entry.release.pluginVersion}`}>
             <PluginGlyph appearance={appearanceForPlugin(plugin)} compact />
-            <div className="dash-plugin-market-copy"><span><ShieldCheck size={13} />已审核</span><strong>{plugin.name}</strong><p>{plugin.description || '团队可复用插件'}</p><small>版本 {entry.release.pluginVersion} · {entry.release.reviewedAt ? new Date(entry.release.reviewedAt).toLocaleDateString('zh-CN') : '已通过'}</small></div>
+            <div className="dash-plugin-market-copy"><span><ShieldCheck size={13} />已审核</span><strong data-i18n-ignore="true">{plugin.name}</strong><p data-i18n-ignore={Boolean(plugin.description)}>{plugin.description || '团队可复用插件'}</p><small>版本 {entry.release.pluginVersion} · {entry.release.reviewedAt ? new Date(entry.release.reviewedAt).toLocaleDateString('zh-CN') : '已通过'}</small></div>
             <div className="dash-plugin-market-actions">
               {!installed && <button type="button" className="primary labeled" disabled={busy} onClick={() => { void onInstall(entry); }}><Download size={15} />安装</button>}
               {installed && entry.updateAvailable && <button type="button" className="primary labeled" disabled={busy} onClick={() => { void onUpgrade(entry); }}>{restoringSafeVersion ? <RotateCcw size={15} /> : <ArrowUpCircle size={15} />}{restoringSafeVersion ? '恢复安全版本' : '升级'}</button>}
@@ -317,7 +317,7 @@ export function PluginWorkspace(props: PluginWorkspaceProps) {
     {section === 'review' && canReview && <section className="dash-plugin-review-list" aria-label="插件审核列表">
       {reviewQueue.length === 0 ? <div className="dash-plugin-empty glass-panel"><ShieldCheck size={26} /><strong>没有待审核插件</strong><span>新的市场版本提交后会出现在这里。</span></div> : reviewQueue.map((release) => <article className="dash-plugin-review-card glass-panel" key={`${release.pluginId}-${release.pluginVersion}`}>
         <PluginGlyph appearance={appearanceForPlugin(release.plugin)} compact />
-        <div><span>版本 {release.pluginVersion}</span><strong>{release.plugin.name}</strong><p>{release.plugin.description || '未填写说明'}</p><small>提交人 {release.submittedBy}</small></div>
+        <div><span>版本 {release.pluginVersion}</span><strong data-i18n-ignore="true">{release.plugin.name}</strong><p data-i18n-ignore={Boolean(release.plugin.description)}>{release.plugin.description || '未填写说明'}</p><small>提交人 <span data-i18n-ignore="true">{release.submittedBy}</span></small></div>
         <div><button type="button" className="labeled" disabled={busy} onClick={() => { setReviewNote(''); setPendingReview({ release, decision: 'rejected' }); }}><X size={15} />驳回</button><button type="button" className="primary labeled" disabled={busy} onClick={() => { setReviewNote(''); setPendingReview({ release, decision: 'approved' }); }}><Check size={15} />通过</button></div>
       </article>)}
     </section>}

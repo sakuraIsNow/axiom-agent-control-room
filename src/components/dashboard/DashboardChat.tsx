@@ -137,8 +137,8 @@ export function DashboardChat(props: Props) {
         {routeInsight && <>
           <span><Route size={13} />本轮路径</span>
           <strong>{routeInsight.route === 'direct' ? '直接回答' : routeInsight.route === 'single-agent' ? '单 Agent' : routeInsight.route === 'team' ? 'Agent 小组' : '完整工作流'}</strong>
-          <em>{routeInsight.agentIds.slice(0, 4).map((id) => id === 'direct-responder' ? '对话 Agent' : id === 'researcher' ? '研究员' : id === 'analyst' ? '分析员' : id === 'builder' ? '工程师' : id === 'reviewer' ? '审查员' : id === 'synthesizer' ? '综合 Agent' : id).join(' → ')}</em>
-          {routeInsight.skillIds.length > 0 && <small>{routeInsight.skillIds.slice(0, 3).map((id) => ({ 'architecture-design': '架构设计', implementation: '实现', 'quality-review': '质量审查', 'web-research': '联网检索', 'evidence-research': '证据核验', 'visual-generation': '视觉生成', 'document-analysis': '文档分析', 'report-authoring': '报告制作' }[id] ?? id)).join(' · ')}</small>}
+          <em data-i18n-ignore="true">{routeInsight.agentIds.slice(0, 4).map((id) => t(id === 'direct-responder' ? '对话 Agent' : id === 'researcher' ? '研究员' : id === 'analyst' ? '分析员' : id === 'builder' ? '工程师' : id === 'reviewer' ? '审查员' : id === 'synthesizer' ? '综合 Agent' : id)).join(' → ')}</em>
+          {routeInsight.skillIds.length > 0 && <small data-i18n-ignore="true">{routeInsight.skillIds.slice(0, 3).map((id) => t({ 'architecture-design': '架构设计', implementation: '实现', 'quality-review': '质量审查', 'web-research': '联网检索', 'evidence-research': '证据核验', 'visual-generation': '视觉生成', 'document-analysis': '文档分析', 'report-authoring': '报告制作' }[id] ?? id)).join(' · ')}</small>}
           {typeof routeInsight.confidence === 'number' && routeInsight.confidence > 0 && <b>{Math.round(routeInsight.confidence * 100)}%</b>}
         </>}
       </div>

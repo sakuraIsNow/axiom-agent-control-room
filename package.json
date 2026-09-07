@@ -1,6 +1,6 @@
 {
   "name": "agent-control-room",
-  "version": "2.3.0-rc.6",
+  "version": "2.3.0-rc.7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -40,6 +40,8 @@
     "qa:nexus-session": "node qa/nexus-conversation-list-regression.mjs",
     "qa:data-isolation": "node qa/data-isolation-regression.mjs",
     "qa:routing": "node scripts/routing-eval.mjs",
+    "qa:routing-resilience": "node --import tsx qa/routing-resilience-eval.mjs",
+    "qa:execution-quality": "node --import tsx qa/execution-quality-eval.mjs",
     "qa:business": "node scripts/business-eval.mjs",
     "qa:mcp-business": "node qa/mcp-business-eval.mjs",
     "qa:governance": "tsx --test server/runtime/enterpriseGovernance.test.ts",

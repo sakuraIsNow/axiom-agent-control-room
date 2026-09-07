@@ -43,7 +43,7 @@ export function TaskBoard({ tasks, graph, selectedTaskId, currentUserId, onSelec
           className={`dash-task-row status-${taskStatusColor(task.status)} ${taskIds.includes(selectedTaskId ?? '') ? 'selected' : ''}`}
           onClick={() => onSelectTask(task.id)}
         >
-          <span className="dash-task-row-title">{task.title}</span>
+          <span className="dash-task-row-title" data-i18n-ignore="true">{task.title}</span>
           <span className="dash-task-row-meta">{count} 次运行 · {sessionCount} 个会话</span>
           <span className="dash-task-row-status"><MorphIcon icon={taskStatusIcon[task.status]} size={13} strokeWidth={2} spring="snappy" reducedMotion="user" />{taskStatusLabels[task.status]}</span>
         </button>

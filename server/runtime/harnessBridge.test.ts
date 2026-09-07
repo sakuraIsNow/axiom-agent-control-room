@@ -159,6 +159,23 @@ test('HarnessTaskBridge persists external events and closes the task on a comple
   }
 });
 
+test('a new Harness delegation clears approval of the previous deliverable', async () => {
+  const store = new SqliteTaskStore(':memory:');
+  await store.initialize();
+  const bridge = new HarnessTaskBridge(store, new EventHub(), new FakeHarness());
+  try {
+    const task = await store.createTask({ tenantId: 'tenant-a', userId: 'user-a', sessionId: 'session-a', title: 'new external work', input: 'original', mode: 'build' });
+    const paused = await store.updateTask(task.id, { status: 'paused', review: { approved: true, score: 90, summary: 'Old approval', gaps: [], requiredCorrections: [] } });
+    await store.appendEvent(paused, { type: 'review.approved', payload: { note: 'Only the original result was accepted.' } });
+    const response = await bridge.start(paused, 'Perform a different task.');
+    assert.equal(response.accepted, true);
+    await waitFor(async () => (await store.getTask(task.id, task.tenantId))?.status === 'completed');
+    const completed = (await store.getTask(task.id, task.tenantId))!;
+    assert.ok(completed.review == null);
+    assert.equal(completed.result, 'external answer');
+  } finally { await bridge.close(); await store.close(); }
+});
+
 test('HarnessTaskBridge refuses unsafe concurrent delegation and preserves tenant boundaries', async () => {
   const store = new SqliteTaskStore(':memory:');
   await store.initialize();

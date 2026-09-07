@@ -1,7 +1,18 @@
-import type { CompletionEvidenceSummary, ReviewResult, StepResult, WorkflowPlan } from './contracts.js';
+import type { CompletionEvidenceSummary, ReviewResult, RuntimeEvent, StepResult, WorkflowPlan, WorkflowTask } from './contracts.js';
 import { hasTraceableEvidence } from './evidenceValidation.js';
 
 export type { CompletionEvidenceSummary } from './contracts.js';
+
+export const hasCurrentHumanAcceptance = (task: Pick<WorkflowTask, 'id' | 'review'>, input: readonly RuntimeEvent[]) => {
+  if (!task.review?.approved) return false;
+  const events = input.filter((event) => event.taskId === task.id).sort((a, b) => a.sequence - b.sequence);
+  const invalidation = events.filter((event) => ['plan.replanned', 'node.rerun_requested', 'node.retry_requested',
+    'node.replace_requested', 'node.skip_requested', 'node.completed_manually'].includes(event.type)
+    || event.type === 'checkpoint.merge_created' && event.payload.mergedTaskId === task.id
+    || event.type === 'harness.connected' && event.payload.source === 'external-harness').at(-1)?.sequence ?? 0;
+  const decision = events.filter((event) => event.type === 'review.approved' || event.type === 'review.rejected').at(-1);
+  return decision?.type === 'review.approved' && decision.sequence > invalidation;
+};
 
 export const summarizeCompletionEvidence = (
   plan: WorkflowPlan | undefined,

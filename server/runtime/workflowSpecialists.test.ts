@@ -14,6 +14,7 @@ import type { ArtifactStore } from './artifactStore.js';
 import { nexusArtifactSetDigest, type NexusArtifactSnapshot } from './nexusArtifacts.js';
 import { SqliteToolExecutionStore } from './toolExecutionStore.js';
 import { ToolRegistry } from './toolRegistry.js';
+import { summarizeExecutionQuality } from './executionQuality.js';
 
 const envKeys = ['DMX_API_KEY', 'DMX_BASE_URL', 'DMX_MODEL', 'DEEPSEEK_API_KEY', 'DEEPSEEK_API_BASE', 'DEEPSEEK_NATIVE_SEARCH_MODEL', 'DEEPSEEK_NATIVE_SEARCH', 'DEEPSEEK_VISION_API_KEY', 'DEEPSEEK_VISION_API_BASE', 'DEEPSEEK_VISION_MODEL', 'VIDEO_API_BASE', 'VIDEO_API_KEY', 'VIDEO_MODEL'] as const;
 
@@ -245,9 +246,11 @@ test('orchestrator loads only digest-verified Nexus attachments for a document A
     async capture(task) { return { capturedCount: 0, skipped: true, reason: 'disabled', cursor: task.updatedAt, contentDigest: '' }; },
   };
   let documentInput = '';
+  let modelCalls = 0;
   const model: ModelClient = {
     model: 'document-model',
     async complete(request) {
+      modelCalls += 1;
       if (request.system.includes('文档分析 Agent')) {
         documentInput = request.user;
         return { content: '附件预算为 120 万元。', attempts: 1, durationMs: 1 };
@@ -297,6 +300,7 @@ test('orchestrator loads only digest-verified Nexus attachments for a document A
     assert.match(documentInput, /预算为 120 万元/u);
     assert.doesNotMatch(documentInput, /base64/u);
 
+    const callsBeforeTamperedInput = modelCalls;
     binaries.set(`${tenantId}:${artifactId}`, Buffer.from('内容已被篡改', 'utf8'));
     const tamperedTask = await store.createTask({
       tenantId, userId: 'owner', sessionId: `agent-nexus-test-${workflowId}-tampered`, templateId: workflowId,
@@ -307,8 +311,71 @@ test('orchestrator loads only digest-verified Nexus attachments for a document A
       .run(tamperedTask, new AbortController().signal);
     assert.equal(tampered.status, 'failed');
     assert.match(tampered.error ?? '', /内容摘要校验失败/u);
+    assert.equal(modelCalls, callsBeforeTamperedInput);
+    const tamperedEvents = await store.getEvents(tampered.id);
+    assert.equal(tamperedEvents.some((event) => event.type === 'model.failed' || event.type === 'model.completed'), false);
+    assert.ok(tamperedEvents.some((event) => event.type === 'agent.failed' && event.payload.serviceAgent === 'document-agent'
+      && event.payload.callKind === 'specialist-service' && event.payload.usageStatus === 'not-observed'));
+    assert.equal(summarizeExecutionQuality(tampered, tamperedEvents).usage.calls, 0);
   } finally {
     await business.close();
     await store.close();
   }
+});
+
+test('specialist setup and transport failures remain observable without guessed model calls', async (t) => {
+  const cases = [
+    { name: 'missing image provider', agentId: 'drawing-agent', environment: {}, requests: 0, error: /绘图模型尚未配置/u },
+    { name: 'missing document input', agentId: 'document-agent', environment: {}, requests: 0, error: /没有收到可解析/u },
+    { name: 'search service rejects the request', agentId: 'search-agent', environment: { DEEPSEEK_API_KEY: 'fixture-search-key', DEEPSEEK_API_BASE: 'https://search.invalid' }, requests: 1, error: /搜索 Agent 请求失败 \(503\)/u },
+  ];
+  for (const scenario of cases) await t.test(scenario.name, async () => {
+    await withEnvironment(scenario.environment, async () => {
+      const store = new SqliteTaskStore(':memory:');
+      await store.initialize();
+      const originalFetch = globalThis.fetch;
+      let serviceRequests = 0;
+      let modelCalls = 0;
+      globalThis.fetch = async (input) => {
+        serviceRequests += 1;
+        assert.equal(String(input), 'https://search.invalid/responses');
+        return new Response(JSON.stringify({ error: 'Fixture service unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+      };
+      const model: ModelClient = { model: 'unused-text-model', async complete() { modelCalls += 1; throw new Error('Unexpected text-model invocation'); } };
+      const memory: AgentMemory = {
+        async recall() { return { context: '', itemCount: 0, available: false, items: [], quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } } }; },
+        async capture(task) { return { capturedCount: 0, skipped: true, reason: 'disabled', cursor: task.updatedAt, contentDigest: '' }; },
+      };
+      try {
+        const task = await store.createTask({
+          tenantId: 'specialist-failure', userId: 'owner', sessionId: randomUUID(), title: scenario.name, input: 'Inspect the requested material', mode: 'analyze',
+          plan: { summary: 'One specialist step', routingReason: 'manual', approvalStatus: 'approved',
+            profile: { kind: 'research', difficulty: 'moderate', route: 'full-workflow', score: 50, reasons: ['manual'], maxSteps: 1, requiresReview: false },
+            steps: [{ id: 'specialist', title: scenario.name, role: scenario.agentId, objective: 'Inspect the material', dependsOn: [], acceptanceCriteria: ['Return findings'],
+              agentContract: { source: 'builtin', agentId: scenario.agentId, displayName: scenario.name, toolAllowlist: [] } }],
+          },
+        });
+        const result = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' })).run(task, new AbortController().signal);
+        assert.equal(result.status, 'failed', result.error);
+        assert.match(result.error ?? '', scenario.error);
+        assert.equal(serviceRequests, scenario.requests);
+        assert.equal(modelCalls, 0);
+        const events = await store.getEvents(task.id);
+        assert.equal(events.filter((event) => event.type === 'model.failed' || event.type === 'model.completed').length, 0);
+        const failures = events.filter((event) => event.type === 'agent.failed');
+        assert.equal(failures.length, 1);
+        assert.equal(failures[0]?.payload.serviceAgent, scenario.agentId);
+        assert.equal(failures[0]?.payload.callKind, 'specialist-service');
+        assert.equal(failures[0]?.payload.usageStatus, 'not-observed');
+        assert.equal('spanId' in failures[0]!.payload, false);
+        const quality = summarizeExecutionQuality(result, events);
+        assert.equal(quality.usage.calls, 0);
+        assert.equal(quality.usage.totalTokens, null);
+        assert.equal(quality.usage.usageStatus, 'not-observed');
+      } finally {
+        globalThis.fetch = originalFetch;
+        await store.close();
+      }
+    });
+  });
 });

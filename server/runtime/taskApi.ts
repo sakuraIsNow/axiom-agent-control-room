@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type InAppNotification, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
 import { canReuseCompletionArtifact, parseCompletionEvidence } from './completionEvidence.js';
+import { summarizeExecutionQuality } from './executionQuality.js';
 import { isBuiltinRoleId } from './agentStore.js';
 import type { TaskCoordinator } from './coordinator.js';
 import type { EventHub } from './eventHub.js';
@@ -3428,6 +3429,7 @@ export const createTaskApi = (dependencies: {
       controls.set(stepId, current);
     }
     return c.json({ task: { ...task, controlState: Object.fromEntries(controls), memoryPolicy },
+      executionQuality: summarizeExecutionQuality(task, events),
       actionPermissions: { canManage: principal.role !== 'viewer' && (task.userId === principal.userId || ['owner', 'admin'].includes(principal.role)) } });
   });
 

@@ -80,3 +80,17 @@ test('an already cancelled route does not issue a request or silently fall back'
     globalThis.fetch = originalFetch;
   }
 });
+
+test('malformed routing responses use the shared compound fallback', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ decision: { intent: 'web-search' } }), { status: 200 });
+  const message = '请基于最新官方资料，比较 PostgreSQL 与 SQLite 在多 worker 部署中的并发、迁移和故障恢复风险，给出选型方案并验证结论';
+  try {
+    const decision = await routeChatMessage(message, 'decide', [], provider, new AbortController().signal);
+    assert.deepEqual(decision, fallbackChatRoute({ message, mode: 'decide' }));
+    assert.deepEqual(decision.scheduler.executionWaves, [['research'], ['analysis'], ['quality-review']]);
+    assert.equal(decision.scheduler.requiresReview, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

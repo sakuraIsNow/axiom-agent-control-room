@@ -212,6 +212,7 @@ export type RunEvent = {
   id: string;
   phase: AgentPhase;
   label: string;
+  labelSource?: 'system' | 'verbatim';
   at: number;
 };
 
@@ -399,6 +400,7 @@ export type WorkflowEventType =
   | 'memory.policy_updated'
   | 'model.delta'
   | 'model.completed'
+  | 'model.failed'
   | 'budget.exceeded'
   | 'budget.constrained'
   | 'estimate.updated'

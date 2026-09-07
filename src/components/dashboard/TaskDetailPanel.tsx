@@ -3,7 +3,7 @@ import type { TaskProfile, WorkflowTaskSummary } from '../../types';
 import { latestUserInput } from '../../lib/conversationInput';
 import { taskStatusLabels } from '../../lib/graphPresentation';
 import { completionSourceStatus, evidenceSourceLabels } from '../../lib/evidencePresentation';
-import { localizeRuntimeText, taskDifficultyLabel, taskKindLabel, taskReasonLabel, taskRouteLabel, taskStageLabel } from '../../lib/taskPresentation';
+import { taskDifficultyLabel, taskKindLabel, taskReasonLabel, taskRouteLabel, taskStageLabel } from '../../lib/taskPresentation';
 import { CheckpointPanel } from './CheckpointPanel';
 import { TaskCapabilityPanel } from './TaskCapabilityPanel';
 import { TaskActionPanel } from './TaskActionPanel';
@@ -59,11 +59,11 @@ export function TaskDetailPanel({
   return <aside className="dash-detail-panel">
     {task && <div className="dash-detail-section dash-task-detail-summary">
       <div className="dash-detail-task-id">{task.id.slice(0, 8).toUpperCase()} <span className={`dash-detail-status status-${task.status}`}>{taskStatusLabels[task.status]}</span></div>
-      <h2>{task.title}</h2>
-      <p>{latestUserInput(task.input) || '暂无任务输入。'}</p>
+      <h2 data-i18n-ignore="true">{task.title}</h2>
+      <p data-i18n-ignore={Boolean(latestUserInput(task.input))}>{latestUserInput(task.input) || '暂无任务输入。'}</p>
       <dl className="dash-detail-fields">
-        <div><dt>负责人</dt><dd><span className="dash-user-mark">{task.userId.slice(0, 1).toUpperCase()}</span>{task.userId}</dd></div>
-        <div><dt>会话</dt><dd>{sessionTopic ?? task.title}</dd></div>
+        <div><dt>负责人</dt><dd data-i18n-ignore="true"><span className="dash-user-mark">{task.userId.slice(0, 1).toUpperCase()}</span>{task.userId}</dd></div>
+        <div><dt>会话</dt><dd data-i18n-ignore="true">{sessionTopic ?? task.title}</dd></div>
         <div><dt>阶段</dt><dd>{taskStageLabel(task.currentStage)}</dd></div>
         <div><dt>难度</dt><dd>{taskDifficultyLabel(task.profile?.difficulty ?? taskProfile?.difficulty)}</dd></div>
       </dl>
@@ -109,7 +109,7 @@ export function TaskDetailPanel({
         <span><strong>{task.evidenceSummary.artifactRefs}</strong> 个 Artifact</span>
         <span><strong>{task.evidenceSummary.toolReceipts}</strong> 次工具回执</span>
       </div>
-      {task.evidenceSummary.gaps.length > 0 && <ul className="dash-evidence-gaps">{task.evidenceSummary.gaps.slice(0, 3).map((gap) => <li key={gap}>{localizeRuntimeText(gap)}</li>)}</ul>}
+      {task.evidenceSummary.gaps.length > 0 && <ul className="dash-evidence-gaps" data-i18n-ignore="true">{task.evidenceSummary.gaps.slice(0, 3).map((gap) => <li key={gap}>{gap}</li>)}</ul>}
     </div>}
   </aside>;
 }

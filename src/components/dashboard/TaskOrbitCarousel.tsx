@@ -181,7 +181,7 @@ export function TaskOrbitCarousel({ tasks, theme, selectedTaskId, onOpenTask }: 
           onClick={(event) => { event.stopPropagation(); if (stateRef.current.dragMoved < 5) onOpenTask(task.id); }}
         >
           <span className="dash-orbit-card-shell" /><span className="dash-orbit-card-rim" />
-          <span className="dash-orbit-card-text"><em>{taskRouteLabel(task.profile?.route ?? task.mode)}</em><strong>{task.title}</strong><small>{taskStatusLabels[task.status]} · {runCount} 次 · {new Date(task.updatedAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })}</small></span>
+          <span className="dash-orbit-card-text"><em>{taskRouteLabel(task.profile?.route ?? task.mode)}</em><strong data-i18n-ignore="true">{task.title}</strong><small>{taskStatusLabels[task.status]} · {runCount} 次 · {new Date(task.updatedAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })}</small></span>
         </button>;
       })}
     </div>
