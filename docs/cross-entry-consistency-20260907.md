@@ -4,7 +4,7 @@
 
 本批基于第二批通用工具执行闭环，补齐专用服务、配置绑定和人工处理入口。不强制简单问题进入多 Agent 流程，不合并普通对话与 Agent Nexus 历史，不切换 DeepSeek 原生搜索策略。
 
-改动前工作树快照：`frontend-backup/20260907-pre-cross-entry-consistency.zip`。本批完成后将同一提交同步到 Gitee 与 GitHub；不包含本地配置、密钥、数据、测试截图或备份。
+改动前工作树快照：`frontend-backup/20260907-pre-cross-entry-consistency.zip`。本批业务提交已同步到 Gitee 与 GitHub；不包含本地配置、密钥、数据、测试截图或备份。
 
 ## 验收任务
 
@@ -57,3 +57,11 @@
 - 图片编辑沿用单张原图。视频支持当前已有标准与兼容返回结构，非标准供应商状态协议仍需适配；不宣称任何视频 API 都已现场验收。
 - 两用户与两 Fake HTTP Provider 验证实际模型客户端隔离，各入口另用 API 契约验证配置传递。不是所有入口、两个浏览器同时使用真实外部供应商的端到端验收。
 - 路由模型不可用时，现有兜底可能将含检索词的复合任务降为单搜索，尚不能保证与正常模型路由保持相同分工；独立协作历史验收不代表这一降级边界已解决。
+
+## 发布记录
+
+- 版本：`v2.3.0-rc.6`；业务提交：`7926303f0c5b5b7d41dc18a10a93d281fc2ae2d4`。
+- Gitee：`git@gitee.com:water-sim/axiom-agent-control-room.git`；GitHub：`git@github.com:sakuraIsNow/axiom-agent-control-room.git`。业务推送后两端 `refs/heads/main` 均返回上述提交，未强制推送。
+- 扫描覆盖 402 个当前源码文件与 35 个既有提交，未发现匹配的 API Key/私钥模式；提交前再次检查 133 个变更文件，没有纳入配置、数据、截图或备份。模式扫描不替代后续的密钥管理与轮换制度。
+- 本地部署包：`release/axiom-agent-control-room-v2.3.0-rc.6.zip`，附 SHA-256 文件；219 项包含中英文 README、迁移说明及本地密钥初始化工具，排除项检查通过。部署包保留在本地，不将构建压缩包写入 Git 历史。
+- 本机 `AXIOM_PROVIDER_SECRET` 已在忽略的 `.env.local` 初始化且未输出；需安全备份该配置，恢复数据库及多 Worker 部署时继续使用同一密钥。
