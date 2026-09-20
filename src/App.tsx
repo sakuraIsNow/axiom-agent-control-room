@@ -50,6 +50,7 @@ import { agentDisplayName } from './lib/agentPresentation';
 import { MiniAppWindow, type MiniAppAgentProgress } from './components/plugins/MiniAppWindow';
 import { PluginWorkspace, type PluginShellDraft } from './components/dashboard/PluginWorkspace';
 import { TemplateWorkspace } from './components/dashboard/TemplateWorkspace';
+import type { ConversationHumanActionState } from './components/dashboard/dashboardTypes';
 import { taskStatusLabels } from './lib/graphPresentation';
 import { readinessStateLabel, taskDifficultyLabel, taskKindLabel, taskRouteLabel } from './lib/taskPresentation';
 import { userFacingError } from './lib/errorPresentation';
@@ -89,7 +90,7 @@ import { compactStoredUserMessage, latestUserInput } from './lib/conversationInp
 import { routeChatMessage } from './lib/chatRouting';
 import { deleteConversationSession, listConversationSessions, upsertConversationSession, type RemoteSession } from './lib/sessionRuntime';
 import { restoreTaskGraph } from './lib/taskGraphRestoration';
-import { taskHistoryState } from './lib/taskHistoryState';
+import { isTaskExecuting, taskHistoryState } from './lib/taskHistoryState';
 import { findTaskAssistantIndex } from './lib/taskHistorySelection';
 import { useDashboardStore } from './lib/useDashboardStore';
 import { acceptGraphEventSequence, parseAgentGraph } from './lib/workflowGraphState';
@@ -218,6 +219,15 @@ const workflowPhase = (event: WorkflowEvent): AgentPhase => {
   if (event.type.startsWith('memory.')) return 'context';
   if (event.type === 'task.created' || event.type === 'task.queued' || event.type === 'task.started' || event.type.startsWith('routing.') || event.type.startsWith('scheduling.')) return 'routing';
   return 'inference';
+};
+
+const humanActionStatus = (status: string): status is ConversationHumanActionState['status'] =>
+  status === 'paused' || status === 'waiting_for_human' || status === 'awaiting_approval';
+const humanActionEventStatus = (type: WorkflowEvent['type']): ConversationHumanActionState['status'] | null => {
+  if (type === 'plan.approval_requested') return 'awaiting_approval';
+  if (type === 'tool.approval_requested' || type === 'review.approval_requested' || type === 'approval.requested') return 'waiting_for_human';
+  if (type === 'task.paused' || type === 'tool.outcome_unknown' || type === 'tool.rejected' || type === 'plan.rejected' || type === 'review.rejected') return 'paused';
+  return null;
 };
 
 const workflowEventLabel = (event: WorkflowEvent) => {
@@ -736,6 +746,12 @@ function App() {
   const [planApproval, setPlanApproval] = useState<{ taskId: string; version: number; summary: string } | null>(null);
   const [reviewApproval, setReviewApproval] = useState<{ taskId: string; score: number; summary: string; gaps: string[]; requiredCorrections: string[] } | null>(null);
   const [toolApproval, setToolApproval] = useState<{ taskId: string; approval: ToolApproval } | null>(null);
+  const [conversationHumanAction, setConversationHumanAction] = useState<ConversationHumanActionState | null>(null);
+  const conversationHumanActionRef = useRef<ConversationHumanActionState | null>(null);
+  const updateConversationHumanAction = useCallback((next: ConversationHumanActionState | null) => {
+    conversationHumanActionRef.current = next;
+    setConversationHumanAction(next);
+  }, []);
   const [nodeActionBusy, setNodeActionBusy] = useState(false);
   const [loopState, setLoopState] = useState({ id: '', iteration: 0, maxIterations: 0, readySteps: [] as string[], completedSteps: [] as string[], phase: 'idle' });
   const [inspectorView, setInspectorView] = useState<'topology' | 'graph' | 'collab'>('topology');
@@ -1156,6 +1172,7 @@ function App() {
 
   const resetSessionRuntime = useCallback(() => {
     sessionRuntimeRevisionRef.current += 1;
+    updateConversationHumanAction(null);
     setPhase('idle');
     setAgentActivity('');
     setRunEvents([]);
@@ -1184,7 +1201,7 @@ function App() {
     setSelectedNodeId(null);
     setLoopState({ id: '', iteration: 0, maxIterations: 0, readySteps: [], completedSteps: [], phase: 'idle' });
     setInspectorView('topology');
-  }, []);
+  }, [updateConversationHumanAction]);
 
   const refreshTaskCatalog = useCallback(async () => {
     setTaskCatalogBusy(true);
@@ -1754,6 +1771,7 @@ function App() {
       // board must never create a regular conversation session as a side
       // effect; only ordinary tasks are projected into the chat transcript.
       const targetSessionId = nexusTask ? activeSessionIdRef.current : (fallbackSession?.id ?? task.sessionId);
+      if (!nexusTask && humanActionStatus(task.status)) updateConversationHumanAction({ taskId: task.id, sessionId: targetSessionId, status: task.status, refreshKey: `snapshot:${task.revision}` });
       const existing = nexusTask ? undefined : (fallbackSession ?? sessions.find((session) => session.id === task.sessionId));
       const matchingAssistantIndex = taskAssistantIndex(existing, task);
       const assistantContent = historyState.content
@@ -1896,7 +1914,7 @@ function App() {
     } finally {
       if (revision === sessionRuntimeRevisionRef.current) setTaskCatalogBusy(false);
     }
-  }, [resetSessionRuntime, restoreDirectSessionRuntime, sessions, updateSession]);
+  }, [resetSessionRuntime, restoreDirectSessionRuntime, sessions, updateSession, updateConversationHumanAction]);
 
   useEffect(() => {
     if (dashboardNav !== 'chat' || isRunning || activeTaskId) return;
@@ -1954,9 +1972,23 @@ function App() {
 
   const applyWorkflowEvent = useCallback((event: WorkflowEvent, sessionId: string, assistantId: string) => {
     if (sessionId !== activeSessionIdRef.current) return;
-    const nextPhase = workflowPhase(event);
+    const humanStatus = humanActionEventStatus(event.type);
+    if (humanStatus) {
+      updateConversationHumanAction({ taskId: event.taskId, sessionId, status: humanStatus, refreshKey: `event:${event.sequence}` });
+      setPausedTaskId(event.taskId);
+      setPausedAssistantId(assistantId);
+      updateSession(sessionId, (session) => ({ ...session, activeTaskId: undefined, activeAssistantId: undefined,
+        messages: session.messages.map((message) => message.id === assistantId ? { ...message, taskId: event.taskId, pending: false } : message),
+      }));
+      // The current chat refreshes from the event immediately. Refresh other
+      // entry points too, without waiting for their 15-second list poll.
+      void refreshTaskCatalog();
+    } else if (['task.started', 'task.resumed', 'task.completed', 'task.failed', 'task.cancelled'].includes(event.type)
+      && conversationHumanActionRef.current?.taskId === event.taskId) updateConversationHumanAction(null);
+    const waitingForHuman = conversationHumanActionRef.current?.taskId === event.taskId;
+    const nextPhase = waitingForHuman ? 'idle' : workflowPhase(event);
     setPhase(nextPhase);
-    setAgentActivity(nextPhase === 'complete' || nextPhase === 'error' || event.type === 'task.cancelled' || event.type === 'task.paused'
+    setAgentActivity(waitingForHuman || nextPhase === 'complete' || nextPhase === 'error' || event.type === 'task.cancelled' || event.type === 'task.paused'
       ? ''
       : workflowEventLabel(event));
     addRunEvent(nextPhase, workflowEventLabel(event));
@@ -2096,7 +2128,7 @@ function App() {
         setDurationMs((current) => Math.max(current, Number(event.payload.durationMs)));
       }
     }
-    if (event.type === 'model.delta') {
+    if (event.type === 'model.delta' && !waitingForHuman) {
       const stage = String(event.payload.stage ?? '');
       const content = typeof event.payload.content === 'string' ? event.payload.content : '';
       const userFacing = stage === 'direct-response' || stage === 'synthesizer' || stage.startsWith('synthesizer:') || stage.startsWith('single-agent:');
@@ -2422,7 +2454,7 @@ function App() {
         updatedAt: Date.now(),
       }));
     }
-  }, [addRunEvent, updateSession]);
+  }, [addRunEvent, updateSession, refreshTaskCatalog, updateConversationHumanAction]);
 
   applyWorkflowEventRef.current = applyWorkflowEvent;
 
@@ -2458,19 +2490,26 @@ function App() {
       // subscription. Reconcile from the durable task record so the final
       // result is never lost merely because no new stream frame was observed.
       const task = await getWorkflowTask(taskId, controller.signal);
-      if (task.status === 'completed' && task.result) {
+      if (!isTaskExecuting(task.status)) {
+        const history = taskHistoryState(task);
+        if (humanActionStatus(task.status)) {
+          updateConversationHumanAction({ taskId, sessionId: activeSession.id, status: task.status, refreshKey: `snapshot:${task.revision}` });
+          setPausedTaskId(taskId);
+          setPausedAssistantId(assistantId);
+        }
         updateSession(activeSession.id, (session) => ({
           ...session,
           activeTaskId: undefined,
           activeAssistantId: undefined,
           messages: session.messages.map((message) => message.id === assistantId
-            ? { ...message, content: task.result!, pending: false, taskId, route: task.plan?.profile?.route ?? 'workflow', agentRole: 'orchestrator' }
+            ? { ...message, content: history.content || message.content, pending: false, taskId, route: task.plan?.profile?.route ?? 'workflow', agentRole: 'orchestrator' }
             : message),
           updatedAt: Date.now(),
         }));
-        setPhase('complete');
+        setPhase(task.status === 'completed' ? 'complete' : task.status === 'failed' || task.status === 'cancelled' ? 'error' : 'idle');
         setAgentActivity('');
       }
+      void refreshTaskCatalog();
     }).catch((caught) => {
       if (controller.signal.aborted) return;
       setPhase('error');
@@ -2492,7 +2531,7 @@ function App() {
         setIsRunning(false);
       }
     };
-  }, [activeSession.activeAssistantId, activeSession.activeTaskId, activeSession.id, addRunEvent, applyWorkflowEvent, updateSession]);
+  }, [activeSession.activeAssistantId, activeSession.activeTaskId, activeSession.id, addRunEvent, applyWorkflowEvent, updateSession, refreshTaskCatalog, updateConversationHumanAction]);
 
   const stopRun = useCallback(() => {
     const taskId = activeTaskId;
@@ -2827,6 +2866,7 @@ function App() {
       setError(null);
       setFailedTaskId(null);
       setToolApproval(null);
+      updateConversationHumanAction(null);
       setUsage({});
       modelUsageEventsRef.current.clear();
       setDurationMs(0);
@@ -3248,7 +3288,7 @@ function App() {
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [activeSession, addRunEvent, applyWorkflowEvent, draft, draftAttachments, isRunning, mode, persistSessionGraph, providerSettings.image, providerSettings.text, providerSettings.video, providerSettings.vision, refreshTaskCatalog, selectedTemplateId, topologyAgents, updateSession],
+    [activeSession, addRunEvent, applyWorkflowEvent, draft, draftAttachments, isRunning, mode, persistSessionGraph, providerSettings.image, providerSettings.text, providerSettings.video, providerSettings.vision, refreshTaskCatalog, selectedTemplateId, topologyAgents, updateSession, updateConversationHumanAction],
   );
 
   const retryFailedTask = useCallback(async () => {
@@ -3651,6 +3691,7 @@ function App() {
             onApproveReview={approveReview}
             onRejectReview={rejectReview}
             taskCatalog={taskCatalog}
+            conversationHumanAction={conversationHumanAction}
             onOpenTask={(taskId) => { void openCatalogTask({ id: taskId }); }}
             onDeleteTask={deleteTask}
             onRefreshTasks={refreshTaskCatalog}
@@ -4117,7 +4158,7 @@ function App() {
               {readiness.tools && readiness.tools.length > 0 && <section className="tool-registry-panel" aria-label="工具注册表">
                 <div className="tool-registry-heading"><strong>可用工具</strong><span>{readiness.tools.length} 个</span></div>
                 <div className="tool-registry-list">{readiness.tools.map((tool) => <div className="tool-registry-item" key={tool.name}>
-                  <div><strong>{tool.name}</strong><small>{tool.description}</small></div>
+                  <div><strong data-i18n-ignore="true">{tool.name}</strong><small>{tool.description}</small></div>
                   <span className={`tool-risk ${tool.risk}`}>{tool.risk === 'low' ? '低风险' : tool.risk === 'medium' ? '中风险' : tool.risk === 'high' ? '高风险' : '严重风险'}{tool.approvalRequired ? ' · 需确认' : ''}</span>
                 </div>)}</div>
               </section>}

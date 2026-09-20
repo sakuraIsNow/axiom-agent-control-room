@@ -24,7 +24,7 @@ import { createToolExecutionStore } from './runtime/toolExecutionStore.js';
 import { createTemplateStore } from './runtime/templateStore.js';
 import { createPluginStore } from './runtime/pluginStore.js';
 import { createAgentStore } from './runtime/agentStore.js';
-import { agentCatalog, appendMissingAgentDirectory, supplementAgentDirectoryResponse } from './runtime/agentCatalog.js';
+import { agentCatalog, agentDirectoryReplyGuidance, appendMissingAgentDirectory, supplementAgentDirectoryResponse } from './runtime/agentCatalog.js';
 import { deepSeekCapabilityInfo } from './runtime/providerCapabilities.js';
 import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
 import { chatRouteDecisionSchema, durableMediaRoute, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision, type RoutingModelCall } from './runtime/chatRouter.js';
@@ -359,7 +359,8 @@ const modePrompts: Record<NonNullable<ChatRequest['mode']>, string> = {
 
 const systemPrompt = (mode: NonNullable<ChatRequest['mode']>) => `You are Axiom, an expert agent.
 ${modePrompts[mode]}
-Use the same language as the user. Be direct and technically rigorous. Do not claim to have executed tools or accessed systems unless the conversation explicitly contains that evidence. Use Markdown only where it improves readability. When search sources are provided, distinguish source facts from your reasoning and keep the source URLs in the answer.`;
+Use the same language as the user. Be direct and technically rigorous. Do not claim to have executed tools or accessed systems unless the conversation explicitly contains that evidence. Use Markdown only where it improves readability. When search sources are provided, distinguish source facts from your reasoning and keep the source URLs in the answer.
+For a requested standalone SVG drawing/animation, HTML page or Markdown document, provide complete self-contained content in a fenced svg/html/markdown block. The conversation supports safe preview, copying and downloading. Generating this content does not require workspace access, a server file path or another confirmation. Do not claim to have saved a server file without a tool receipt.`;
 
 const encodeEvent = (event: string, data: unknown) =>
   new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -1501,7 +1502,7 @@ app.post('/api/chat', async (c) => {
         if (routing.intent === 'agent-registry') {
           registrySnapshot = await runtimeAgentSnapshot(c.req.raw.headers, provider, c.req.raw.signal);
           push('status', { phase: 'context', message: `Registry 已实时检测 ${registrySnapshot.coreAgents.length + registrySnapshot.serviceAgents.length + registrySnapshot.customAgents.length} 项 Agent 定义` });
-          specialistContext = `\n\nYou are the Agent Registry specialist. Answer the user's exact question using only the following live runtime snapshot. Counts must be computed from the snapshot and custom Agents must reflect their current status. Never turn configured into reachable or verified: only the text Provider has been probed in this request, while search is verified only by an actual search request. Do not return a canned catalog paragraph or expose raw JSON field names. For a yes/no capability question, answer in 2-4 concise sentences. For an Agent catalog question, use a compact table or short grouped list and omit unrelated implementation detail. Explain orchestration roles, executable workers, gateway specialists, or user-defined Agents only when the distinction answers the question.\nRuntime snapshot:\n${JSON.stringify(registrySnapshot)}`;
+          specialistContext = `\n\nYou are the Agent Registry specialist. ${agentDirectoryReplyGuidance}\nOnly the text Provider has been probed in this request; search is verified only by an actual search request. Custom Agents must reflect their supplied publication status.\nRuntime snapshot:\n${JSON.stringify(registrySnapshot)}`;
         } else if (routing.intent === 'image-analysis') {
           specialistContext = '\n\nYou are the vision analysis Agent. Analyze only visible image evidence, distinguish observation from inference, and say when text or details are unreadable.';
         } else if (routing.intent === 'document-analysis') {

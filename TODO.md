@@ -1,5 +1,27 @@
 # Axiom Agent Control Room 升级路线
 
+## 2026-09-20 v2.3.0-rc.8 发布收口
+
+发布前快照：`frontend-backup/20260920-124237-pre-rc8-release.zip`。本版纳入受控 RSI、独立成果与就地审批、预览防闪烁三批改动；不自动重启现有业务服务。
+
+- [x] package/lock 统一 `2.3.0-rc.8`；受控 RSI 不改变运行中 Graph、插件发布、记忆或权限，建议始终是未验证状态。
+- [x] 修复真实目录问答冗长与英文 Readiness 漏翻译；Hono 锁定 4.13.5，生产依赖 audit 为 0 项已知漏洞。
+- [x] 修复 Fake 搜索单测环境依赖、中文 Agent 动作视觉断言、critical 审批语言夹具、Graph 性能失败后的测试状态清理；不放宽安全或性能阈值。
+- [x] 最终标准验证与完整隔离门禁：700 tests（684 passed / 16 PostgreSQL 条件 skipped）、PG 18/18、视觉 172/172、RSI 17/17、Graph 22/22、Fake MCP 44/44；总门禁 41 passed / 0 failed / 3 外部依赖 skipped，最后一轮无重试。前两轮失败及安全降级记录完整保留，见 `docs/rc8-release-acceptance-20260920.md`。
+- [x] 干净源码 `npm ci`/检查/测试/生产构建/独立启动，以及部署 ZIP 解压后的 `npm ci --omit=dev`/启动通过；不读取真实模型 Key、数据库或任务历史。发布排除个人 HTML、配置、用户数据、日志、备份和 demo，附 SHA-256 校验文件。
+- [ ] 后续可靠性：强化 Scheduler 对 Agent 能力标签与 Skill ID 的区分、固定错误样本和重复运行通过率；持续观测无头软件合成下的 Graph 帧耗时波动，不用重试后的通过替代首次表现。
+- [ ] 外部 MemoryCore、Harness/Codex sidecar 现场验收与全平台可信账户/私人空间隔离继续独立推进，不计为 rc.8 已完成内容。
+
+## 2026-09-19 受控 RSI 第一期
+
+源码快照：`frontend-backup/20260919-222131-pre-controlled-rsi.zip`。保留此前未提交修复，不改变现有任务执行入口。
+
+- [x] 所有者隔离的终态任务复盘；使用真实配置模型生成结构化建议，幂等、失败恢复、revision 冲突和有界代际迭代。
+- [x] 毛玻璃“任务改进”入口、中英文与移动端、立即显示生成状态；保存/忽略建议及新对话草稿交接，不自动执行。
+- [x] 验证不修改源任务、路由、Graph、记忆、Nexus、插件和权限；跨用户、源删除/重跑、并发重复生成回归。
+- [x] `check`、`test`、`build`、`qa:visual` 与 RSI 浏览器专项；双语 README、变更和验收记录同步。详见 `docs/fixes/2026-09-19-controlled-rsi.md`：696 单测（680 通过 / 16 条件跳过）、隔离 PG 18/18、视觉 172/172、RSI 浏览器 17/17，以及一次真实模型隔离冒烟。
+- [ ] 后续独立批次：真实质量基线/候选留出集对照、授权策略发布和回退。第一期建议全部保留“效果未验证”，不提前标完成。
+
 ## 项目定位
 
 Axiom Agent Control Room 是一个面向长任务执行的人机协作 Agent Runtime，而不是单轮聊天 UI：

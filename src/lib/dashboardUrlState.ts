@@ -1,4 +1,4 @@
-export type DashboardUrlView = 'tasks' | 'chat' | 'projects' | 'plugins' | 'templates' | 'workflows' | 'schedules' | 'agent-studio' | 'operations';
+export type DashboardUrlView = 'tasks' | 'chat' | 'projects' | 'plugins' | 'templates' | 'workflows' | 'schedules' | 'agent-studio' | 'operations' | 'improvements';
 
 export type DashboardUrlState = {
   view?: DashboardUrlView;
@@ -6,7 +6,7 @@ export type DashboardUrlState = {
   sessionId?: string;
 };
 
-const views = new Set<DashboardUrlView>(['tasks', 'chat', 'projects', 'plugins', 'templates', 'workflows', 'schedules', 'agent-studio', 'operations']);
+const views = new Set<DashboardUrlView>(['tasks', 'chat', 'projects', 'plugins', 'templates', 'workflows', 'schedules', 'agent-studio', 'operations', 'improvements']);
 
 export const parseDashboardSearch = (search: string): DashboardUrlState => {
   const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);

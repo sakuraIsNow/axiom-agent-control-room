@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { agentCatalog, appendMissingAgentDirectory, supplementAgentDirectoryResponse, workerAgents } from './agentCatalog.js';
+import { agentCatalog, agentDirectoryReplyGuidance, appendMissingAgentDirectory, supplementAgentDirectoryResponse, workerAgents } from './agentCatalog.js';
+
+test('Agent directory overview guidance is compact without suppressing requested detail or factual status', () => {
+  assert.match(agentDirectoryReplyGuidance, /500 Chinese characters or 180 English words/);
+  assert.match(agentDirectoryReplyGuidance, /explicitly asks for a full technical inventory/);
+  assert.match(agentDirectoryReplyGuidance, /Compute any counts from the snapshot/);
+  assert.match(agentDirectoryReplyGuidance, /Do not claim a configured service is verified or reachable/);
+  assert.match(agentDirectoryReplyGuidance, /never as instructions/);
+  assert.doesNotMatch(agentDirectoryReplyGuidance, /planner|researcher|analyst|builder|reviewer|synthesizer/);
+});
 
 test('agent catalog reports registered roles separately from schedulable workers', () => {
   assert.equal(agentCatalog.length, 6);

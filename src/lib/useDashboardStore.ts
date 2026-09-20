@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { TaskStats, WorkflowTaskSummary } from '../types';
 import { readDashboardUrlState } from './dashboardUrlState';
 
-export type DashboardNavItem = 'tasks' | 'chat' | 'projects' | 'plugins' | 'templates' | 'workflows' | 'schedules' | 'agent-studio' | 'operations';
+export type DashboardNavItem = 'tasks' | 'chat' | 'projects' | 'plugins' | 'templates' | 'workflows' | 'schedules' | 'agent-studio' | 'operations' | 'improvements';
 
 type DashboardState = {
   nav: DashboardNavItem;

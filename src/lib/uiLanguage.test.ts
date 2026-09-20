@@ -73,3 +73,35 @@ test('populated execution states remain distinct in both languages', () => {
     assert.equal(translateUiText(source, 'zh-CN'), source);
   }
 });
+
+test('Readiness configured-provider messages preserve arbitrary model identifiers', () => {
+  const cases = [
+    ['已配置 gpt-image-2.5-sunburst-cdx。', 'gpt-image-2.5-sunburst-cdx is configured.'],
+    ['已配置 gpt-image-2-03。', 'gpt-image-2-03 is configured.'],
+    ['已配置 任务管理。', '任务管理 is configured.'],
+    ['已配置 vendor/team-model:2026-09，尚未探测模型服务连通性。', 'vendor/team-model:2026-09 is configured; model connectivity has not been checked.'],
+    ['已配置本地视频模型 我的模型/v2。', 'Local video model 我的模型/v2 is configured.'],
+  ];
+  for (const [source, expected] of cases) {
+    assert.equal(translateUiText(source, 'en'), expected);
+    assert.equal(translateUiText(source, 'zh-CN'), source);
+  }
+  const customDiagnostic = '供应商原文：已配置 gpt-image-2.5-sunburst-cdx。';
+  assert.equal(translateUiText(customDiagnostic, 'en'), customDiagnostic);
+});
+
+test('artifact and workspace descriptions distinguish standalone delivery from approved project writes', () => {
+  const artifactDescription = '直接生成本次任务的独立 HTML、SVG、Markdown 或文本交付文件，无需人工确认。仅保存为任务附件，不执行内容、不访问或修改项目文件。用户要求画 SVG、制作网页动画或生成文档时优先使用；修改已有项目文件仍须使用 workspace.write/patch 并申请批准。';
+  const workspaceDescription = '获得明确人工批准后写入或覆盖已有项目工作区中的 UTF-8 文件。用户仅需独立 HTML、SVG 或文档交付时使用 artifact.create，无需修改项目文件。';
+  const artifactTranslation = translateUiText(artifactDescription, 'en');
+  const workspaceTranslation = translateUiText(workspaceDescription, 'en');
+  assert.doesNotMatch(artifactTranslation, /[\u3400-\u9fff]/u);
+  assert.match(artifactTranslation, /do not execute its content or access or modify project files/);
+  assert.match(artifactTranslation, /still requires workspace\.write\/patch and approval/);
+  assert.doesNotMatch(workspaceTranslation, /[\u3400-\u9fff]/u);
+  assert.match(workspaceTranslation, /after explicit human approval/);
+  assert.match(workspaceTranslation, /Use artifact\.create/);
+  assert.equal(translateUiText(artifactDescription, 'zh-CN'), artifactDescription);
+  assert.equal(translateUiText(workspaceDescription, 'zh-CN'), workspaceDescription);
+  assert.equal(translateUiText('自定义工具：' + workspaceDescription, 'en'), '自定义工具：' + workspaceDescription);
+});

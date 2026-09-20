@@ -44,6 +44,7 @@ import { buildScheduleInsights } from './scheduleInsights.js';
 import { breadthFirstThreadDescendants, buildHarnessThreadGraph } from './harnessThreadGraph.js';
 import { outboundNotificationKinds, type NotificationEndpointLocation, type OutboundNotificationManager } from './outboundNotifications.js';
 import { createBusinessCapabilityApi } from './businessCapabilities.js';
+import { createImprovementApi } from './improvementApi.js';
 import type { EnterpriseGovernanceStore } from './enterpriseGovernance.js';
 import type { BusinessCapabilityStore } from './businessCapabilityStore.js';
 import type { ModelRoutingPolicy } from './modelRouting.js';
@@ -1315,6 +1316,22 @@ export const createTaskApi = (dependencies: {
   void scheduler.ready().then(() => scheduler.start()).catch(() => undefined);
 
   if (dependencies.businessCapabilities) {
+    // RSI is an owner-scoped, read-only analysis plane. It has no coordinator,
+    // ToolRegistry, workflow publisher, or memory writer and cannot alter a run.
+    api.route('/improvements', createImprovementApi({
+      records: dependencies.businessCapabilities,
+      tasks: store,
+      resolveModel: async (source) => {
+        if (dependencies.boundModelFactory) return dependencies.boundModelFactory(source);
+        if (source.providerBindingId) throw new Error('The source task model binding is unavailable.');
+        if (source.modelCredentialId) {
+          if (!dependencies.reportModelFactory) throw new Error('The source task model credential is unavailable.');
+          return dependencies.reportModelFactory(source.modelCredentialId, source.tenantId, source.userId);
+        }
+        if (!model) throw new Error('The text model is not configured.');
+        return model;
+      },
+    }));
     api.route('/capabilities', createBusinessCapabilityApi({
       records: dependencies.businessCapabilities,
       tasks: store,
@@ -4504,6 +4521,44 @@ export const createTaskApi = (dependencies: {
         storage: stored ? { kind: artifactStore?.kind, key: stored.key, bytes: stored.bytes } : { kind: 'database' },
       },
     });
+  });
+
+  api.get('/tasks/:taskId/artifacts/files/:artifactId', async (c) => {
+    const principal = identity(c.req.raw.headers);
+    const taskId = c.req.param('taskId');
+    if (!runtimeIdSchema.safeParse(taskId).success) return c.json({ error: 'Task not found.' }, 404);
+    const task = await store.getTask(taskId, principal.tenantId);
+    if (!task || (task.userId !== principal.userId && !['owner', 'admin'].includes(principal.role))) return c.json({ error: 'Task not found.' }, 404);
+    const artifactId = c.req.param('artifactId');
+    const record = await artifactCatalog?.get(principal.tenantId, artifactId);
+    const extensions: Record<string, string> = { 'text/html': 'html', 'image/svg+xml': 'svg', 'text/markdown': 'md', 'text/plain': 'txt' };
+    const limit = 512_000;
+    if (!record || record.source !== 'tool' || record.taskId !== task.id || !record.id.startsWith(`tool:${task.id}:`) || !record.id.endsWith(':artifact')
+      || record.status !== 'active' || record.referenceCount < 1 || !record.mimeType || !extensions[record.mimeType]
+      || record.bytes > limit || (record.expiresAt && Date.parse(record.expiresAt) <= Date.now())) return c.json({ error: 'File artifact not found.' }, 404);
+    const content = await artifactStore?.get(artifactId, principal.tenantId);
+    if (content == null) return c.json({ error: 'File artifact is unavailable.' }, 404);
+    const bytes = Buffer.from(content, 'utf8');
+    if (bytes.byteLength > limit) return c.json({ error: 'File artifact is too large.' }, 413);
+    let name = task.stepResults?.flatMap((result) => result.artifacts ?? []).find((artifact) => artifact.id === artifactId)?.name;
+    if (!name) {
+      const event = (await store.getEvents(task.id)).find((entry) => entry.type === 'artifact.created'
+        && (entry.payload.id === artifactId || entry.payload.artifactId === artifactId || (entry.payload.artifact as { id?: string } | undefined)?.id === artifactId));
+      const metadata = event?.payload.artifact ?? event?.payload;
+      if (metadata && typeof metadata === 'object' && typeof (metadata as { name?: unknown }).name === 'string') name = (metadata as { name: string }).name;
+    }
+    const extension = extensions[record.mimeType];
+    const filename = name && name.length <= 160 && !/[\\/\u0000-\u001f\u007f]/.test(name) && name.toLowerCase().endsWith(`.${extension}`)
+      ? name : `axiom-artifact.${extension}`;
+    // Source documents are never served as same-origin executable pages. The
+    // client reads this attachment and previews it in an opaque sandbox iframe.
+    return new Response(new Uint8Array(bytes), { headers: {
+      'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes.byteLength),
+      'Content-Disposition': `attachment; filename="axiom-artifact.${extension}"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+      'X-Axiom-Artifact-Mime-Type': record.mimeType,
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store',
+      'Content-Security-Policy': "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
+    } });
   });
 
   api.get('/tasks/:taskId/artifacts/media/:artifactId', async (c) => {

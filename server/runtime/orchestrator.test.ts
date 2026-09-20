@@ -12,6 +12,7 @@ import { buildNativeToolAliasMap, classifyTask, WorkflowOrchestrator } from './o
 import { SqliteTaskStore } from './sqliteTaskStore.js';
 import { ToolRegistry } from './toolRegistry.js';
 import { ModelRoutingPolicy } from './modelRouting.js';
+import { FileArtifactStore } from './artifactStore.js';
 
 class FakeModel implements ModelClient {
   readonly model = 'fake-production-model';
@@ -1281,6 +1282,61 @@ describe('WorkflowOrchestrator', () => {
     }
   });
 
+  for (const requiresReview of [false, true]) test(`delivers a standalone HTML animation without human approval and preserves its file (quality review: ${requiresReview})`, async () => {
+    const store = new SqliteTaskStore(':memory:');
+    await store.initialize();
+    const workspace = await mkdtemp(join(tmpdir(), 'axiom-generated-animation-'));
+    const previousExecutor = process.env.AXIOM_TOOL_EXECUTOR;
+    process.env.AXIOM_TOOL_EXECUTOR = 'docker';
+    const content = '<!doctype html><html><body><svg viewBox="0 0 20 20"><circle r="4"><animate attributeName="cx" values="0;20;0" dur="2s" repeatCount="indefinite"/></circle></svg></body></html>';
+    let builderCalls = 0;
+    const model = new FakeModel();
+    const fallback = model.complete.bind(model);
+    model.complete = async (request) => {
+      if (request.system.includes('independent reviewer')) {
+        assert.ok(request.user.includes(content), 'The reviewer must inspect actual saved source, not only a generated link');
+        return { content: JSON.stringify({ approved: true, score: 92, summary: '已检查动画源码，浏览器运行效果未验证。', gaps: [], requiredCorrections: [] }), attempts: 1, durationMs: 1 };
+      }
+      if (!request.system.includes('You are a builder')) return fallback(request);
+      builderCalls += 1;
+      assert.ok(request.tools?.some((tool) => tool.function.name === 'axiom_artifact_create'));
+      if (builderCalls > 1) assert.match(request.user, /downloadUrl/);
+      return { content: JSON.stringify({ output: '动画已生成。', confidence: 0.9, evidence: [],
+        toolCalls: builderCalls === 1 ? [{ name: 'artifact.create', args: { filename: 'animation.html', content } }] : [] }), attempts: 1, durationMs: 1 };
+    };
+    try {
+      const task = await store.createTask({ tenantId: 'tenant-animation', userId: 'user-a', sessionId: 'session-animation',
+        title: 'Generate a standalone animation', input: '创建一个 HTML，内容是 SVG 绘制的 2D 动画。', mode: 'build',
+        plan: { summary: '直接创建动画成果', routingReason: '单个工程师即可完成', approvalStatus: 'approved',
+          profile: { kind: 'implementation', difficulty: 'easy', route: 'single-agent', score: 1, reasons: ['standalone deliverable'], maxSteps: 1, requiresReview },
+          schedulingDecision: { route: 'single-agent', activeAgentIds: ['builder'], skippedAgentIds: [], appendAgentIds: ['builder'], selectedSkillIds: [], executionWaves: [['draw']],
+            steps: [{ id: 'draw', title: '绘制动画', agentId: 'builder', objective: '生成 HTML 动画成果', dependsOn: [], skillIds: [] }], requiresReview, synthesisAgentId: 'synthesizer', reason: 'Standalone generation' },
+          steps: [{ id: 'draw', title: '绘制动画', role: 'builder', objective: '生成 HTML 动画成果', dependsOn: [], acceptanceCriteria: ['可预览、下载'] }] } });
+      const artifacts = new FileArtifactStore(workspace);
+      const tools = new ToolRegistry({ execute: async () => { throw new Error('Standalone output must not execute shell commands'); } } as never, artifacts);
+      const completed = await new WorkflowOrchestrator(store, new EventHub(), model, memory, pino({ level: 'silent' }), tools, undefined, undefined, undefined, artifacts)
+        .run(task, new AbortController().signal);
+      assert.equal(completed.status, 'completed', completed.error);
+      assert.equal(builderCalls, 2, 'One creation followed by a real tool observation');
+      const artifact = completed.stepResults.flatMap((step) => step.artifacts ?? []).find((item) => item.mimeType === 'text/html');
+      assert.ok(artifact);
+      assert.equal(await artifacts.get(artifact.id, task.tenantId), content);
+      const url = `/api/tasks/${task.id}/artifacts/files/${encodeURIComponent(artifact.id)}`;
+      assert.ok(completed.result?.includes(url), completed.result);
+      assert.equal(completed.toolApprovals?.length ?? 0, 0);
+      const events = await store.getEvents(task.id);
+      assert.equal(events.some((event) => event.type === 'tool.approval_requested'), false);
+      assert.equal(events.some((event) => event.type === 'review.started'), requiresReview);
+      assert.ok(events.some((event) => event.type === 'artifact.created' && event.payload.id === artifact.id));
+      assert.ok(events.some((event) => event.type === 'model.delta' && String(event.payload.content).includes(url)));
+    } finally {
+      if (previousExecutor === undefined) delete process.env.AXIOM_TOOL_EXECUTOR;
+      else process.env.AXIOM_TOOL_EXECUTOR = previousExecutor;
+      await store.close();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   test('pauses a high-risk workspace tool and resumes only after durable approval', async () => {
     const store = new SqliteTaskStore(':memory:');
     await store.initialize();
@@ -1656,6 +1712,10 @@ describe('WorkflowOrchestrator', () => {
     const store = new SqliteTaskStore(':memory:');
     await store.initialize();
     try {
+      const model = new FakeModel();
+      const complete = model.complete.bind(model);
+      const systems: string[] = [];
+      model.complete = async (request) => { systems.push(request.system); return complete(request); };
       const task = await store.createTask({
         tenantId: 'tenant-a',
         userId: 'user-a',
@@ -1667,11 +1727,13 @@ describe('WorkflowOrchestrator', () => {
       const result = await new WorkflowOrchestrator(
         store,
         new EventHub(),
-        new FakeModel(),
+        model,
         memory,
         pino({ level: 'silent' }),
       ).run(task, new AbortController().signal);
       assert.equal(result.status, 'completed');
+      assert.ok(systems.some((system) => system.includes('500 Chinese characters or 180 English words')
+        && system.includes('explicitly asks for a full technical inventory') && system.includes('Compute any counts from the snapshot')));
       assert.match(result.result ?? '', /研究员/);
       assert.match(result.result ?? '', /分析员/);
       assert.match(result.result ?? '', /工程师/);

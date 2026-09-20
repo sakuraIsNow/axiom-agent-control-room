@@ -92,6 +92,7 @@ export function DashboardChat(props: Props) {
   }, [sessions]);
 
   const runningAgent = agents.find((agent) => agent.status === 'running');
+  const waitingForHuman = Boolean(actionTaskId && ['paused', 'waiting_for_human', 'awaiting_approval'].includes(actionTaskStatus ?? ''));
   const pendingActivity = agentActivity || (runningAgent
     ? `${runningAgent.label}正在执行${runningAgent.title ? `“${runningAgent.title}”` : '当前步骤'}`
     : phase === 'routing'
@@ -129,7 +130,7 @@ export function DashboardChat(props: Props) {
 
     <div className="dash-chat-panel">
       <header className="dash-chat-head">
-        <div><span className={`dash-chat-live ${isRunning ? 'active' : ''}`} /><div><strong data-i18n-ignore="true">{activeSession.title || t('新对话')}</strong><small>{phaseLabel[phase]}</small></div></div>
+        <div><span className={`dash-chat-live ${isRunning && !waitingForHuman ? 'active' : ''}`} /><div><strong data-i18n-ignore="true">{activeSession.title || t('新对话')}</strong><small>{waitingForHuman ? t('等待确认') : phaseLabel[phase]}</small></div></div>
         <span className="dash-current-model"><Bot size={13} />当前模型 <strong>{provider}</strong></span>
       </header>
 
@@ -145,7 +146,7 @@ export function DashboardChat(props: Props) {
 
       <div ref={messageListRef} onScroll={onScroll} className="dash-chat-messages">
         {activeSession.messages.length === 0 && <div className="dash-chat-empty"><MessageSquareText size={22} /><strong>开始对话</strong></div>}
-        {activeSession.messages.map((message) => <article key={message.id} className={`dash-chat-message ${message.role} ${message.pending ? 'pending' : ''}`}>
+        {activeSession.messages.map((message) => <article key={`${activeSession.id}:${message.id}`} className={`dash-chat-message ${message.role} ${message.pending ? 'pending' : ''}`}>
           <div className="dash-chat-message-meta"><span>{message.role === 'user' ? '你' : provider}</span><time>{new Date(message.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></div>
           <div className="dash-chat-message-content">
             {message.attachments && message.attachments.length > 0 && <div className="dash-chat-attachments">
@@ -157,8 +158,8 @@ export function DashboardChat(props: Props) {
                   ? <ChatFileArtifact key={attachment.id} attachment={attachment} />
                   : <a key={attachment.id} className="dash-chat-image-attachment" href={attachment.url} target="_blank" rel="noreferrer"><img src={attachment.url} alt={attachment.alt} /></a>)}
             </div>}
-            {message.pending && <span className="dash-chat-thinking" role="status" aria-live="polite"><InferenceOrb size={message.content ? 34 : 46} /><span>{pendingActivity}</span></span>}
-            {message.content && <ChatMessageMarkdown content={message.content} />}
+            {message.pending && !(waitingForHuman && message.taskId === actionTaskId) && <span className="dash-chat-thinking" role="status" aria-live="polite"><InferenceOrb size={message.content ? 34 : 46} /><span>{pendingActivity}</span></span>}
+            {message.content && <ChatMessageMarkdown content={message.content} streaming={Boolean(message.pending)} />}
           </div>
           {message.content && <button type="button" className="dash-chat-copy" title="复制" onClick={() => void navigator.clipboard.writeText(message.content)}><Copy size={12} /></button>}
         </article>)}

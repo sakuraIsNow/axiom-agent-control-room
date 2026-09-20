@@ -1614,6 +1614,7 @@
 .dash-chat-artifact > header button { display: grid; width: 30px; height: 30px; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 7px; color: var(--dash-muted); background: transparent; cursor: pointer; }
 .dash-chat-artifact > header button:hover { border-color: var(--dash-line); color: var(--dash-ink); background: rgb(255 255 255 / 6%); }
 .dash-chat-artifact-stage { min-height: 280px; background: rgb(0 0 0 / 18%); }
+.dash-chat-artifact-pending { display: grid; place-items: center; color: var(--dash-muted); font-size: 14px; }
 .dash-chat-artifact.html .dash-chat-artifact-stage { min-height: 390px; }
 .dash-chat-artifact-stage iframe { display: block; width: 100%; height: 390px; border: 0; background: transparent; }
 .dash-chat-artifact.svg .dash-chat-artifact-stage iframe { height: 300px; }

@@ -18,6 +18,7 @@ export type BusinessRecordKind =
   | 'nexus-release'
   | 'task-action'
   | 'feedback'
+  | 'improvement-proposal'
   | 'decision';
 
 export type BusinessRecord = {

@@ -4,6 +4,12 @@ import type { UiTheme } from '../../lib/uiTheme';
 import type { TaskProviderConfig } from '../../lib/taskRuntime';
 
 export type ReviewResultState = { approved: boolean; score: number; summary: string; gaps: string[]; requiredCorrections: string[] };
+export type ConversationHumanActionState = {
+  taskId: string;
+  sessionId: string;
+  status: 'paused' | 'waiting_for_human' | 'awaiting_approval';
+  refreshKey: string;
+};
 export type GuidanceState = {
   guidanceId: string;
   status: 'accepted' | 'applied';
@@ -60,6 +66,8 @@ export type DashboardProps = {
   onApproveReview: () => Promise<boolean>;
   onRejectReview: () => Promise<boolean>;
   taskCatalog: WorkflowTaskSummary[];
+  /** An observed human boundary takes precedence over the periodically refreshed task list. */
+  conversationHumanAction?: ConversationHumanActionState | null;
   onOpenTask: (taskId: string) => void;
   /**
    * Delete a task run. Task boards may provide all run IDs represented by a

@@ -57,7 +57,7 @@ export type RegisteredTool = {
   executionBoundary?: 'sandbox' | 'host-bounded';
   command?: string;
   buildArgs?: (input: Record<string, unknown>) => string[];
-  handler?: (input: Record<string, unknown>, context: ToolContext) => Promise<SandboxResult>;
+  handler?: (input: Record<string, unknown>, context: ToolContext) => Promise<SandboxResult & { artifact?: ArtifactRef }>;
   resolveUnknown?: (record: ToolExecutionRecord, resolution: ToolExecutionResolveInput) => Promise<void>;
   routing?: {
     sourceId: string;
@@ -219,6 +219,13 @@ const schema = (properties: ToolParameterSchema['properties'], required: string[
   required,
   additionalProperties: false,
 });
+
+const generatedFileName = z.string().min(1).max(120)
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} _.-]*\.(html|svg|md|txt)$/iu, 'Use a plain filename ending in .html, .svg, .md, or .txt; paths are not accepted.')
+  .refine((value) => !value.includes('..'), 'Parent path segments are not accepted.');
+const generatedFileMimeType = (filename: string) => ({
+  html: 'text/html', svg: 'image/svg+xml', md: 'text/markdown', txt: 'text/plain',
+})[filename.split('.').at(-1)!.toLowerCase()]!;
 
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -473,8 +480,39 @@ export class ToolRegistry {
       buildArgs: (input) => ['run', this.allowedScript(input.script || 'test'), ...safeArgs(input.args)],
     });
     this.register({
+      name: 'artifact.create',
+      description: '直接生成本次任务的独立 HTML、SVG、Markdown 或文本交付文件，无需人工确认。仅保存为任务附件，不执行内容、不访问或修改项目文件。用户要求画 SVG、制作网页动画或生成文档时优先使用；修改已有项目文件仍须使用 workspace.write/patch 并申请批准。',
+      risk: 'low',
+      sideEffect: 'write',
+      executionBoundary: 'host-bounded',
+      parameters: schema({
+        filename: { type: 'string', maxLength: 120, description: 'A single filename ending in .html, .svg, .md, or .txt. No directories, absolute paths, or path separators.' },
+        content: { type: 'string', maxLength: 128_000, description: 'The complete UTF-8 file contents.' },
+      }, ['filename', 'content']),
+      schema: z.object({ filename: generatedFileName, content: z.string().min(1).max(128_000) }).strict(),
+      timeoutMs: 15_000,
+      handler: async (input, context) => {
+        if (!this.artifactStore) throw new Error('Task artifact storage is unavailable.');
+        const filename = String(input.filename);
+        const content = String(input.content);
+        const id = `tool:${context.task.id}:${context.stepId}:${context.callId}:artifact`;
+        const stored = await this.artifactStore.put(id, content, context.task.tenantId);
+        const artifact: ArtifactRef = {
+          id, kind: 'tool-output', name: filename, key: stored.key, bytes: stored.bytes,
+          mimeType: generatedFileMimeType(filename), sourceStepId: context.stepId, sourceToolCallId: context.callId,
+          lineage: { taskId: context.task.id, stepId: context.stepId, toolCallId: context.callId },
+          createdAt: new Date().toISOString(),
+        };
+        return {
+          stdout: JSON.stringify({ artifactId: id, filename, mimeType: artifact.mimeType, bytes: stored.bytes,
+            downloadUrl: `/api/tasks/${encodeURIComponent(context.task.id)}/artifacts/files/${encodeURIComponent(id)}` }),
+          stderr: '', exitCode: 0, durationMs: 0, auditId: context.auditId, artifact,
+        };
+      },
+    });
+    this.register({
       name: 'workspace.write',
-      description: '获得明确人工批准后写入 UTF-8 文件。',
+      description: '获得明确人工批准后写入或覆盖已有项目工作区中的 UTF-8 文件。用户仅需独立 HTML、SVG 或文档交付时使用 artifact.create，无需修改项目文件。',
       risk: 'high',
       executionBoundary: 'host-bounded',
       parameters: schema({ path: { type: 'string', maxLength: 500 }, content: { type: 'string', maxLength: 128_000 } }, ['path', 'content']),
@@ -621,6 +659,39 @@ export class ToolRegistry {
     if (this.auditLog.length > 2_000) this.auditLog.splice(0, this.auditLog.length - 2_000);
   }
 
+  private async catalogCreatedArtifact(task: WorkflowTask, artifact: ArtifactRef) {
+    if (!this.artifactCatalog) return undefined;
+    try {
+      const existing = await this.artifactCatalog.get(task.tenantId, artifact.id);
+      if (existing) {
+        // Replaying a completed tool must not restore a deleted or expired file.
+        if (existing.taskId !== task.id || existing.status !== 'active' || existing.referenceCount <= 0
+          || existing.expiresAt && Date.parse(existing.expiresAt) <= Date.now()) return 'The generated artifact is no longer available.';
+        return undefined;
+      }
+      await this.artifactCatalog.register({
+        id: artifact.id, tenantId: task.tenantId, taskId: task.id, source: 'tool',
+        storageKey: artifact.key, bytes: artifact.bytes, mimeType: artifact.mimeType,
+        createdAt: artifact.createdAt, referenceKey: `${artifact.sourceStepId}:${artifact.sourceToolCallId}`,
+      });
+      return undefined;
+    } catch (error) {
+      return (error instanceof Error ? error.message : 'Artifact catalog unavailable.').slice(0, 1_000);
+    }
+  }
+
+  private async replayReceipt(task: WorkflowTask, record: ToolExecutionRecord): Promise<ToolExecution> {
+    const receipt = record.receipt!;
+    if (record.toolName !== 'artifact.create' || !receipt.artifact) return { ...receipt, replayed: true, receiptSource: 'tool' };
+    // The original receipt already contains the file identity. A crash after
+    // its commit only requires catalog repair, never another content write.
+    const artifactError = await this.catalogCreatedArtifact(task, receipt.artifact);
+    if (artifactError !== receipt.artifactError) {
+      await this.executionStore?.annotateReceipt(task.tenantId, record.id, record.callId, { artifact: receipt.artifact, artifactError }).catch(() => false);
+    }
+    return { ...receipt, artifactError, replayed: true, receiptSource: 'tool' };
+  }
+
   private checkQuota(taskId: string) {
     const now = Date.now();
     const maxCalls = Math.max(1, Number(process.env.AXIOM_TOOL_MAX_CALLS_PER_TASK ?? 8));
@@ -658,6 +729,9 @@ export class ToolRegistry {
     if (!tool) throw new Error(`Unknown tool: ${input.name}`);
     if (process.env.AXIOM_TOOL_EXECUTOR !== 'docker') throw new Error('Tool execution is disabled until the Docker sandbox is enabled.');
     const parsedArgs = tool.schema.parse(input.args);
+    // Configuration failures precede dispatch so a missing store cannot be
+    // mistaken for an uncertain write that needs a human outcome review.
+    if (input.name === 'artifact.create' && !this.artifactStore) throw new Error('Task artifact storage is unavailable.');
     let callId: string = randomUUID();
     let auditId: string = randomUUID();
     const invocationId = options.invocationId ?? randomUUID();
@@ -692,7 +766,7 @@ export class ToolRegistry {
       if (claim.kind === 'pending') throw new ToolExecutionPendingError(executionRecord);
       if (claim.kind === 'outcome_unknown') throw new ToolExecutionUnknownError(executionRecord);
       if (claim.kind === 'replay') {
-        if (executionRecord.receiptSource === 'tool' && executionRecord.receipt) return { ...executionRecord.receipt, replayed: true, receiptSource: 'tool' };
+        if (executionRecord.receiptSource === 'tool' && executionRecord.receipt) return this.replayReceipt(task, executionRecord);
         const confirmation = executionRecord.resolutions.at(-1);
         if (!confirmation) throw new ToolExecutionUnknownError(executionRecord);
         return { call: { id: callId, name: input.name, args: parsedArgs }, output: `Human-confirmed outcome: ${confirmation.note}`, stderr: '',
@@ -730,7 +804,7 @@ export class ToolRegistry {
       const latest = await this.executionStore.get(task.tenantId, executionRecord.id).catch(() => null);
       return new ToolExecutionUnknownError(latest ?? { ...executionRecord, status: 'outcome_unknown', unknownReason: reason });
     };
-    let result: SandboxResult;
+    let result: SandboxResult & { artifact?: ArtifactRef };
     try {
       if (tool.handler) {
         result = await this.withTimeout(tool.handler(parsedArgs, context), tool.timeoutMs, controller.signal);
@@ -753,7 +827,8 @@ export class ToolRegistry {
     const output = result.stdout.slice(0, 48_000);
     const stderr = result.stderr.slice(0, 12_000);
     const receipt: ToolExecution = { call: { id: callId, name: input.name, args: parsedArgs }, output, stderr, exitCode: result.exitCode,
-      durationMs: result.durationMs, auditId: result.auditId, risk: tool.risk, signature, receiptSource: 'tool' };
+      durationMs: result.durationMs, auditId: result.auditId, risk: tool.risk, signature, receiptSource: 'tool',
+      ...(result.artifact ? { artifact: result.artifact } : {}) };
     if (this.executionStore && owner && executionRecord) {
       if (sideEffect === 'write' && (result.exitCode !== 0 || leaseLost)) throw await unknown(stderr || 'Execution ownership was lost after dispatch.');
       let saved = false;
@@ -761,14 +836,14 @@ export class ToolRegistry {
       catch { /* A commit may have succeeded before its acknowledgement was lost. */ }
       if (!saved) {
         const latest = await this.executionStore.get(task.tenantId, executionRecord.id).catch(() => null);
-        if (latest?.status === 'completed' && latest.receiptSource === 'tool' && latest.receipt) return { ...latest.receipt, replayed: true, receiptSource: 'tool' };
+        if (latest?.status === 'completed' && latest.receiptSource === 'tool' && latest.receipt) return this.replayReceipt(task, latest);
         if (sideEffect === 'write') throw await unknown('The tool returned, but its durable receipt could not be confirmed.');
         throw new ToolExecutionPendingError(latest ?? executionRecord);
       }
     }
-    let artifact: ArtifactRef | undefined;
-    let artifactError: string | undefined;
-    if (this.artifactStore) {
+    let artifact: ArtifactRef | undefined = result.artifact;
+    let artifactError: string | undefined = artifact ? await this.catalogCreatedArtifact(task, artifact) : undefined;
+    if (this.artifactStore && !artifact) {
       const id = `tool:${task.id}:${stepId}:${callId}`;
       const content = [
         `# ${input.name}`,

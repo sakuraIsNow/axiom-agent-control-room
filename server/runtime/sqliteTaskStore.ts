@@ -420,10 +420,18 @@ export class SqliteTaskStore implements TaskStore {
     }));
   }
 
-  async listTasks(tenantId: string, limit = 50) {
+  async listTasks(tenantId: string, limit = 50, filter: { userId?: string; statuses?: TaskStatus[] } = {}) {
+    const clauses = ['tenant_id = ?'];
+    const values: Array<string | number> = [tenantId];
+    if (filter.userId !== undefined) { values.push(filter.userId); clauses.push('user_id = ?'); }
+    if (filter.statuses) {
+      if (!filter.statuses.length) clauses.push('1 = 0');
+      else { clauses.push(`status IN (${filter.statuses.map(() => '?').join(', ')})`); values.push(...filter.statuses); }
+    }
+    values.push(Math.min(100, Math.max(1, limit)));
     const rows = this.db.prepare(
-      'SELECT * FROM tasks WHERE tenant_id = ? ORDER BY updated_at DESC LIMIT ?',
-    ).all(tenantId, Math.min(100, Math.max(1, limit))) as TaskRow[];
+      `SELECT * FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`,
+    ).all(...values) as TaskRow[];
     return rows.map(taskFromRow);
   }
 

@@ -28,6 +28,30 @@ export const inferRawArtifactKind = (content: string): ChatArtifactKind | null =
   return null;
 };
 
+export const rawArtifactKindAtStart = (content: string): 'html' | 'svg' | null => {
+  const opening = /^\s*(?:<!doctype\s+html\b[^>]*>\s*)?<(html|svg)\b/i.exec(content);
+  return opening ? opening[1].toLowerCase() as 'html' | 'svg' : null;
+};
+
+/** The Markdown parser supplies the block's source range, including its fence. */
+export const hasClosedArtifactFence = (source: string, position?: { start: { offset?: number }; end: { offset?: number } }, parsedCode?: string) => {
+  if (position?.start.offset === undefined || position.end.offset === undefined) return false;
+  const block = source.slice(position.start.offset, position.end.offset).trimEnd();
+  const opening = /^ {0,3}(`{3,}|~{3,})[^\r\n]*\r?\n/.exec(block);
+  if (!opening) return false;
+  const lastLine = block.slice(block.lastIndexOf('\n') + 1);
+  // Block quotes may retain their container prefix inside the source range.
+  const closing = /^(?:[ \t]*> ?)*([ \t]*)(`+|~+)\s*$/.exec(lastLine);
+  if (!closing || closing[2][0] !== opening[1][0] || closing[2].length < opening[1].length) return false;
+  if (parsedCode === undefined) return closing[1].length <= 3;
+  // Container indentation can exceed three spaces in nested lists. The parser
+  // removes a real closing fence from code, but retains an over-indented fake
+  // fence as another code line. Compare its body range instead of guessing the
+  // container depth or prematurely executing an unclosed block.
+  const bodyLines = block.split('\n').length - 2;
+  return parsedCode === '' ? bodyLines === 0 || bodyLines === 1 : parsedCode.split('\n').length === bodyLines;
+};
+
 export const artifactFileName = (name: string, kind: ChatArtifactKind) => {
   const extension = kind === 'markdown' ? 'md' : kind;
   const base = name.replace(/\.(?:md|markdown|svg|html|htm)$/i, '').replace(/[^\w\u4e00-\u9fff-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'axiom-artifact';

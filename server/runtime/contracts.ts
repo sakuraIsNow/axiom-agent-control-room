@@ -1146,7 +1146,8 @@ export interface TaskStore {
   deleteTask(taskId: string, tenantId: string, expectedRevision?: number): Promise<boolean>;
   findTaskByIdempotency(tenantId: string, idempotencyKey: string): Promise<WorkflowTask | null>;
   getModelRoutingStats?: () => Promise<ModelRoutingStats[]>;
-  listTasks(tenantId: string, limit?: number): Promise<WorkflowTask[]>;
+  /** Optional source-selection filters are applied before pagination. */
+  listTasks(tenantId: string, limit?: number, filter?: { userId?: string; statuses?: TaskStatus[] }): Promise<WorkflowTask[]>;
   /** Complete, owner-scoped relationship lookup for session administration. */
   listTasksBySession(tenantId: string, userId: string, sessionId: string): Promise<WorkflowTask[]>;
   /** Tasks with an external Harness event history that may need reconnecting after a restart. */

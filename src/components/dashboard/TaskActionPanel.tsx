@@ -110,7 +110,11 @@ export function TaskActionPanel({ taskId, taskStatus, refreshKey, onChanged, con
   const requestAction = (action: TaskHumanAction, approvalId?: string) => {
     if (!task || busy) return;
     const value = { action, approvalId, revision: task.revision };
-    if (action === 'resume') void run(value);
+    // These buttons already express a scoped decision about the visible request.
+    // Keep the revision, permission and in-flight checks in run; avoid asking the
+    // operator to confirm an explicit Allow Once/Deny a second time.
+    const criticalTool = action === 'approve-tool' && task.toolApprovals?.some((approval) => approval.id === approvalId && approval.risk === 'critical');
+    if (action === 'resume' || action === 'reject-tool' || action === 'approve-tool' && !criticalTool) void run(value);
     else setConfirmation({ scope, value });
   };
   const actions = task ? taskNeedsHumanAction(task) : null;

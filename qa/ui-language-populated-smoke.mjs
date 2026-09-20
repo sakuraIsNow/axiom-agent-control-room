@@ -259,13 +259,17 @@ window.languageQa.mount('agents',${JSON.stringify(activeTask)});
         await assertFits('.dash-chat-composer');
       }
     });
-    await check('390px plan, tool and quality review keep long content and reachable actions', async () => {
+    await check('390px plan, critical tool and quality review keep long content and reachable confirmations', async () => {
       await page.setViewportSize({ width: 390, height: 844 });
       for (const value of ['en', 'zh-CN']) {
         await language(value);
         const zh = value === 'zh-CN';
         for (const kind of ['plan', 'tool', 'review']) {
-          activeTask = task(kind === 'plan' ? 'awaiting_approval' : 'waiting_for_human', kind === 'plan' ? { plan: { ...task().plan, approvalStatus: 'pending' } } : kind === 'tool' ? { toolApprovals: [{ id: 'approval', status: 'pending', name: 'workspace.write', args: { content: longText }, requestedAt: now }] } : { review: { approved: false, score: 61, summary: longText, gaps: ['任务管理'], requiredCorrections: [] } });
+          // Ordinary Allow Once is already an explicit decision and submits
+          // immediately. This no-mutation dialog/layout case must use a critical
+          // approval, whose additional confirmation remains mandatory. Immediate
+          // noncritical approval/rejection is covered by task-actions-smoke.mjs.
+          activeTask = task(kind === 'plan' ? 'awaiting_approval' : 'waiting_for_human', kind === 'plan' ? { plan: { ...task().plan, approvalStatus: 'pending' } } : kind === 'tool' ? { toolApprovals: [{ id: 'approval', status: 'pending', name: 'workspace.write', risk: 'critical', args: { content: longText }, requestedAt: now }] } : { review: { approved: false, score: 61, summary: longText, gaps: ['任务管理'], requiredCorrections: [] } });
           await mount('panel');
           await page.evaluate(() => window.languageQa.refresh());
           const action = page.getByRole('button', { name: kind === 'plan' ? zh ? '批准计划' : 'Approve Plan' : kind === 'tool' ? zh ? '允许此次调用' : 'Allow Once' : zh ? '批准交付' : 'Accept Result', exact: true });

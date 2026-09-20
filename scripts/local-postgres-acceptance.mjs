@@ -28,6 +28,7 @@ const admin = new Pool({ connectionString: adminUrl.toString(), max: 1, connecti
 const node = process.execPath;
 const productionGate = process.argv.includes('--production-gate');
 const stabilityGate = process.argv.includes('--stability');
+const visualGate = process.argv.includes('--visual');
 const isolationSmoke = process.argv.includes('--isolation-smoke');
 const createdDatabases = new Set();
 const children = new Set();
@@ -166,6 +167,9 @@ try {
       if (testState.database === apiState.database || !testState.marker || apiState.marker || !apiState.tasks) throw new Error('Gate API and acceptance data are not isolated.');
       console.log(JSON.stringify({ isolationSmoke: true, separateDatabases: true, apiSchemaInitialized: true, fixtureInvisibleToApi: true }));
     } finally { await Promise.all([testPool.end(), apiPool.end()]); }
+  } else if (visualGate) {
+    await startIsolatedGateServer();
+    await run(process.env.npm_execpath ? [process.env.npm_execpath, 'run', 'qa:visual'] : ['scripts/visual-qa.mjs']);
   } else if (productionGate) {
     process.env.AXIOM_OBJECT_STORAGE_ENDPOINT = `http://127.0.0.1:${(process.env.AXIOM_MINIO_PORT ?? '9000').trim()}`;
     process.env.AXIOM_OBJECT_STORAGE_BUCKET = (process.env.AXIOM_MINIO_QA_BUCKET ?? 'axiom-qa').trim();
@@ -183,8 +187,10 @@ try {
       'server/runtime/outboundNotifications.postgres.test.ts',
       'server/runtime/scheduler.postgres.test.ts',
       'server/runtime/businessCapabilityStore.postgres.test.ts',
+      'server/runtime/improvementApi.postgres.test.ts',
       'server/runtime/toolExecutionStore.postgres.test.ts',
       'server/runtime/providerBindings.postgres.test.ts',
+      'server/runtime/postgresTaskStore.jsonb.test.ts',
     ]);
   } else {
     await run(['--import', 'tsx', '--test', 'server/runtime/businessCapabilityStore.postgres.test.ts']);
@@ -193,7 +199,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     isolatedDatabase: true,
-    ...(isolationSmoke ? { isolationSmoke: true } : productionGate ? { productionGate: true, localMinio: true } : stabilityGate ? { stabilityContracts: true } : { businessContracts: true, workerFailover: true }),
+    ...(isolationSmoke ? { isolationSmoke: true } : visualGate ? { visualGate: true } : productionGate ? { productionGate: true, localMinio: true } : stabilityGate ? { stabilityContracts: true } : { businessContracts: true, workerFailover: true }),
   }));
 } finally {
   await cleanup();

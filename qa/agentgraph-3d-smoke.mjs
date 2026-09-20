@@ -244,6 +244,9 @@ async function runViewport(viewport) {
             return { sourceNodes: 20, renderedNodes: layout.nodes.length };
         });
         await check(label, '30-second telemetry frame, interaction and retained-heap budgets', async () => {
+            let cdp;
+            let measurementFailure;
+            try {
             await page.evaluate(() => window.qaGraph.dense());
             if (await page.locator('.dash-agent-graph-panel').count())
                 await page.locator('.dash-agent-graph-panel > header button').last().click();
@@ -254,7 +257,7 @@ async function runViewport(viewport) {
             await page.locator('.dash-agent-graph-expand').click();
             await page.locator('.dash-agent-graph-events').click();
             assert.ok(await page.locator('.dash-agent-event-list').evaluate(element => element.clientHeight >= 120));
-            const cdp = await context.newCDPSession(page);
+            cdp = await context.newCDPSession(page);
             await cdp.send('Performance.enable');
             const heapBefore = await heapSnapshot(cdp);
             const cpuBefore = await cdp.send('Performance.getMetrics');
@@ -322,9 +325,39 @@ async function runViewport(viewport) {
             assert.ok(await page.locator('.dash-agent-event-row').count() <= budgets.maxEventRows);
             await page.locator('.dash-agent-graph-focus').click();
             await page.screenshot({ path: `qa/agentgraph-load-${label}.png` });
-            await cdp.detach();
-            await page.locator('.dash-agent-graph-panel > header button').last().click();
-            await page.keyboard.press('Escape');
+            } catch (error) {
+                measurementFailure = error;
+                throw error;
+            } finally {
+                // A failed budget is still a failure, but must not leave telemetry,
+                // pointer state or a toggled panel behind for the next scenario.
+                const cleanupErrors = [];
+                const cleanup = async (action) => {
+                    try { await action(); } catch (error) { cleanupErrors.push(error.message); }
+                };
+                await cleanup(() => page.evaluate(() => {
+                    window.qaGraph.stop();
+                    const sample = window.graphSample;
+                    if (!sample) return;
+                    sample.active = false;
+                    cancelAnimationFrame(sample.raf);
+                    sample.observer?.disconnect();
+                    if (sample.pointer) document.removeEventListener('pointermove', sample.pointer, true);
+                }));
+                await cleanup(() => page.mouse.up());
+                if (cdp) await cleanup(() => cdp.detach());
+                await cleanup(async () => {
+                    if (await page.locator('.dash-agent-graph-panel').count())
+                        await page.locator('.dash-agent-graph-panel > header button').last().click();
+                    await page.keyboard.press('Escape');
+                    await page.locator('.dash-agent-signal-graph:not(.is-expanded)').waitFor();
+                });
+                if (cleanupErrors.length) {
+                    const error = new Error(`Performance fixture cleanup failed: ${cleanupErrors.join(' | ')}`);
+                    if (!measurementFailure) throw error;
+                    report.results.push({ viewport: label, name: 'performance fixture cleanup', status: 'failed', error: error.message });
+                }
+            }
         });
         await check(label, 'custom graph names survive bilingual state and ARIA updates', async () => {
             await page.evaluate(() => {
@@ -349,8 +382,15 @@ async function runViewport(viewport) {
                 { id: 'verbatim', phase: 'inference', label: '\u4efb\u52a1\u5df2\u6301\u4e45\u5316', labelSource: 'verbatim', at: 1700000000200 },
                 { id: 'legacy', phase: 'inference', label: '\u4efb\u52a1\u7ba1\u7406', at: 1700000000300 },
             ] }));
-            await page.locator('.dash-agent-graph-expand').click();
-            await page.locator('.dash-agent-graph-events').click();
+            // Enter a known state rather than toggling a panel inherited from a
+            // previous scenario. Translation assertions below remain exact.
+            if (await page.locator('.dash-agent-signal-graph.is-expanded').count() === 0)
+                await page.locator('.dash-agent-graph-expand').click();
+            await page.locator('.dash-agent-signal-graph.is-expanded').waitFor();
+            if (await page.locator('.dash-agent-graph-events').getAttribute('aria-pressed') !== 'true')
+                await page.locator('.dash-agent-graph-events').click();
+            await page.locator('.dash-agent-event-list[data-total-events="4"]').waitFor();
+            await page.waitForFunction(() => document.querySelectorAll('.dash-agent-event-row strong').length === 4);
             const english = ['\u4efb\u52a1\u7ba1\u7406', '\u4efb\u52a1\u5df2\u6301\u4e45\u5316', "\u7814\u7a76\u5458's stage call did not complete", 'Task saved durably'];
             const chinese = ['\u4efb\u52a1\u7ba1\u7406', '\u4efb\u52a1\u5df2\u6301\u4e45\u5316', '\u7814\u7a76\u5458\u7684\u9636\u6bb5\u8c03\u7528\u672a\u5b8c\u6210', '\u4efb\u52a1\u5df2\u6301\u4e45\u5316'];
             for (const [language, expected] of [['en', english], ['zh-CN', chinese], ['en', english]]) {

@@ -79,6 +79,6 @@ assert(catalog.complete?.route === 'agent-registry', 'sub-agent query must be an
 assert(catalog.complete?.agentRole === 'registry-agent', 'sub-agent query must be assigned to the registry Agent');
 assert(/规划|planner/i.test(catalog.text), 'live Agent answer should include the planner when it is present');
 assert(!/当前可用的 Agent 由运行时注册表提供，共 6 个/.test(catalog.text), 'Agent answer must not use the old fixed catalog paragraph');
-assert(catalog.text.length < 900, 'live Agent catalog answer should remain compact');
+assert(catalog.text.length < 900, `live Agent catalog answer should remain compact (received ${catalog.text.length} characters; route=${catalog.complete?.route}; model=${catalog.complete?.model})`);
 
-console.log(JSON.stringify({ ok: true, weatherRoute: weather.complete.route, projectRoute: projects.complete.route, failedNativeRoute: failedNative.complete.route, catalogRoute: catalog.complete.route }));
+console.log(JSON.stringify({ ok: true, weatherRoute: weather.complete.route, projectRoute: projects.complete.route, failedNativeRoute: failedNative.complete.route, catalogRoute: catalog.complete.route, catalogCharacters: catalog.text.length }));

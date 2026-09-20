@@ -14,3 +14,8 @@ test('dashboard URL serialization preserves unrelated parameters and supports cl
   const cleared = serializeDashboardSearch({ taskId: undefined, sessionId: undefined }, search);
   assert.equal(cleared, '?debug=1&view=workflows');
 });
+
+test('controlled task improvements have a restorable independent dashboard route', () => {
+  assert.deepEqual(parseDashboardSearch('?view=improvements'), { view: 'improvements' });
+  assert.equal(serializeDashboardSearch({ view: 'improvements' }, '?lang=en'), '?lang=en&view=improvements');
+});

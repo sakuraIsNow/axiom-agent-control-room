@@ -17,6 +17,7 @@ import { DashboardChat } from './DashboardChat';
 import { WorkflowStudio } from './WorkflowStudio';
 import { OperationsConsole } from './OperationsConsole';
 import { ProjectWorkspace } from './ProjectWorkspace';
+import { ImprovementWorkspace } from './ImprovementWorkspace';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { ReviewConfirmDialog } from './ReviewConfirmDialog';
 import { NotificationCenter } from './NotificationCenter';
@@ -41,7 +42,7 @@ export function AxiomDashboard(props: DashboardProps) {
     selectedNodeId, onSelectAgent, taskProfile, reviewResult, reviewApprovalTaskId, reviewNote, reviewActionBusy,
     onReviewNoteChange, onApproveReview, onRejectReview, taskCatalog, onOpenTask, onDeleteTask, onRefreshTasks, sessionId,
     sessions, activeSession, onSelectSession, onDeleteSession, error, readiness, provider, textModelCredentialId, theme, onThemeChange, principalUserId: principalUserIdProp,
-    attachments, onAddAttachments, onRemoveAttachment, onboardingReady, onTaskActionChanged, providerConfig,
+    attachments, onAddAttachments, onRemoveAttachment, onboardingReady, onTaskActionChanged, providerConfig, conversationHumanAction,
   } = props;
   const nav = useDashboardStore((state) => state.nav);
   const selectedTaskId = useDashboardStore((state) => state.selectedTaskId);
@@ -133,7 +134,8 @@ export function AxiomDashboard(props: DashboardProps) {
 
   const focusedTaskId = selectedTaskId ?? taskCatalog[0]?.id ?? null;
   const focusedTask = taskCatalog.find((task) => task.id === focusedTaskId) ?? null;
-  const conversationTaskId = activeSession.activeTaskId
+  const currentHumanAction = conversationHumanAction?.sessionId === activeSession.id ? conversationHumanAction : null;
+  const conversationTaskId = currentHumanAction?.taskId ?? activeSession.activeTaskId
     ?? taskCatalog.filter((task) => task.sessionId === activeSession.id && ['paused', 'awaiting_approval', 'waiting_for_human'].includes(task.status)).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]?.id
     ?? [...activeSession.messages].reverse().find((message) => Boolean(message.taskId))?.taskId;
   const conversationTask = taskCatalog.find((task) => task.id === conversationTaskId);
@@ -218,7 +220,7 @@ export function AxiomDashboard(props: DashboardProps) {
         <LanguagePicker />
       </div>
     </header>
-    <div ref={layoutRef} className={`dash-layout ${nav === 'chat' ? 'chat-active' : nav === 'projects' ? 'projects-active' : nav === 'plugins' ? 'plugins-active' : nav === 'templates' ? 'templates-active' : nav === 'workflows' ? 'workflows-active' : nav === 'operations' ? 'operations-active' : ''}`}>
+    <div ref={layoutRef} className={`dash-layout ${nav === 'chat' ? 'chat-active' : nav === 'projects' ? 'projects-active' : nav === 'plugins' ? 'plugins-active' : nav === 'templates' ? 'templates-active' : nav === 'workflows' ? 'workflows-active' : nav === 'operations' ? 'operations-active' : nav === 'improvements' ? 'improvements-active' : ''}`}>
       <DashboardNavRail nav={nav} onNav={navigateFromDashboard} onNewTask={openNewConversation} />
       {nav === 'templates' ? <section className="dash-main dash-main-templates">{templateWorkspace}</section>
         : nav === 'plugins' ? <section className="dash-main dash-main-plugins">{pluginWorkspace}</section>
@@ -227,6 +229,14 @@ export function AxiomDashboard(props: DashboardProps) {
         : nav === 'agent-studio' ? <section className="dash-main"><AgentStudio /></section>
         : nav === 'schedules' ? <section className="dash-main"><ScheduleBoard sessionId={sessionId} modelCredentialId={textModelCredentialId} providerConfig={providerConfig} /></section>
         : nav === 'operations' ? <section className="dash-main dash-main-operations"><OperationsConsole /></section>
+        : nav === 'improvements' ? <section className="dash-main dash-main-improvements"><ImprovementWorkspace hasExistingDraft={Boolean(draft.trim() || attachments.length)} onPrepareConversation={(trial) => {
+          // Detach from the existing session without changing its messages. The
+          // preview guards replacement of an unsent draft; never auto-send.
+          onNewTask();
+          onModeChange(trial.mode);
+          onDraftChange(trial.input);
+          setNav('chat');
+        }} /></section>
         : nav === 'chat' ? <section className="dash-main dash-main-chat"><DashboardChat key={activeSession.id}
           sessions={sessions}
           activeSession={activeSession}
@@ -266,8 +276,8 @@ export function AxiomDashboard(props: DashboardProps) {
           onRequestApprove={() => setPendingReviewAction('approve')}
           onRequestReject={() => setPendingReviewAction('reject')}
           actionTaskId={conversationTaskId}
-          actionTaskStatus={conversationTask?.status}
-          actionRefreshKey={conversationTask?.revision ?? `${phase}:${reviewApprovalTaskId ?? ''}`}
+          actionTaskStatus={currentHumanAction?.status ?? conversationTask?.status}
+          actionRefreshKey={`${currentHumanAction?.refreshKey ?? ''}:${conversationTask?.revision ?? `${phase}:${reviewApprovalTaskId ?? ''}`}`}
           onTaskActionChanged={onTaskActionChanged ?? (async () => { await onRefreshTasks(); })}
         /></section>
         : <>

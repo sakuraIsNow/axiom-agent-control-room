@@ -1,4 +1,4 @@
-import { Activity, CalendarClock, FolderKanban, LayoutGrid, MessageSquareText, Telescope, Bot, Plus, Puzzle, Workflow } from 'lucide-react';
+import { Activity, CalendarClock, FlaskConical, FolderKanban, LayoutGrid, MessageSquareText, Telescope, Bot, Plus, Puzzle, Workflow } from 'lucide-react';
 import type { DashboardNavItem } from '../../lib/useDashboardStore';
 
 const items: Array<{ id: DashboardNavItem; label: string; icon: typeof LayoutGrid }> = [
@@ -10,6 +10,7 @@ const items: Array<{ id: DashboardNavItem; label: string; icon: typeof LayoutGri
   { id: 'schedules', label: '日程', icon: CalendarClock },
   { id: 'agent-studio', label: '智能体工作室', icon: Bot },
   { id: 'operations', label: '运行观测', icon: Activity },
+  { id: 'improvements', label: '任务改进', icon: FlaskConical },
 ];
 
 export function DashboardNavRail({ nav, onNav, onNewTask }: { nav: DashboardNavItem; onNav: (item: DashboardNavItem) => void; onNewTask: () => void }) {

@@ -1026,9 +1026,9 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
         <header><div><MessageSquareText size={15} /><strong>运行 Agent Nexus</strong></div><span className={runningTaskId ? 'running' : ''}>{runningTaskId && <LoaderCircle className="spin" size={12} />}{runActivity}{activeRunTask && !runningTaskId && isNexusTaskExecuting(activeRunTask.status) && <button type="button" title="重新连接任务" aria-label="重新连接任务" onClick={() => void refreshActiveRun(activeRunTask.id)}><RefreshCw size={14} /></button>}</span></header>
         <div ref={messagesScrollRef} onScroll={onMessagesScroll} className="workflow-runner-messages">
            {messages.length === 0 && <div className="workflow-runner-empty"><Workflow size={22} /><strong>输入内容，按当前 Agent 流水线执行</strong><span>Agent 状态、分支和 Loop 轮次会实时显示在画布中。</span></div>}
-          {messages.map((message) => <article key={message.id} className={message.role}>
+          {messages.map((message) => <article key={`${workflowId ?? 'draft'}:${message.id}`} className={message.role}>
             <span>{message.role === 'user' ? '你' : 'W'}</span>
-            <div>{message.pending && !message.content && <p className="workflow-pending"><LoaderCircle className="spin" size={14} />{runActivity}</p>}{message.content && <ChatMessageMarkdown content={message.content} />}</div>
+            <div>{message.pending && !message.content && <p className="workflow-pending"><LoaderCircle className="spin" size={14} />{runActivity}</p>}{message.content && <ChatMessageMarkdown content={message.content} streaming={Boolean(message.pending)} />}</div>
           </article>)}
           {activeRunTask && <TaskActionPanel taskId={activeRunTask.id} taskStatus={activeRunTask.status} refreshKey={activeRunTask.revision} onChanged={refreshActiveRun} context="nexus" />}
         </div>

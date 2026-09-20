@@ -373,10 +373,21 @@ export class PostgresTaskStore implements TaskStore {
     }));
   }
 
-  async listTasks(tenantId: string, limit = 50) {
+  async listTasks(tenantId: string, limit = 50, filter: { userId?: string; statuses?: TaskStatus[] } = {}) {
+    const clauses = ['tenant_id = $1'];
+    const values: Array<string | number> = [tenantId];
+    if (filter.userId !== undefined) { values.push(filter.userId); clauses.push(`user_id = $${values.length}`); }
+    if (filter.statuses) {
+      if (!filter.statuses.length) clauses.push('1 = 0');
+      else {
+        const placeholders = filter.statuses.map((status) => { values.push(status); return `$${values.length}`; });
+        clauses.push(`status IN (${placeholders.join(', ')})`);
+      }
+    }
+    values.push(Math.min(100, Math.max(1, limit)));
     const result = await this.pool.query(
-      'SELECT * FROM tasks WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2',
-      [tenantId, Math.min(100, Math.max(1, limit))],
+      `SELECT * FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY updated_at DESC LIMIT $${values.length}`,
+      values,
     );
     return result.rows.map((row) => taskFromRow(row as PostgresTaskRow));
   }
@@ -543,7 +554,11 @@ export class PostgresTaskStore implements TaskStore {
     if (patch.plan !== undefined) assign('plan_json', patch.plan);
     if (patch.stepResults !== undefined) assign('step_results_json', JSON.stringify(patch.stepResults));
     if (patch.review !== undefined) assign('review_json', patch.review);
-    if (patch.toolApprovals !== undefined) assign('tool_approvals_json', patch.toolApprovals);
+    // pg treats a JavaScript array as a PostgreSQL array literal when it is
+    // passed as a query parameter. `tool_approvals_json` is JSONB, so an
+    // approval list containing objects must be encoded explicitly; otherwise
+    // PostgreSQL rejects the value with `invalid input syntax for type json`.
+    if (patch.toolApprovals !== undefined) assign('tool_approvals_json', patch.toolApprovals === null ? null : JSON.stringify(patch.toolApprovals));
     if (patch.result !== undefined) assign('result', patch.result);
     if (patch.error !== undefined) assign('error', patch.error);
     if (patch.cancelRequested !== undefined) assign('cancel_requested', patch.cancelRequested);

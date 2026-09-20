@@ -4,7 +4,9 @@
 
 > A workspace for asking questions, researching topics, creating content, and building reusable Agent tools. See who is working, follow the result, and step in when a decision is needed.
 
-**Version: v2.3.0-rc.7** · [Release notes](CHANGELOG.md) · [Upgrade guide](docs/migration-v2.3.md)
+**Version: v2.3.0-rc.8** · [Release notes](CHANGELOG.md) · [Upgrade guide](docs/migration-v2.3.md)
+
+[GitHub](https://github.com/sakuraIsNow/axiom-agent-control-room) · [Gitee](https://gitee.com/water-sim/axiom-agent-control-room)
 
 ![Axiom Control Room](docs/images/overview.png)
 
@@ -20,6 +22,14 @@ and prepare a report I can share with my team.
 Axiom routes the work, assigns relevant Agents, and keeps the result connected to its sources and execution history. Simple questions stay simple; more involved requests can add research, file analysis, media generation, tools, and quality review.
 
 The interface opens in English by default. Use the language control in the upper-right corner to switch to Simplified Chinese; the selection is remembered after refresh.
+
+### ✨ What is new in rc.8?
+
+- 🌱 **Learn from finished work.** Ask an Agent to review a task and suggest a better approach. Keep a suggestion, edit a new chat draft, and decide whether to try it—nothing changes behind your back.
+- 🎨 **Create a shareable SVG or HTML without an unnecessary approval detour.** Standalone files are saved as task Artifacts; changing project files still follows the existing permission and approval rules.
+- 🪟 **Keep interactive previews steady.** Scrolling, typing, and later streamed text no longer restart an unchanged HTML/SVG preview or reset a playing video. You can still copy or download the result.
+
+This release builds on the existing Chat, Agent Graph, Nexus, and Mini Apps. It does not replace their execution logic or claim that model-generated suggestions are proven improvements.
 
 ## 🏆 Why use it?
 
@@ -45,10 +55,21 @@ The interface opens in English by default. Use the language control in the upper
 | Tools and capability packs | Use custom Agents, templates, MCP/OpenAPI tools, and seven scoped capability packs | Credentials required for authenticated services |
 | Feishu collaboration | Read documents, calendars, and group messages; send messages after approval | Feishu custom app |
 | Recovery and operations | Inspect Token usage, cost, queue wait, leases, model/tool health, alerts, Artifacts, and delivery evidence | Built in; external backends are optional |
+| Task improvements · controlled RSI | Review a finished task, save improvement suggestions, and prepare a new chat to try them | Source task's text model; suggestions are not automatically applied or verified |
 
 An integration shown in the UI is not automatically considered healthy. The system status panel probes the active model, database, sandbox, memory, storage, and optional services. Missing dependencies are shown as degraded or unavailable.
 
 ## 🔁 How a task runs
+
+### 🌱 Learn from a task, without changing it
+
+Open **Task improvements**, choose a finished task, and ask what could work better. Axiom reviews its recorded result and your feedback, then suggests changes and checks worth trying. Save a useful suggestion and bring it into a **new chat draft**—you decide what to send. A later task can build on the previous suggestion for another round of review.
+
+This first, controlled RSI stage never rewrites a running Graph, publishes a plugin, changes permissions, or silently updates your memory. Saving a suggestion does **not** mean it has passed a quality comparison. See [scope, usage, and safeguards](docs/controlled-rsi.md).
+
+Included in **v2.3.0-rc.8**. A review uses the source task's configured text model and may incur model usage. It does not execute tools or automatically test, publish, or apply the suggestion. If a new draft would replace unsent text or attachments, Axiom asks you to keep those first. See the [rc.8 acceptance record](docs/rc8-release-acceptance-20260920.md) for release checks and their limits.
+
+### Execution path
 
 ```text
 User request
@@ -138,7 +159,7 @@ Requirements:
 ```bash
 git clone https://gitee.com/water-sim/axiom-agent-control-room.git
 cd axiom-agent-control-room
-npm install
+npm ci
 ```
 
 For isolated tool execution:
@@ -228,13 +249,30 @@ npm run qa:business           # Segmented business-flow evaluation
 npm run qa:mcp-business       # 30 P0 + 14 P1 Fake MCP cases
 npm run qa:routing-resilience # Deterministic Router/Scheduler failure cases
 npm run qa:execution-quality  # Fixed delivery and review-loop quality cases
+npm run qa:improvements       # Controlled RSI UI and unsent trial-draft checks
+npm run qa:preview-stability  # Interactive previews survive scrolling and streaming
 npm run qa:agentgraph3d       # Real component interactions and frame budgets
 npm run qa:object-storage:local
 npm run qa:postgres:local
 npm run qa:all:local          # PostgreSQL + MinIO local release gate
 ```
 
-Latest `v2.3.0-rc.7` acceptance on 2026-09-07:
+**v2.3.0-rc.8 acceptance · 2026-09-20:** the final complete local gate passed **41 checks, with 0 failures and 3 external-service skips**.
+
+| Check | Result |
+| --- | --- |
+| TypeScript checks and production build | Passed |
+| Unit and runtime tests | 700 total · 684 passed · 0 failed · 16 conditional PostgreSQL skips |
+| Isolated PostgreSQL checks | 18/18 passed, covering the database cases skipped above |
+| Desktop/mobile visual checks · real Agent Graph · RSI interactions | 172/172 · 22/22 · 17/17 passed |
+| Fake MCP · routing resilience · live routing · fixed delivery quality | 44/44 · 137/137 · 7/7 · 14/14 passed |
+| English/Chinese UI | Passed |
+| Clean source install, checks, tests, build, and isolated startup | Passed |
+
+Every runnable check passed without a retry **in the final complete run**. Earlier runs exposed defects and timing issues; the [rc.8 acceptance record](docs/rc8-release-acceptance-20260920.md) preserves those failures, fixes, and measurements. The three skipped checks are MemoryCore HTTP, the MemoryCore adapter, and the Harness/Codex sidecar; they need separately configured services and are not counted as passes. The deployment ZIP also passed a clean production-dependency installation and isolated startup check, without developer secrets or task history. The production dependency audit reported **0 known vulnerabilities at the time checked**, not a complete security certification.
+
+<details>
+<summary>Previous release: v2.3.0-rc.7 acceptance · 2026-09-07</summary>
 
 ```text
 npm run check          passed
@@ -255,9 +293,15 @@ The 14 PostgreSQL cases skipped by the default test command were rerun in isolat
 
 The three skipped live checks require deployment-specific TencentDB MemoryCore and Harness/Codex sidecar configuration. A skipped check is not a pass. Fixed delivery tests validate authored requirements and exact source pairs, not the factual accuracy of arbitrary answers. Live complex tasks can still need human review and may deliver explicitly accepted partial results; these are not counted as automatic first-pass success.
 
+</details>
+
+Controlled RSI checks validate access boundaries, persistence, conflict handling, model-output parsing, and the unsent-draft handoff. They do **not** establish that a suggestion improves an arbitrary task. Live providers and deployment-specific services still require checks in your own environment.
+
 ## 📈 Local API baseline
 
 Historical baseline from 2026-09-04, measured on one Windows node with 25 concurrent clients and 200 requests per endpoint. These figures measure Axiom's API, scheduler, and database path; they do not include model generation or Internet latency. The rc.7 UI and live-model measurements are recorded separately in the acceptance log and are not a production-capacity guarantee.
+
+In the final rc.8 synthetic Agent Graph check, frame-interval P95 was **33.4 ms on desktop** and **16.7 ms on mobile** under the fixed telemetry fixture. Earlier desktop samples exceeded the unchanged 50 ms budget; see the release record for the full history. These are local browser measurements, not model-response times or a claim that a test-harness fix improved rendering performance.
 
 | Endpoint | Throughput | P95 latency |
 | --- | ---: | ---: |
@@ -311,6 +355,8 @@ See [Launch readiness](docs/launch-readiness.md) for the exact remaining checks.
 - [MemoryCore integration](docs/memorycore-integration.md)
 - [Harness adapters](docs/harness-adapters.md)
 - [Runtime business evaluation](docs/runtime-business-evaluation.md)
+- [Controlled RSI: task improvements](docs/controlled-rsi.md)
+- [rc.8 release acceptance](docs/rc8-release-acceptance-20260920.md)
 - [Upgrade roadmap](docs/upgrade-roadmap.md)
 - [Release history](CHANGELOG.md)
 

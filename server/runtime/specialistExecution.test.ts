@@ -304,6 +304,10 @@ test('inline video output is stored as a tenant-owned artifact and never embedde
 test('search preserves incomplete output and actual usage without claiming successful completion', async () => {
   const f = await fixture();
   const originalFetch = globalThis.fetch;
+  const originalSearchEnabled = process.env.DEEPSEEK_NATIVE_SEARCH;
+  // This is the enabled-provider fixture. Do not inherit a developer's global
+  // feature switch: clean release tests deliberately disable real integrations.
+  process.env.DEEPSEEK_NATIVE_SEARCH = 'true';
   globalThis.fetch = async () => new Response('event: response.output_text.delta\ndata: {"delta":"Source: https://example.com/paper"}\n\nevent: response.incomplete\ndata: {"response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":11,"output_tokens":5}}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
   try {
     const result = await executeWorkflowSpecialist('academic-search-agent', 'Find papers', new AbortController().signal, [], undefined,
@@ -312,7 +316,31 @@ test('search preserves incomplete output and actual usage without claiming succe
     assert.equal(result.finishReason, 'max_output_tokens');
     assert.equal(measuredSpecialistTokens(result.usage), 16);
     assert.match(result.output, /example.com/);
-  } finally { globalThis.fetch = originalFetch; await f.close(); }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchEnabled === undefined) delete process.env.DEEPSEEK_NATIVE_SEARCH;
+    else process.env.DEEPSEEK_NATIVE_SEARCH = originalSearchEnabled;
+    await f.close();
+  }
+});
+
+test('disabled native search rejects even a bound provider before making any HTTP request', async () => {
+  const f = await fixture();
+  const originalFetch = globalThis.fetch;
+  const originalSearchEnabled = process.env.DEEPSEEK_NATIVE_SEARCH;
+  process.env.DEEPSEEK_NATIVE_SEARCH = 'false';
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; throw new Error('A disabled integration must not use the network.'); };
+  try {
+    await assert.rejects(executeWorkflowSpecialist('academic-search-agent', 'Find papers', new AbortController().signal, [], undefined,
+      { task: f.task, providerResolver: async () => ({ apiKey: 'fake', baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4-flash' }) }), /原生搜索尚未配置/);
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSearchEnabled === undefined) delete process.env.DEEPSEEK_NATIVE_SEARCH;
+    else process.env.DEEPSEEK_NATIVE_SEARCH = originalSearchEnabled;
+    await f.close();
+  }
 });
 
 test('document partial output carries measured usage while omitted usage stays unknown', async () => {

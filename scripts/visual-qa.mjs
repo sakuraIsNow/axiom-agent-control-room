@@ -880,15 +880,17 @@ const immediateUserMessage = (await page.locator('.dash-chat-message.user').last
 await page.waitForFunction(() => Boolean(document.querySelector('.dash-chat-message.assistant, .dash-chat-error')), undefined, { timeout: 8_000 });
 const assistantReaction = await page.locator('.dash-chat-message.assistant, .dash-chat-error').count() > 0;
 const activityIndicator = page.locator('.dash-chat-thinking').last();
-// The activity row can legitimately disappear between the count and text read
-// when a fast provider error or direct response reaches a terminal state.
-const activityText = await activityIndicator.count() > 0
-  ? ((await activityIndicator.textContent().catch(() => '')) ?? '').trim()
-  : '';
-const pendingActivityUsesAgentAction = activityText.length > 0
-  && /Agent/u.test(activityText)
+const directRequest = await directGatewayRequest;
+// Synchronize with the fixture's routed Agent, not whichever routing phase won
+// a timing race. Its Chinese name is "直接响应" and need not contain "Agent".
+// The SSE response stays held below, so the exact pending action must persist.
+const expectedPendingActivity = '直接响应正在准备执行';
+await page.waitForFunction((expected) => [...document.querySelectorAll('.dash-chat-thinking')]
+  .some((element) => element.textContent?.trim() === expected), expectedPendingActivity, { timeout: 5_000 });
+const activityText = (await activityIndicator.textContent() ?? '').trim();
+const pendingActivityUsesAgentAction = activityText === expectedPendingActivity
   && !/模型生成中|持续生成|模型正在/u.test(activityText);
-const directResponseUsesRoutedAgent = (await directGatewayRequest).postDataJSON()?.routing?.agentRole === 'direct-responder';
+const directResponseUsesRoutedAgent = directRequest.postDataJSON()?.routing?.agentRole === 'direct-responder';
 await page.waitForFunction(() => document.querySelectorAll('.dash-agent-signal-node').length > 0, undefined, { timeout: 5_000 });
 const agentBallCount = await page.locator('.dash-agent-signal-node').count();
 const completedSessionSaved = page.waitForResponse((response) => response.request().method() === 'PUT'
