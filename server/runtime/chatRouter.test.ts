@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ModelClient, ModelCompletionRequest } from './modelClient.js';
-import { enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute } from './chatRouter.js';
+import { enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, RoutingUnavailableError, summarizeRoutingDiagnostics, workflowPlanFromChatRoute, type RoutingDiagnostic, type RoutingModelCall } from './chatRouter.js';
+import { explicitlyDisablesRetrieval } from '../shared/chatRoutingFallback.js';
 
 class RouteModel implements ModelClient {
   readonly model = 'route-model';
+  readonly requests: ModelCompletionRequest[] = [];
   private readonly outputs: string[];
   constructor(content: string | string[]) {
     this.outputs = Array.isArray(content) ? [...content] : [content];
   }
   async complete(_request: ModelCompletionRequest) {
+    this.requests.push(_request);
     return { content: this.outputs.shift() ?? '{}', attempts: 1, durationMs: 1 };
   }
 }
@@ -634,4 +637,283 @@ test('fallback only selects current-turn capabilities after search is explicitly
   assert.equal(current.skillIds.includes('github-inspection'), false);
   assert.equal(current.scheduler.activeAgentIds.includes('github-research-agent'), false);
   assert.equal(current.scheduler.activeAgentIds.includes('reviewer'), false);
+});
+
+test('capability tags mistaken for Skills get one scoped Scheduler correction with measured overhead', async () => {
+  const events: RoutingDiagnostic[] = [];
+  const calls: RoutingModelCall[] = [];
+  const wrong = JSON.parse(schedulerOutput());
+  wrong.selectedSkillIds = ['tradeoffs', 'risk-analysis'];
+  wrong.steps[1].skillIds = ['tradeoffs'];
+  const model = new RouteModel([routerOutput(), JSON.stringify(wrong), schedulerOutput()]);
+  const decision = await routeChatIntent({ message: 'Compare the design tradeoffs.', mode: 'decide', onDiagnostic: (event) => events.push(event), onModelCall: (call) => calls.push(call) }, model, new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(model.requests.length, 3);
+  assert.deepEqual(calls.map(({ stage, purpose }) => [stage, purpose]), [['router', 'initial'], ['scheduler', 'initial'], ['scheduler', 'repair']]);
+  assert.equal(calls.every((call) => call.status === 'completed'), true, 'HTTP success is separate from semantic validity');
+  assert.deepEqual(events.map((event) => [event.event, event.code]), [['validation-passed', undefined], ['validation-rejected', 'unavailable-id'], ['repair-started', 'unavailable-id'], ['validation-passed', undefined]]);
+  const initial = JSON.parse(model.requests[1]!.user);
+  const repair = JSON.parse(model.requests[2]!.user);
+  assert.deepEqual(repair.selectionContract, initial.selectionContract);
+  assert.equal(repair.correction.code, 'unavailable-id');
+  assert.ok(repair.correction.validationFeedback.includes('tradeoffs'));
+  assert.ok(initial.candidateAgents.every((agent: Record<string, unknown>) => 'capabilityDescriptions' in agent && !('capabilities' in agent)));
+  const summary = summarizeRoutingDiagnostics(calls, events);
+  assert.equal(summary.firstPassValid, false);
+  assert.equal(summary.repaired, true);
+  assert.equal(summary.fallback, false);
+  assert.equal(summary.validationFailures, 1);
+  assert.equal(summary.repairModelCalls, 1);
+  assert.equal(summary.repairTokens, null, 'unreported tokens must not appear as zero');
+  assert.ok(summary.repairDurationMs >= 0);
+  assert.equal(JSON.stringify(events).includes('Compare'), false, 'diagnostics never retain the user prompt');
+});
+
+test('Router correction consumes the single shared budget and Scheduler cannot start another repair', async () => {
+  const events: RoutingDiagnostic[] = [];
+  const model = new RouteModel(['{"broken":', routerOutput(), schedulerOutput({ selectedSkillIds: ['risk-analysis'] }), schedulerOutput()]);
+  const decision = await routeChatIntent({ message: 'Design a service.', mode: 'build', onDiagnostic: (event) => events.push(event) }, model, new AbortController().signal);
+  assert.equal(decision.source, 'deterministic-fallback');
+  assert.equal(model.requests.length, 3);
+  assert.equal(events.filter((event) => event.event === 'repair-started').length, 1);
+  assert.deepEqual(events.filter((event) => event.event === 'validation-rejected').map((event) => event.code), ['invalid-json', 'unavailable-id']);
+  assert.equal(events.at(-1)?.code, 'unavailable-id');
+});
+
+test('one Router schema repair can recover without turning a greeting into a workflow', async () => {
+  const model = new RouteModel(['{}', routerOutput({ intent: 'conversation', taskKind: 'conversation', difficulty: 'trivial', candidateAgentIds: ['direct-responder'], candidateSkillIds: [] }), schedulerOutput({ route: 'direct', activeAgentIds: ['direct-responder'], appendAgentIds: [], selectedSkillIds: [], steps: [], executionWaves: [] })]);
+  const decision = await routeChatIntent({ message: 'Hello!', mode: 'analyze' }, model, new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(decision.execution, 'gateway');
+  assert.deepEqual(decision.scheduler.activeAgentIds, ['direct-responder']);
+  assert.deepEqual(decision.scheduler.steps, []);
+  assert.equal(JSON.parse(model.requests[1]!.user).correction.code, 'invalid-schema');
+});
+
+test('cycles and out-of-candidate Agent or Skill choices are repairable but never executable', async () => {
+  const healthy = JSON.parse(schedulerOutput());
+  const cycle = structuredClone(healthy);
+  cycle.steps[0].dependsOn = ['delivery'];
+  const outsideStep = structuredClone(healthy);
+  outsideStep.steps[2].agentId = 'reviewer';
+  const outsideSkill = structuredClone(healthy);
+  outsideSkill.steps[0].skillIds = ['quality-review'];
+  const outsideAppend = { ...healthy, appendAgentIds: ['reviewer'] };
+  for (const [invalid, code] of [[cycle, 'invalid-dependencies'], [outsideStep, 'outside-candidates'], [outsideSkill, 'outside-candidates'], [outsideAppend, 'outside-candidates']] as const) {
+    const model = new RouteModel([routerOutput(), JSON.stringify(invalid), schedulerOutput()]);
+    const decision = await routeChatIntent({ message: 'Design and implement the service.', mode: 'build' }, model, new AbortController().signal);
+    assert.equal(decision.source, 'router-agent');
+    assert.equal(JSON.parse(model.requests[2]!.user).correction.code, code);
+    assert.deepEqual(decision.scheduler.activeAgentIds, ['researcher', 'analyst', 'builder']);
+    assert.deepEqual(decision.scheduler.executionWaves, [['research', 'analysis'], ['delivery']]);
+  }
+});
+
+test('failed correction safely falls back and provider failures never start a semantic repair', async () => {
+  for (const stage of ['initial', 'repair'] as const) {
+    const events: RoutingDiagnostic[] = [];
+    let calls = 0;
+    const decision = await routeChatIntent({ message: 'Design a service.', mode: 'build', onDiagnostic: (event) => events.push(event) }, {
+      model: 'injected', async complete() {
+        calls += 1;
+        if (stage === 'repair' && calls === 1) return { content: '{}', durationMs: 1, attempts: 1 };
+        throw new Error('Provider disconnected');
+      },
+    }, new AbortController().signal);
+    assert.equal(decision.source, 'deterministic-fallback');
+    assert.equal(calls, stage === 'repair' ? 2 : 1);
+    assert.equal(events.at(-1)?.code, 'provider-error');
+    assert.equal(events.filter((event) => event.event === 'repair-started').length, stage === 'repair' ? 1 : 0);
+  }
+  const events: RoutingDiagnostic[] = [];
+  const invalid = schedulerOutput({ selectedSkillIds: ['risk-analysis'] });
+  const model = new RouteModel([routerOutput(), invalid, invalid, schedulerOutput()]);
+  const decision = await routeChatIntent({ message: 'Design a service.', mode: 'build', onDiagnostic: (event) => events.push(event) }, model, new AbortController().signal);
+  assert.equal(decision.source, 'deterministic-fallback');
+  assert.equal(model.requests.length, 3);
+  assert.equal(events.filter((event) => event.event === 'repair-started').length, 1);
+});
+
+test('low confidence does not trigger a repair that merely inflates model confidence', async () => {
+  const model = new RouteModel([routerOutput({ confidence: 0.2 }), routerOutput(), schedulerOutput()]);
+  const decision = await routeChatIntent({ message: 'Design a service.', mode: 'build' }, model, new AbortController().signal);
+  assert.equal(decision.source, 'deterministic-fallback');
+  assert.equal(model.requests.length, 1);
+});
+
+test('cancelled routing never falls back or retries before, during, or between model stages', async () => {
+  for (const cancelAt of [0, 1, 2, 3]) {
+    const controller = new AbortController();
+    let calls = 0;
+    let fallbacks = 0;
+    const events: RoutingDiagnostic[] = [];
+    if (cancelAt === 0) controller.abort();
+    await assert.rejects(routeChatIntent({ message: 'Design a service.', mode: 'build', onFallback: () => { fallbacks += 1; }, onDiagnostic: (event) => events.push(event) }, {
+      model: 'cancel-fixture', async complete() {
+        calls += 1;
+        if (calls === cancelAt) controller.abort();
+        return { content: calls === 1 ? routerOutput() : '{}', attempts: 1, durationMs: 1 };
+      },
+    }, controller.signal), { name: 'AbortError' });
+    assert.equal(calls, cancelAt);
+    assert.equal(fallbacks, 0);
+    assert.equal(events.at(-1)?.event, 'cancelled');
+  }
+});
+
+test('fallback honors empty/restricted directories and never resurrects unavailable Agents or Skills', async () => {
+  const availableAgents = [{ id: 'analyst', label: 'Analysis', description: 'Analysis only', capabilities: ['analysis'] }];
+  const model = new RouteModel('{}');
+  await assert.rejects(routeChatIntent({ message: 'Hello', mode: 'analyze', availableAgents: [], availableSkills: [] }, model, new AbortController().signal), RoutingUnavailableError);
+  assert.equal(model.requests.length, 0);
+  await assert.rejects(routeChatIntent({ message: 'Search current weather.', mode: 'analyze', availableAgents }, new RouteModel('{}'), new AbortController().signal), RoutingUnavailableError);
+  const limited = await routeChatIntent({ message: 'Design a service.', mode: 'build', availableSkills: [] }, new RouteModel('{}'), new AbortController().signal);
+  assert.equal(limited.source, 'deterministic-fallback');
+  assert.deepEqual(limited.skillIds, []);
+  assert.deepEqual(limited.router.candidateSkillIds, []);
+  assert.ok(limited.scheduler.steps.every((step) => step.skillIds.length === 0));
+});
+
+test('multi-turn scheduling derives new and skipped roles from actual work, never arbitrary model history labels', async () => {
+  const prior = workflowPlanFromChatRoute(await routeChatIntent({ message: 'Design the service.', mode: 'build' }, new RouteModel([routerOutput(), schedulerOutput()]), new AbortController().signal))!.graph;
+  const followup = await routeChatIntent({ message: 'Now only review the existing implementation.', mode: 'analyze', currentGraph: prior }, new RouteModel([
+    routerOutput({ candidateAgentIds: ['reviewer'], candidateSkillIds: ['quality-review'] }),
+    schedulerOutput({ route: 'single-agent', activeAgentIds: ['reviewer'], appendAgentIds: [], skippedAgentIds: ['reviewer', 'invented-history-agent'], selectedSkillIds: ['quality-review'], steps: [{ id: 'review', agentId: 'reviewer', title: 'Review', objective: 'Review existing work only.', dependsOn: [], skillIds: ['quality-review'] }] }),
+  ]), new AbortController().signal);
+  assert.equal(followup.source, 'router-agent');
+  assert.deepEqual(followup.scheduler.activeAgentIds, ['reviewer']);
+  assert.deepEqual(followup.scheduler.appendAgentIds, ['reviewer']);
+  assert.deepEqual(followup.scheduler.skippedAgentIds, ['researcher', 'analyst', 'builder']);
+});
+
+test('diagnostics summarize known repair tokens without storing prompts and observers remain non-authoritative', async () => {
+  const calls: RoutingModelCall[] = [];
+  const events: RoutingDiagnostic[] = [];
+  let completion = 0;
+  const outputs = [routerOutput(), '{}', schedulerOutput()];
+  const decision = await routeChatIntent({ message: 'Design a service.', mode: 'build', onModelCall: (call) => calls.push(call), onDiagnostic: (event) => { events.push(event); throw new Error('Observer failure'); } }, {
+    model: 'usage-fixture', async complete() { return { content: outputs[completion++]!, attempts: 1, durationMs: 1, usage: { total_tokens: 100 } }; },
+  }, new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(summarizeRoutingDiagnostics(calls, events).totalTokens, 300);
+  assert.equal(summarizeRoutingDiagnostics(calls, events).repairTokens, 100);
+});
+
+test('valid-looking JSON with truncated/tool/oversized responses is rejected before semantic acceptance', async () => {
+  for (const [mode, code] of [['length', 'truncated-output'], ['tool', 'unexpected-tool-call'], ['oversized', 'oversized-output']] as const) {
+    const events: RoutingDiagnostic[] = [];
+    const requests: ModelCompletionRequest[] = [];
+    const decision = await routeChatIntent({ message: 'Design a service.', mode: 'build', onDiagnostic: (event) => events.push(event) }, {
+      model: 'invalid-completion-fixture', async complete(request) {
+        requests.push(request);
+        assert.equal(request.toolChoice, 'none');
+        assert.equal(request.tools, undefined);
+        const first = requests.length === 1;
+        return { content: first ? (mode === 'oversized' ? ' '.repeat(16_001) + routerOutput() : routerOutput()) : requests.length === 2 ? routerOutput() : schedulerOutput(), attempts: 1, durationMs: 1,
+          ...(first && mode === 'length' ? { finishReason: 'length' } : {}),
+          ...(first && mode === 'tool' ? { toolCalls: [{ name: 'shell.exec', args: { command: 'must-not-run' } }] } : {}) };
+      },
+    }, new AbortController().signal);
+    assert.equal(decision.source, 'router-agent');
+    assert.equal(requests.length, 3);
+    assert.equal(events.find((event) => event.event === 'validation-rejected')?.code, code);
+    assert.equal(events.filter((event) => event.event === 'repair-started').length, 1);
+    assert.ok(JSON.parse(requests[1]!.user).correction.invalidOutput.length <= 6_000);
+  }
+});
+
+test('missing steps for a non-direct candidate gets actionable correction without expanding candidates', async () => {
+  const message = '不要重新搜索，仅把上一轮结论整理成三个要点，不要新增事实。';
+  const currentGraph = workflowPlanFromChatRoute(fallbackChatRoute({ message: '搜索最新官方资料，比较数据库方案并验证结论', mode: 'decide' }))!.graph;
+  const selectedRouter = routerOutput({ taskKind: 'question', difficulty: 'easy', candidateAgentIds: ['analyst'], candidateSkillIds: [], requiredCapabilities: ['analysis'], requiresExternalFacts: false });
+  const missingSteps = schedulerOutput({ route: 'direct', activeAgentIds: ['analyst'], appendAgentIds: [], selectedSkillIds: [], steps: [], executionWaves: [] });
+  const corrected = schedulerOutput({ route: 'single-agent', activeAgentIds: ['analyst'], appendAgentIds: [], selectedSkillIds: [], steps: [{ id: 'summarize', title: '整理已有结论', agentId: 'analyst', objective: message, dependsOn: [], skillIds: [] }] });
+  for (const repairedOutput of [corrected, missingSteps]) {
+    const model = new RouteModel([selectedRouter, missingSteps, repairedOutput]);
+    const decision = await routeChatIntent({ message, mode: 'analyze', currentGraph }, model, new AbortController().signal);
+    assert.equal(model.requests.length, 3);
+    const request = JSON.parse(model.requests[2]!.user);
+    assert.equal(request.correction.code, 'outside-candidates');
+    assert.match(request.correction.validationFeedback, /Assign a concrete executable step/);
+    assert.deepEqual(request.selectionContract.selectableAgentIds, ['analyst']);
+    assert.equal(decision.source, repairedOutput === corrected ? 'router-agent' : 'deterministic-fallback');
+    assert.equal(decision.requiresSearch, false);
+    assert.equal(decision.router.requiresExternalFacts, false);
+    assert.equal(decision.scheduler.activeAgentIds.includes('search-agent'), false);
+    assert.ok(decision.scheduler.skippedAgentIds.includes('search-agent'));
+    assert.equal(decision.skillIds.includes('web-research'), false);
+    assert.equal(decision.skillIds.includes('github-inspection'), false);
+  }
+});
+
+test('shared fallback preserves explicit no-retrieval wording without disabling affirmative requests', () => {
+  const currentGraph = workflowPlanFromChatRoute(fallbackChatRoute({ message: '搜索 GitHub 最新框架并比较架构', mode: 'decide' }))!.graph;
+  const negative = [
+    '不要重新搜索，仅把上一轮结论整理成三个要点，不要新增事实。',
+    '无需再次检索，先整理已提供的资料。',
+    '不用继续联网，分析已有文档中的差异。',
+    '停止额外搜索，比较现有证据。',
+    'Do not search again; summarize the previous findings in three bullets.',
+    "Don't re-search. Compare only the available evidence.",
+    'No further web search; summarize the existing facts.',
+    'Without browsing, analyze the existing notes.',
+    'Avoid additional retrieval; use the prior answer.',
+    '不要重新搜索，只解释“搜索最新资料”这句话。',
+    'Do not browse again; explain "Search the web" using the prior context.',
+  ];
+  for (const message of negative) {
+    const decision = fallbackChatRoute({ message, mode: 'analyze', currentGraph });
+    assert.equal(decision.requiresSearch, false, message);
+    assert.equal(decision.router.requiresExternalFacts, false, message);
+    assert.ok(decision.scheduler.activeAgentIds.every((id) => !['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id)), message);
+    assert.ok(decision.skillIds.every((id) => !['web-research', 'github-inspection'].includes(id)), message);
+    assert.ok(decision.scheduler.skippedAgentIds.includes('github-research-agent'), message);
+  }
+  for (const message of ['请重新搜索最新官方资料。', '不要只搜索，还要分析最新方案。', '不要使用旧报告，请搜索最新官方资料。', 'Search again using official sources.', "Don't use the old notes; search for current evidence.",
+    '请搜索关于“不要重新搜索”这句话的相关资料。', '请搜索关于\'不要重新搜索\'这句话的相关资料。',
+    'Search for official documentation about "do not search again".', "Search for articles titled 'No further web search'."]) {
+    assert.equal(fallbackChatRoute({ message, mode: 'analyze' }).requiresSearch, true, message);
+  }
+});
+
+test('latest-turn retrieval prohibition constrains model plans and stale server decisions', async () => {
+  const message = '不要重新搜索，仅把上一轮结论整理成三个要点，不要新增事实。';
+  const stale = fallbackChatRoute({ message: '搜索今天的官方资讯', mode: 'analyze' });
+  assert.equal(stale.requiresSearch, true);
+  assert.equal(enforceChatRouteSafety({ ...stale, source: 'router-agent' }, { message, mode: 'analyze' }).requiresSearch, false);
+  const model = new RouteModel([routerOutput({ intent: 'web-search', taskKind: 'question', requiresExternalFacts: true, candidateAgentIds: ['search-agent'], candidateSkillIds: ['web-research'] }),
+    routerOutput({ taskKind: 'question', difficulty: 'easy', requiresExternalFacts: false, candidateAgentIds: ['direct-responder'], candidateSkillIds: [] }),
+    schedulerOutput({ route: 'direct', activeAgentIds: ['direct-responder'], appendAgentIds: [], selectedSkillIds: [], steps: [], executionWaves: [] })]);
+  const decision = await routeChatIntent({ message, mode: 'analyze' }, model, new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(JSON.parse(model.requests[1]!.user).correction.code, 'forbidden-retrieval');
+  assert.equal(decision.requiresSearch, false);
+  assert.deepEqual(decision.scheduler.activeAgentIds, ['direct-responder']);
+});
+
+test('object-scoped prohibitions and affirmative countermand clauses remain semantic Router decisions', async () => {
+  const messages = [
+    '不用搜索天气，只查询今天的美元人民币汇率。',
+    '不要搜索“天气”，只查询今天的美元人民币汇率。',
+    '不用搜索，但是请查询今天的美元人民币汇率。',
+    "Don't search for weather; only look up today's USD/CNY exchange rate.",
+    'Do not search for "weather"; instead search official exchange rates.',
+    'No further web search; but look up the latest exchange rate.',
+  ];
+  for (const message of messages) {
+    assert.equal(explicitlyDisablesRetrieval(message), false, message);
+    const model = new RouteModel([
+      routerOutput({ intent: 'web-search', taskKind: 'question', difficulty: 'easy', requiresExternalFacts: true, candidateAgentIds: ['search-agent'], candidateSkillIds: ['web-research'] }),
+      schedulerOutput({ route: 'direct', activeAgentIds: ['search-agent'], appendAgentIds: ['search-agent'], selectedSkillIds: ['web-research'], steps: [], executionWaves: [] }),
+    ]);
+    const decision = await routeChatIntent({ message, mode: 'analyze' }, model, new AbortController().signal);
+    assert.equal(decision.source, 'router-agent', message);
+    assert.equal(model.requests.length, 2, 'No regex veto or semantic correction for object-scoped negation.');
+    assert.equal(decision.requiresSearch, true, message);
+    assert.equal(enforceChatRouteSafety(decision, { message, mode: 'analyze' }).requiresSearch, true, message);
+    assert.equal(fallbackChatRoute({ message, mode: 'analyze' }).requiresSearch, true, message);
+  }
+  for (const message of ['不要搜索天气。', '不要搜索“天气”。', "Don't search for weather.", 'Do not search for "weather".']) {
+    assert.equal(explicitlyDisablesRetrieval(message), false, 'A local object prohibition is not global permission revocation.');
+  }
 });

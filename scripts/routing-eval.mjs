@@ -15,7 +15,9 @@ const cases = [
 ];
 const results = [];
 let priorDecision;
-for (const item of cases) {
+const requestedRepeats = Number(process.env.QA_ROUTING_REPEATS ?? 1);
+if (!Number.isInteger(requestedRepeats) || requestedRepeats < 1 || requestedRepeats > 10) throw new Error('QA_ROUTING_REPEATS must be an integer from 1 to 10.');
+for (let round = 1; round <= requestedRepeats; round += 1) for (const item of cases) {
   const startedAt = Date.now();
   try {
     const currentGraph = item.followUp && priorDecision ? {
@@ -39,21 +41,34 @@ for (const item of cases) {
         && steps.every((step) => step.dependsOn.every((id) => ids.has(id) && id !== step.id));
     const searchActive = active.some((id) => ['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id));
     const calls = payload?.diagnostics?.calls;
-    const measured = payload?.diagnostics?.scope === 'server-route-request' && Array.isArray(calls) && calls.length > 0;
+    const routingSummary = payload?.diagnostics?.summary;
+    const measured = payload?.diagnostics?.scope === 'server-route-request' && Array.isArray(calls) && calls.length > 0
+      && typeof routingSummary?.firstPassValid === 'boolean' && Array.isArray(payload?.diagnostics?.events)
+      && calls.length <= 3 && calls.filter((call) => call.purpose === 'repair').length <= 1;
     const passed = response.ok && decision?.source === 'router-agent' && item.routes.includes(decision.workflowRoute)
       && active.length > 0 && routeShapeValid && workflow === (decision.workflowRoute !== 'direct')
       && (!item.search || searchActive && decision.requiresSearch) && (!item.noSearch || !searchActive && !decision.requiresSearch) && measured;
-    results.push({ name: item.name, expectedRoutes: item.routes, actual: decision?.workflowRoute ?? 'error', source: decision?.source ?? 'none',
+    results.push({ name: item.name, round, expectedRoutes: item.routes, actual: decision?.workflowRoute ?? 'error', source: decision?.source ?? 'none',
       intent: decision?.intent ?? 'none', activeAgentIds: active, selectedSkillIds: decision?.skillIds, steps,
       diagnostics: payload?.diagnostics ?? null, durationMs: Date.now() - startedAt, passed });
     if (item.name === 'compound-official-comparison') priorDecision = decision;
-  } catch (error) { results.push({ name: item.name, passed: false, source: 'unavailable', durationMs: Date.now() - startedAt,
+  } catch (error) { results.push({ name: item.name, round, passed: false, source: 'unavailable', durationMs: Date.now() - startedAt,
     error: error instanceof Error ? error.name : 'Routing request failed' }); }
 }
 const passed = results.filter((item) => item.passed).length;
 const generatedAt = new Date().toISOString();
-const report = { generatedAt, methodology: 'Single attempt per live routing case; no automatic case retries. Model quality and end-to-end task completion are evaluated separately.',
+const percentile = (values, proportion) => values.length ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * proportion) - 1] : null;
+const summaries = results.map((result) => result.diagnostics?.summary).filter(Boolean);
+const tokenSum = (field) => summaries.length === results.length && summaries.every((summary) => typeof summary[field] === 'number') ? summaries.reduce((total, summary) => total + summary[field], 0) : null;
+const report = { generatedAt, methodology: 'One HTTP attempt per live case per round; rounds are independent observations, never retries that replace failures. At most one server-side semantic correction is reported separately. Model quality and end-to-end completion are separate evaluations.',
+  rounds: requestedRepeats,
   passed, total: results.length, firstAttemptPassRate: passed / results.length,
+  firstPassPlanValidRate: summaries.filter((summary) => summary.firstPassValid).length / results.length,
+  correctionRate: summaries.filter((summary) => summary.repaired).length / results.length,
+  correctionRecovered: summaries.filter((summary) => summary.repaired && !summary.fallback).length,
+  latencyMs: { p50: percentile(results.map((result) => result.durationMs), 0.5), p95: percentile(results.map((result) => result.durationMs), 0.95) },
+  totalTokens: tokenSum('totalTokens'), repairTokens: tokenSum('repairTokens'),
+  repairDurationMs: summaries.reduce((total, summary) => total + summary.repairDurationMs, 0),
   fallbackRate: results.filter((item) => item.source === 'deterministic-fallback').length / results.length,
   unavailableRate: results.filter((item) => item.source === 'unavailable').length / results.length,
   controlPlane: 'router-agent + scheduler-agent', results };

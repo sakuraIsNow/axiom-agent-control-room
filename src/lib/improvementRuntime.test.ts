@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   createImprovement, getImprovement, ImprovementApiError, listImprovements, listImprovementSources,
   prepareImprovementTrial, updateImprovement,
+  cancelImprovementEvaluation, getImprovementEvaluationSuite, listImprovementEvaluations, startImprovementEvaluation,
 } from './improvementRuntime';
 
 test('improvement reads use their own endpoints and preserve the abort signal', async (context) => {
@@ -53,7 +54,26 @@ test('improvement conflicts remain distinguishable from missing access and inval
 
 test('invalid successful envelopes are reported before they can corrupt UI state', async (context) => {
   context.mock.method(globalThis, 'fetch', async () => Response.json({}));
-  for (const operation of [listImprovementSources, listImprovements, () => getImprovement('p1'), () => prepareImprovementTrial('p1', 1)]) {
+  for (const operation of [listImprovementSources, listImprovements, () => getImprovement('p1'), () => prepareImprovementTrial('p1', 1),
+    getImprovementEvaluationSuite, () => listImprovementEvaluations('p1'), () => startImprovementEvaluation('p1', 1, 'request-key'), () => cancelImprovementEvaluation('p1', 'e1', 1)]) {
     await assert.rejects(operation(), (error: unknown) => error instanceof ImprovementApiError && error.status === 502);
   }
+});
+
+test('comparison API preserves identity paths, idempotency, revision and cancellation signals', async (context) => {
+  const calls: Array<{ url: string; options?: RequestInit }> = [];
+  const signal = new AbortController().signal;
+  context.mock.method(globalThis, 'fetch', async (url: string, options?: RequestInit) => {
+    calls.push({ url, options });
+    return Response.json(url.endsWith('/evaluation-suite') ? { suite: { id: 'suite-v1' } }
+      : options?.method === 'POST' ? { evaluation: { id: 'eval-1' } } : { evaluations: [] });
+  });
+  await getImprovementEvaluationSuite(signal);
+  await listImprovementEvaluations('proposal/1', signal);
+  await startImprovementEvaluation('proposal/1', 2, 'stable-request-key', signal);
+  await cancelImprovementEvaluation('proposal/1', 'eval/1', 3, signal);
+  assert.deepEqual(calls.map((call) => call.url), ['/api/improvements/evaluation-suite', '/api/improvements/proposal%2F1/evaluations', '/api/improvements/proposal%2F1/evaluations', '/api/improvements/proposal%2F1/evaluations/eval%2F1/cancel']);
+  assert.deepEqual(JSON.parse(String(calls[2].options?.body)), { revision: 2, idempotencyKey: 'stable-request-key' });
+  assert.deepEqual(JSON.parse(String(calls[3].options?.body)), { revision: 3 });
+  assert.ok(calls.every((call) => call.options?.signal === signal));
 });

@@ -5,6 +5,7 @@ import {
   type ImprovementProposal, type ImprovementSource, type ImprovementTrialDraft,
 } from '../../lib/improvementRuntime';
 import { useUiLanguage } from '../../lib/uiLanguage';
+import { ImprovementEvaluationPanel } from './ImprovementEvaluationPanel';
 import '../../styles/improvements.css';
 
 const statusText = { generating: '正在复盘', draft: '待查看', accepted: '已保存', dismissed: '已忽略', failed: '未完成' } as const;
@@ -168,7 +169,7 @@ export function ImprovementWorkspace({ onPrepareConversation, hasExistingDraft =
 
   return <div className="improvement-workspace" data-testid="improvement-workspace" data-i18n-ignore="true">
     <header className="improvement-header">
-      <div><h1>{t('任务改进')}</h1><p>{t('仅生成建议，不修改现有任务。效果尚未验证。')}</p></div>
+      <div><h1>{t('任务改进')}</h1><p>{t('复盘、对照，再决定是否试用。现有任务保持不变。')}</p></div>
       <button type="button" className="improvement-button" aria-label={t('刷新改进记录')} disabled={loading || busy} onClick={() => { if (lifetime.current) void load(lifetime.current.signal); }}><RefreshCw size={16} />{t('刷新')}</button>
     </header>
     {error && <div className="improvement-error" role="alert"><span>{t(error)}</span><button type="button" aria-label={t('关闭提示')} onClick={() => setError('')}><X size={16} /></button></div>}
@@ -206,6 +207,7 @@ export function ImprovementWorkspace({ onPrepareConversation, hasExistingDraft =
             <section className="improvement-changes"><h3>{t('Agent 提出的建议')}</h3>{analysis.changes.map((change, index) => <div key={index}><span>{t(targetText[change.target])}</span><strong>{change.suggestion}</strong><p>{change.reason}</p></div>)}</section>
             <details className="improvement-tests"><summary>{t('建议测试')} <span>{t('未执行')}</span></summary>{analysis.validationCases.map((test, index) => <div key={index}><strong>{test.input}</strong><p>{t('预期行为')}：{test.expectedBehavior}</p></div>)}</details>
             {analysis.risks.length > 0 && <details className="improvement-tests"><summary>{t('需要留意')}</summary><ul>{analysis.risks.map((risk, index) => <li key={index}>{risk}</li>)}</ul></details>}
+            <ImprovementEvaluationPanel key={selected.id} proposal={selected} disabled={busy} />
             <div className="improvement-actions">
               {selected.status === 'dismissed' && <button type="button" className="improvement-button primary" disabled={busy} onClick={() => changeStatus('accepted')}><Save size={16} />{t('保存建议')}</button>}
               {selected.status === 'draft' && <><button type="button" className="improvement-button primary" disabled={busy} onClick={() => changeStatus('accepted')}><Save size={16} />{t('保存建议')}</button><button type="button" className="improvement-button" disabled={busy} onClick={() => changeStatus('dismissed')}>{t('忽略建议')}</button></>}

@@ -31,6 +31,13 @@ The interface opens in English by default. Use the language control in the upper
 
 This release builds on the existing Chat, Agent Graph, Nexus, and Mini Apps. It does not replace their execution logic or claim that model-generated suggestions are proven improvements.
 
+### 🔬 Next-iteration development (after rc.8)
+
+- **More reliable Agent assignments.** Router and Scheduler distinguish registered Skills from descriptive labels, validate their plan, and share one bounded correction attempt. Diagnostics separate a successful model response from a valid plan, including correction time and Token usage.
+- **Compare a suggestion before trying it.** Task improvements can run the same model on five independent fixed text scenarios, with and without the suggestion. Inspect checks, outputs, time and Token usage, stop a comparison, and return to its saved history.
+
+Comparisons use synthetic evidence and simulated contracts—not live search, real plugin changes, or Nexus execution. A better score only applies to those cases; no suggestion is automatically applied. Account login and private spaces are not included in this batch. The published version above remains rc.8 until the next release is finalized.
+
 ## 🏆 Why use it?
 
 - 🚦 **Use the team the task needs.** Each turn is routed by difficulty. A follow-up can reuse work, skip unneeded Agents, or add a new specialist.
@@ -55,7 +62,7 @@ This release builds on the existing Chat, Agent Graph, Nexus, and Mini Apps. It 
 | Tools and capability packs | Use custom Agents, templates, MCP/OpenAPI tools, and seven scoped capability packs | Credentials required for authenticated services |
 | Feishu collaboration | Read documents, calendars, and group messages; send messages after approval | Feishu custom app |
 | Recovery and operations | Inspect Token usage, cost, queue wait, leases, model/tool health, alerts, Artifacts, and delivery evidence | Built in; external backends are optional |
-| Task improvements · controlled RSI | Review a finished task, save improvement suggestions, and prepare a new chat to try them | Source task's text model; suggestions are not automatically applied or verified |
+| Task improvements · controlled RSI | Review finished work, save suggestions, compare fixed cases, and prepare a new chat to try them | Source task's text model; comparison is user-triggered, usage may be charged, and suggestions are never automatically applied |
 
 An integration shown in the UI is not automatically considered healthy. The system status panel probes the active model, database, sandbox, memory, storage, and optional services. Missing dependencies are shown as degraded or unavailable.
 
@@ -66,6 +73,8 @@ An integration shown in the UI is not automatically considered healthy. The syst
 Open **Task improvements**, choose a finished task, and ask what could work better. Axiom reviews its recorded result and your feedback, then suggests changes and checks worth trying. Save a useful suggestion and bring it into a **new chat draft**—you decide what to send. A later task can build on the previous suggestion for another round of review.
 
 This first, controlled RSI stage never rewrites a running Graph, publishes a plugin, changes permissions, or silently updates your memory. Saving a suggestion does **not** mean it has passed a quality comparison. See [scope, usage, and safeguards](docs/controlled-rsi.md).
+
+In the post-rc.8 source, **Compare before deciding** adds paired checks using supplied facts and reference IDs. The cases are separate from the original task and the model's proposed tests. Unknown usage stays unknown; money and human intervention are not measured. This public, reusable suite is not a permanently blind benchmark or proof of general improvement.
 
 Included in **v2.3.0-rc.8**. A review uses the source task's configured text model and may incur model usage. It does not execute tools or automatically test, publish, or apply the suggestion. If a new draft would replace unsent text or attachments, Axiom asks you to keep those first. See the [rc.8 acceptance record](docs/rc8-release-acceptance-20260920.md) for release checks and their limits.
 

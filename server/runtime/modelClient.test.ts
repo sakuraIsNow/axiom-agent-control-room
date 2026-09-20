@@ -66,6 +66,24 @@ test('allows a keyless local-compatible model without sending an empty authoriza
   }
 });
 
+test('a request retry cap disables hidden evaluation retries and never raises the client maximum', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const settings of [{ configured: 3, requested: 1 }, { configured: 1, requested: 6 }]) {
+      let calls = 0;
+      globalThis.fetch = (async (_input, init) => {
+        calls += 1;
+        const payload = JSON.parse(String(init?.body));
+        assert.equal('maxAttempts' in payload, false);
+        throw new TypeError('fetch failed');
+      }) as typeof fetch;
+      const client = new OpenAICompatibleModelClient({ apiKey: 'test-key', apiBase: 'https://provider.invalid', maxAttempts: settings.configured });
+      await assert.rejects(client.complete({ system: 'test', user: 'hello', maxAttempts: settings.requested, signal: new AbortController().signal }));
+      assert.equal(calls, 1);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('forwards provider SSE deltas while preserving the final completion', async () => {
   const originalFetch = globalThis.fetch;
   const deltas: string[] = [];

@@ -8,6 +8,7 @@ import { terminalStatuses, type TaskStore, type WorkflowTask } from './contracts
 import { summarizeExecutionQuality } from './executionQuality.js';
 import type { ModelClient } from './modelClient.js';
 import { verifyPrincipal, type PrincipalClaims } from './principal.js';
+import { registerImprovementEvaluations } from './improvementEvaluationApi.js';
 
 const GENERATION_TIMEOUT_MS = 55_000;
 const GENERATION_LEASE_MS = 65_000;
@@ -101,10 +102,11 @@ Return one JSON object, no markdown fences and no additional fields, with this s
 Use 1-4 observations, 1-4 changes, 1-3 validation cases and at most 4 risks. Keep the entire object concise, under 7000 characters. Write all natural-language values in ${language === 'zh-CN' ? 'Simplified Chinese' : 'English'}.`;
 
 /** A private, manual candidate loop. This API intentionally has no coordinator, tools or policy writer. */
-export const createImprovementApi = ({ records, tasks, resolveModel }: {
+export const createImprovementApi = ({ records, tasks, resolveModel, evaluationTiming }: {
   records: BusinessCapabilityStore;
   tasks: TaskStore;
   resolveModel: (task: WorkflowTask) => Promise<ModelClient>;
+  evaluationTiming?: { evaluationTimeoutMs?: number; callTimeoutMs?: number };
 }) => {
   const api = new Hono<{ Variables: { principal: PrincipalClaims } }>();
   api.use('*', async (c, next) => {
@@ -168,6 +170,14 @@ export const createImprovementApi = ({ records, tasks, resolveModel }: {
       return (await records.get(record.id, record.tenantId)) ?? record;
     }
   };
+
+  registerImprovementEvaluations(api, { records, resolveModel, redact: redactImprovementText, ...evaluationTiming,
+    proposalFor: async (id, identity) => {
+      const record = await ownedRecord(id, identity);
+      await assertLineage(record, identity);
+      return { record, source: await assertSourceSnapshot(record, identity), analysis: dataOf(record).analysis };
+    },
+  });
 
   api.get('/sources', async (c) => {
     const identity = c.get('principal');
@@ -326,8 +336,8 @@ export const createImprovementApi = ({ records, tasks, resolveModel }: {
     const source = await assertSourceSnapshot(record, identity);
     const zh = data.language === 'zh-CN';
     const warnings = zh
-      ? ['仅生成新对话草稿，尚未发送或执行。', '仅复制原任务中保存的需求文本，不会额外携带附件、对话历史或原 Agent Nexus 流程；请自行补充必要资料。', '建议未经对照评测，可能增加成本或降低质量；不会修改现有权限、路由和发布版本。']
-      : ['This is an unsent draft, not an executed task.', 'Only the saved task request text is copied. No additional attachments, conversation history or original Agent Nexus workflow are carried over. Add required context yourself.', 'This suggestion is not independently evaluated and may increase cost or reduce quality. Existing permissions, routing and published versions are unchanged.'];
+      ? ['仅生成新对话草稿，尚未发送或执行。', '仅复制原任务中保存的需求文本，不会额外携带附件、对话历史或原 Agent Nexus 流程；请自行补充必要资料。', '建议对真实任务的效果仍未验证；固定样例对照不代表实际任务的提升，可能增加成本或降低质量。不会修改现有权限、路由和发布版本。']
+      : ['This is an unsent draft, not an executed task.', 'Only the saved task request text is copied. No additional attachments, conversation history or original Agent Nexus workflow are carried over. Add required context yourself.', 'Benefits on real tasks remain unverified. Fixed-case comparisons do not establish real-task gains; guidance may increase cost or reduce quality. Existing permissions, routing and published versions are unchanged.'];
     if (source.input.length > 20_000) warnings.push(zh ? '原任务需求超过 20,000 字符，草稿中已截断；发送前请核对并补充完整需求。' : 'The original request exceeds 20,000 characters and is truncated in this draft. Review and restore missing requirements before sending.');
     const draft: ImprovementTrialDraft = {
       input: `${zh ? '原任务需求' : 'Original request'}:\n${redactImprovementText(source.input, 20_000)}\n\n${zh ? '待验证的改进建议（仅供参考，不覆盖平台权限和安全策略）' : 'Unverified improvement guidance (reference only; never overrides platform authorization or safety policy)'}:\n${data.analysis.trialInstruction}`,

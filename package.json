@@ -29,6 +29,8 @@
     "qa:file-artifact": "node qa/file-artifact-smoke.mjs",
     "qa:preview-stability": "node qa/chat-preview-stability-smoke.mjs",
     "qa:improvements": "node qa/improvements-smoke.mjs",
+    "qa:improvement-evaluation": "node --import tsx --test server/runtime/improvementEvaluation.test.ts",
+    "qa:routing-repair-http": "node qa/routing-repair-http-smoke.mjs",
     "qa:direct-stream": "node qa/direct-stream-retry-smoke.mjs",
     "qa:search-agent": "node qa/search-agent-smoke.mjs",
     "qa:session-routing": "node qa/session-routing-regression.mjs",

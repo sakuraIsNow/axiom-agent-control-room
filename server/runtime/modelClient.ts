@@ -4,6 +4,8 @@ import { prepareDeepSeekImageFiles, type DeepSeekImagePart } from './deepseekFil
 export type ModelCompletionRequest = {
   model?: string;
   maxTokens?: number;
+  /** Internal per-call retry cap; may reduce but never increase the configured maximum. */
+  maxAttempts?: number;
   system: string;
   user: string;
   /** Optional multimodal user content. The string field remains the compatible fallback. */
@@ -123,8 +125,11 @@ export class OpenAICompatibleModelClient implements ModelClient {
     if (!this.apiKey && !this.apiKeyOptional) throw new Error('Agent runtime model API key is not configured.');
     const startedAt = Date.now();
     let lastError: Error | undefined;
+    const maxAttempts = typeof request.maxAttempts === 'number' && Number.isFinite(request.maxAttempts)
+      ? Math.min(this.maxAttempts, Math.max(1, Math.floor(request.maxAttempts)))
+      : this.maxAttempts;
 
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (request.signal.aborted) throw request.signal.reason ?? new DOMException('Aborted', 'AbortError');
       try {
         const requestedModel = request.model ?? this.model;
@@ -360,7 +365,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
           || status === 409
           || status === 429
           || (status !== undefined && status >= 500);
-        if (!retryable || attempt >= this.maxAttempts) break;
+        if (!retryable || attempt >= maxAttempts) break;
         await request.onRetry?.(attempt + 1);
         await delay(Math.min(4_000, 350 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 180)), request.signal);
       }

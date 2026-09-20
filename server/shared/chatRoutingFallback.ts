@@ -87,6 +87,29 @@ const exportDecision = (text: string): ReportExportDecision | undefined => {
   return { format, scope };
 };
 
+/** A narrow negative permission guard, not a semantic task classifier. The
+ * current turn can prohibit another retrieval even if the previous Graph used
+ * search. Keep this shared by browser fallback and server-side validation. */
+export const explicitlyDisablesRetrieval = (text: string): boolean => {
+  // Quoted phrases/code are reference data, not the user's instruction. Keep
+  // apostrophes inside words (don't) intact when stripping single-quoted topics.
+  // Retain an inert placeholder: deleting a quoted object entirely would turn
+  // "don't search for 'weather'" into an apparent global prohibition.
+  const instruction = text.replace(/```[\s\S]*?```|`[^`\r\n]*`|“[^”]*”|「[^」]*」|『[^』]*』|‘[^’]*’|"[^"\r\n]*"/g, ' [quoted] ')
+    .replace(/(?<![A-Za-z0-9])'[^'\r\n]*'(?![A-Za-z0-9])/g, ' [quoted] ');
+  const clauses = instruction.split(/[，。；！？,;.!?\r\n]+/).map((clause) => clause.trim()).filter(Boolean);
+  const globalProhibition = (clause: string) =>
+    /^(?:(?:请你|本轮|这轮|这次|此次|现在|接下来|请|先|也)\s*)*(?:不要|无需|不再|不用|不必|禁止|停止)(?:\s*(?:再次|再|重新|继续|进行|任何|额外))*\s*(?:联网(?:搜索|检索|查询)?|上网(?:搜索|检索|查询)?|搜索|检索|查找|查询)(?:了|吧|即可|就行)?$/i.test(clause)
+    || /^(?:please\s+)?(?:do\s+not|don['’]t|no\s+longer|no\s+need\s+to|without|stop|avoid|no)\s+(?:(?:any|further|additional|new|another|online|web)\s+)*(?:re[- ]?)?(?:search(?:ing)?|brows(?:e|ing)|retriev(?:e|ing|al)|look(?:ing)?\s+up)(?:\s+(?:again|anymore|at\s+all|the\s+web|online|externally))*$/i.test(clause);
+  if (!clauses.some(globalProhibition)) return false;
+  // Do not resolve a local prohibition or a later countermand using a regex.
+  // A separate affirmative retrieval instruction leaves the decision to Router.
+  const affirmativeRetrieval = (clause: string) =>
+    /^(?:(?:但是|不过|改为|改成|而是|然后|现在|帮我|还是|需要|但|只|仅|请|再)\s*)*(?:联网|上网)?(?:搜索|检索|查询|查找|查一下|搜一下)\s*\S/i.test(clause)
+    || /^(?:(?:but|instead|only|please|now|then|still|just|rather)\s+)*(?:search|browse|retrieve|look\s+up)\b/i.test(clause);
+  return !clauses.some((clause) => !globalProhibition(clause) && affirmativeRetrieval(clause));
+};
+
 /** Evidence inputs and requested outputs are additive, and only this turn supplies requirements. */
 const requirementsFor = (text: string) => {
   const comparison = /(?:比较|对比|权衡|取舍|选型|决策|评估|\b(?:compare|comparison|trade.?offs?|recommend|decide|evaluate)\b)/i.test(text);
@@ -99,7 +122,7 @@ const requirementsFor = (text: string) => {
   const systemDesign = analysis && /(?:平台|系统|架构|服务|数据流|\b(?:platform|system|architecture|service)\b)/i.test(text);
   const roleCount = [/(?:搜索|研究|检索|search|research(?:er)?)\s*agent/i, /(?:架构|分析|方案|analyst|architect(?:ure)?)\s*agent/i, /(?:数据库|数据|database|db)\s*agent/i, /(?:实现|开发|builder|developer)\s*agent/i, /(?:审查|审核|reviewer|review)\b/i].filter((pattern) => pattern.test(text)).length;
   const explicitWorkflow = roleCount >= 2 && /(?:先由|再由|最后由|工作流|协作|first|then|finally|->)/i.test(text);
-  const noRetrieval = /(?:不要|无需|不再|不用)(?:再|进行)?(?:联网|搜索|检索)|\b(?:do not|don't|no longer|without)\s+(?:web\s+)?(?:search|browse|retriev)/i.test(text);
+  const noRetrieval = explicitlyDisablesRetrieval(text);
   const retrieval: Exclude<ChatIntent, 'task'> | undefined = noRetrieval ? undefined : /(?:论文|文献|期刊|学术|\b(?:arxiv|doi|papers?|literature|academic|journal)\b)/i.test(text) ? 'academic-search'
     : /(?:github|开源仓库|代码仓库|\b(?:repository|repo)\b)|(?:开源|open[ -]?source).{0,30}(?:agent|智能体|项目|框架|工具|仓库)/i.test(text) ? 'github-research'
       : /(?:天气|气温|预报|新闻|价格|股价|汇率|联网|上网|搜索|检索|查找|网页|最新|目前|现在|今天|实时|官方资料|\b(?:search|weather|forecast|news|price|current|latest|today|internet|official sources)\b)/i.test(text) ? 'web-search' : undefined;
@@ -175,7 +198,7 @@ export const fallbackChatRoute = (input: FallbackRouteInput): ChatRouteDecision 
   return {
     intent, execution: steps.length ? 'workflow' : 'gateway', agentRole: steps.length ? 'orchestrator' : activeAgentIds[0]!,
     workflowRoute: route, requiresSearch, reason, source: 'deterministic-fallback', skillIds: selectedSkillIds,
-    routingVersion: 'router-scheduler/fallback-v2', ...(reportExport ? { reportExport } : {}),
+    routingVersion: 'router-scheduler/fallback-v3', ...(reportExport ? { reportExport } : {}),
     router: { intent, taskKind, difficulty: route === 'full-workflow' ? 'hard' : route === 'team' ? 'moderate' : route === 'single-agent' ? 'easy' : 'trivial',
       requiresExternalFacts: requiresSearch, requiredCapabilities: unique([...activeAgentIds, ...attachments.map((item) => item.capability)]), candidateAgentIds: activeAgentIds,
       candidateSkillIds: selectedSkillIds, confidence: 0, rationale: reason, ...(reportExport ? { reportExport } : {}) },

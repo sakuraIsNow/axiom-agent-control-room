@@ -36,6 +36,7 @@ const checks = [
   ['生产构建', 'build'],
   ['多格式报告导出', 'qa:report-export'],
   ['复合路由故障降级', 'qa:routing-resilience'],
+  ['真实 HTTP 路由纠错与诊断', 'qa:routing-repair-http'],
   ['交付质量与执行效率', 'qa:execution-quality'],
   ['运行时 SSE 与 Artifact', 'qa:runtime'],
   ['聊天与多模态', 'qa:chat'],
@@ -51,6 +52,7 @@ const checks = [
   ['安全生成文件与对话预览', 'qa:file-artifact'],
   ['滚动、流式输出与预览状态稳定性', 'qa:preview-stability'],
   ['受控 RSI 建议与新对话草稿', 'qa:improvements'],
+  ['RSI 固定样例对照与故障边界', 'qa:improvement-evaluation'],
   ['审核后交付结果回填', 'qa:review-delivery'],
   ['执行中实时引导', 'qa:live-guidance'],
   ['检查点分支与合并', 'qa:checkpoint'],
@@ -99,7 +101,11 @@ const runOnce = (name, script, env = baseEnv) => new Promise((resolveResult) => 
 
 const run = async (name, script, env = baseEnv) => {
   const attempts = [];
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  // A failed live routing observation is evidence, not a transient to erase
+  // with a second whole-suite result. Use QA_ROUTING_REPEATS for explicit,
+  // separately retained observations; any failed case keeps this gate red.
+  const maxAttempts = script === 'qa:routing' ? 1 : 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     // A completed model task can leave short-lived worker cleanup in flight.
     // Retry one time so the gate distinguishes that transient from a stable
     // contract failure while retaining both outcomes in the report.
@@ -107,7 +113,7 @@ const run = async (name, script, env = baseEnv) => {
     const result = await runOnce(name, script, env);
     attempts.push({ attempt, ...result });
     if (result.status === 'passed') return { ...result, attempts };
-    if (attempt < 2) await new Promise((resolveResult) => setTimeout(resolveResult, 1_000));
+    if (attempt < maxAttempts) await new Promise((resolveResult) => setTimeout(resolveResult, 1_000));
   }
   const last = attempts.at(-1);
   return { ...last, attempts };

@@ -1,7 +1,7 @@
-import type { ImprovementProposal, ImprovementSource, ImprovementTrialDraft } from '../../server/shared/improvement';
+import type { ImprovementEvaluation, ImprovementEvaluationSuite, ImprovementProposal, ImprovementSource, ImprovementTrialDraft } from '../../server/shared/improvement';
 import type { UiLanguage } from './uiLanguage';
 
-export type { ImprovementProposal, ImprovementSource, ImprovementTrialDraft };
+export type { ImprovementEvaluation, ImprovementEvaluationSuite, ImprovementProposal, ImprovementSource, ImprovementTrialDraft };
 
 export class ImprovementApiError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -65,4 +65,33 @@ export async function prepareImprovementTrial(id: string, revision: number, sign
     throw new ImprovementApiError(502, 'Invalid improvement trial response.');
   }
   return result;
+}
+
+export async function getImprovementEvaluationSuite(signal?: AbortSignal) {
+  const result = await request<{ suite: ImprovementEvaluationSuite }>('/evaluation-suite', { signal });
+  if (!result.suite || typeof result.suite.id !== 'string') throw new ImprovementApiError(502, 'Invalid evaluation suite response.');
+  return result.suite;
+}
+
+export async function listImprovementEvaluations(id: string, signal?: AbortSignal) {
+  const result = await request<{ evaluations: ImprovementEvaluation[] }>(`/${encodeURIComponent(id)}/evaluations`, { signal });
+  if (!Array.isArray(result.evaluations)) throw new ImprovementApiError(502, 'Invalid evaluation history response.');
+  return result.evaluations;
+}
+
+const evaluationFrom = (result: { evaluation: ImprovementEvaluation }) => {
+  if (!result.evaluation || typeof result.evaluation.id !== 'string') throw new ImprovementApiError(502, 'Invalid evaluation response.');
+  return result.evaluation;
+};
+
+export async function startImprovementEvaluation(id: string, revision: number, idempotencyKey: string, signal?: AbortSignal) {
+  return evaluationFrom(await request<{ evaluation: ImprovementEvaluation }>(`/${encodeURIComponent(id)}/evaluations`, {
+    method: 'POST', body: JSON.stringify({ revision, idempotencyKey }), signal,
+  }));
+}
+
+export async function cancelImprovementEvaluation(id: string, evaluationId: string, revision: number, signal?: AbortSignal) {
+  return evaluationFrom(await request<{ evaluation: ImprovementEvaluation }>(`/${encodeURIComponent(id)}/evaluations/${encodeURIComponent(evaluationId)}/cancel`, {
+    method: 'POST', body: JSON.stringify({ revision }), signal,
+  }));
 }

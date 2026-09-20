@@ -1,8 +1,9 @@
 import type { AgentGraph, AgentMode, ChatMessage, ChatRouteDecision, FileAttachment, ImageAttachment, TextProviderSettings } from '../types';
 import { fallbackChatRoute } from './chatRoutingFallback';
 import { chatRouteDecisionSchema } from '../../server/shared/chatRoutingSchema';
+import { routingClientBudgetMs } from '../../server/shared/routingBudget';
 
-const routeTimeoutMs = 12_000;
+const routeTimeoutMs = routingClientBudgetMs;
 const routeMaxAttempts = 2;
 const retryableStatus = (status: number) => status === 408 || status === 425 || status === 429 || status >= 500;
 
@@ -56,21 +57,25 @@ export async function routeChatMessage(
         responsePromise,
         new Promise<Response>((_, reject) => timeoutController.signal.addEventListener('abort', () => reject(timeoutController.signal.reason), { once: true })),
       ]);
-      const body = await response.json().catch(() => null) as { decision?: ChatRouteDecision; error?: string } | null;
+      const body = await response.json().catch(() => null) as { decision?: ChatRouteDecision; error?: string; code?: string } | null;
+      if ([401, 403].includes(response.status) || body?.code === 'ROUTING_CAPABILITY_UNAVAILABLE') {
+        throw Object.assign(new Error(body?.error ?? 'Routing is not authorized.'), { forbidden: true });
+      }
       if (!response.ok || !body?.decision) {
-        throw Object.assign(new Error(body?.error ?? `Semantic routing returned HTTP ${response.status}.`), { retryable: retryableStatus(response.status) });
+        throw Object.assign(new Error(body?.error ?? `Semantic routing returned HTTP ${response.status}.`), { retryable: body?.code !== 'ROUTING_INTERRUPTED' && retryableStatus(response.status) });
       }
       const decision = chatRouteDecisionSchema.safeParse(body.decision);
       if (!decision.success) throw Object.assign(new Error('Routing returned an invalid decision.'), { retryable: false });
       return decision.data as ChatRouteDecision;
     } catch (error) {
+      if ((error as { forbidden?: boolean }).forbidden) throw error;
       if (isAbort(error, signal)) {
         if (signal.aborted) throw signal.reason ?? error;
-        if (attempt === routeMaxAttempts) break;
+        break;
       } else {
-        // Network failures and timeouts are transient by default. HTTP
-        // responses mark non-retryable client errors explicitly above.
-        const retryable = (error as { retryable?: boolean }).retryable ?? true;
+        // An uncertain network/timeout outcome may still be executing server-side.
+        // Retry only an explicit retryable response, never launch a duplicate route.
+        const retryable = (error as { retryable?: boolean }).retryable ?? false;
         if (attempt === routeMaxAttempts || !retryable) break;
       }
       if (attempt < routeMaxAttempts) await wait(150 * attempt, signal);

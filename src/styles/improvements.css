@@ -73,6 +73,32 @@
 .improvement-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid rgb(216 120 125 / 35%); border-radius: 8px; padding: 12px 14px; color: #ffd7da; background: rgb(95 25 31 / 25%); font-size: 14px; }
 .improvement-error button { display: grid; place-items: center; border: 0; background: transparent; color: inherit; cursor: pointer; }
 .improvement-spinning { animation: improvement-spin 1.3s linear infinite; }
+.improvement-evaluation { margin-top: 20px; padding: 22px 0; border-top: 1px solid var(--dash-line-strong); display: grid; gap: 14px; }
+.improvement-evaluation-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+.improvement-evaluation-heading h3, .improvement-evaluation-progress > span { display: flex; align-items: center; gap: 9px; margin: 0; }
+.improvement-evaluation-heading > strong { font-size: 17px; font-weight: 550; }
+.improvement-evaluation-start { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.improvement-evaluation-start label { display: flex; align-items: flex-start; gap: 9px; flex: 1 1 220px; font-size: 14px; color: var(--dash-soft); line-height: 1.6; }
+.improvement-evaluation-start input { margin-top: 4px; width: 17px; height: 17px; flex-shrink: 0; accent-color: var(--dash-accent); }
+.improvement-evaluation-progress { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.improvement-evaluation-progress progress { width: 100%; height: 5px; accent-color: var(--dash-accent); }
+.improvement-evaluation-history { display: grid; gap: 8px; font-size: 13px; color: var(--dash-muted); }
+.improvement-evaluation-result { display: grid; gap: 14px; }
+.improvement-evaluation-result[data-outcome="improved"] > .improvement-evaluation-heading > strong { color: var(--dash-accent); }
+.improvement-evaluation-result[data-outcome="regressed"] > .improvement-evaluation-heading > strong { color: #e6ae8a; }
+.improvement-comparison-scroll { overflow-x: auto; border: 1px solid var(--dash-line); border-radius: 8px; }
+.improvement-comparison { border-collapse: collapse; width: 100%; text-align: left; font-size: 14px; font-variant-numeric: tabular-nums; }
+.improvement-comparison caption { text-align: left; padding: 14px; color: var(--dash-muted); font-size: 13px; }
+.improvement-comparison th, .improvement-comparison td { padding: 12px 14px; border-top: 1px solid var(--dash-line); line-height: 1.5; }
+.improvement-comparison th { color: var(--dash-soft); font-weight: 500; }
+.improvement-comparison thead { background: rgb(255 255 255 / 3%); }
+.improvement-evaluation .improvement-tests { padding: 12px 0; }
+.improvement-evaluation-case h4 { margin: 0 0 8px; font-size: 15px; }
+.improvement-evaluation-arms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 14px; }
+.improvement-evaluation-arms > div { min-width: 0; }
+.improvement-evaluation-arms li { overflow-wrap: anywhere; }
+.improvement-evaluation-arms pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font-size: 13px; line-height: 1.7; color: var(--dash-soft); }
+@media (max-width: 700px) { .improvement-evaluation-arms { grid-template-columns: minmax(0, 1fr); } .improvement-comparison th, .improvement-comparison td { padding: 10px 8px; } }
 @keyframes improvement-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .improvement-spinning { animation: none; } }
 @media (max-width: 1200px) { .dash-layout.improvements-active { grid-template-columns: 156px minmax(0, 1fr); } .improvement-layout { grid-template-columns: minmax(235px, .4fr) minmax(0, 1fr); gap: 12px; } .improvement-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

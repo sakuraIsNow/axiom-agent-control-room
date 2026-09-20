@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { chatRouteDecisionSchema, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute } from '../server/runtime/chatRouter.ts';
+import { chatRouteDecisionSchema, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, summarizeRoutingDiagnostics, workflowPlanFromChatRoute } from '../server/runtime/chatRouter.ts';
 import { fallbackChatRoute as browserFallback } from '../src/lib/chatRoutingFallback.ts';
 import { routeChatMessage } from '../src/lib/chatRouting.ts';
 
@@ -22,6 +22,7 @@ const cases = [
   { id: 'capability-question', message: '你有联网搜索的能力吗', mode: 'analyze', intent: 'agent-registry', roles: ['registry-agent'], search: false, direct: true, noSkills: true },
   { id: 'turn-search-to-greeting', message: '谢谢', mode: 'analyze', intent: 'conversation', roles: ['direct-responder'], search: false, direct: true, noSkills: true, currentGraph: previousGraph },
   { id: 'turn-search-to-summary', message: '用一句话总结刚才的结论', mode: 'analyze', roles: ['direct-responder'], search: false, direct: true, noSkills: true, currentGraph: previousGraph },
+  { id: 'turn-prohibit-repeat-search', message: '不要重新搜索，仅把上一轮结论整理成三个要点，不要新增事实。', mode: 'analyze', roles: ['direct-responder'], search: false, direct: true, noSkills: true, currentGraph: previousGraph },
   { id: 'turn-stop-search', message: '本轮不再检索，只根据已有结论给出选型方案。', mode: 'decide', roles: ['researcher', 'analyst'], dependencies: [['researcher', 'analyst']], search: false, currentGraph: previousGraph },
   { id: 'turn-new-search', message: '查询今天北京天气', mode: 'analyze', intent: 'web-search', roles: ['search-agent'], search: true, direct: true, currentGraph: previousGraph },
   { id: 'mixed-attachments', message: 'Analyze these inputs.', mode: 'analyze', roles: ['vision-agent', 'document-agent'], search: false, attachments: [image, document], parallelInputs: true },
@@ -95,37 +96,57 @@ const validate = (decision, item, normal) => {
   }
 };
 
-const modes = ['normal', 'router-timeout', 'router-unavailable', 'router-bad-response', 'scheduler-timeout', 'scheduler-unavailable', 'scheduler-bad-response'];
+const modes = ['normal', 'router-timeout', 'router-unavailable', 'router-bad-response', 'scheduler-timeout', 'scheduler-unavailable', 'scheduler-bad-response',
+  'router-repair-success', 'scheduler-capability-repair-success', 'scheduler-candidate-repair-success', 'scheduler-dependency-repair-success'];
 const results = [];
 for (const item of cases) for (const fault of modes) {
   const started = performance.now();
   const outputs = modelOutput(item);
   let modelCalls = 0;
   let fallbackNotifications = 0;
+  const diagnostics = [];
+  const measurements = [];
   const input = inputFor(item);
   let decision;
   try {
-    decision = await routeChatIntent({ ...input, onFallback: () => { fallbackNotifications += 1; } }, {
+    decision = await routeChatIntent({ ...input, onFallback: () => { fallbackNotifications += 1; }, onDiagnostic: (event) => diagnostics.push(event), onModelCall: (call) => measurements.push(call) }, {
       model: 'deterministic-routing-fixture',
       complete: async (request) => {
-        const stage = modelCalls++ === 0 ? 'router' : 'scheduler';
+        modelCalls += 1;
+        const stage = request.system.startsWith('You are the Router Agent') ? 'router' : 'scheduler';
         const payload = JSON.parse(request.user);
         assert.equal(payload.latestUserTurn, item.message);
+        assert.ok(Array.isArray(payload.selectionContract.selectableAgentIds));
+        assert.ok(Array.isArray(payload.selectionContract.selectableSkillIds));
         if (fault === `${stage}-timeout`) throw new DOMException('Injected route timeout', 'TimeoutError');
         if (fault === `${stage}-unavailable`) throw Object.assign(new Error('Injected provider unavailable'), { status: 503 });
-        return { content: fault === `${stage}-bad-response` ? '{"broken":' : JSON.stringify(outputs[stage === 'router' ? 0 : 1]), attempts: 1, durationMs: 1 };
+        const output = structuredClone(outputs[stage === 'router' ? 0 : 1]);
+        if (!payload.correction && fault === 'router-repair-success' && stage === 'router') return { content: '{"broken":', attempts: 1, durationMs: 1 };
+        if (!payload.correction && stage === 'scheduler') {
+          if (fault === 'scheduler-capability-repair-success') output.selectedSkillIds = ['tradeoffs', 'risk-analysis'];
+          if (fault === 'scheduler-candidate-repair-success') output.appendAgentIds = ['video-agent'];
+          if (fault === 'scheduler-dependency-repair-success') {
+            if (!output.steps.length) output.steps.push({ id: 'bad-step', title: 'Untrusted step', agentId: output.activeAgentIds[0], objective: 'Fixture dependency', dependsOn: [], skillIds: [] });
+            output.steps[0].dependsOn = [output.steps[0].id];
+          }
+        }
+        return { content: fault === `${stage}-bad-response` ? '{"broken":' : JSON.stringify(output), attempts: 1, durationMs: 1, usage: { total_tokens: 100 } };
       },
     }, new AbortController().signal);
-    const normal = fault === 'normal';
+    const recovered = fault.endsWith('-repair-success');
+    const normal = fault === 'normal' || recovered;
     assert.equal(decision.source, normal ? 'router-agent' : 'deterministic-fallback');
     assert.equal(fallbackNotifications, normal ? 0 : 1);
+    assert.equal(measurements.filter((call) => call.purpose === 'repair').length, recovered || fault.endsWith('-bad-response') ? 1 : 0);
+    assert.equal(modelCalls <= 3, true, 'the whole route has at most one correction, not one per stage');
+    if (recovered) assert.equal(diagnostics.filter((event) => event.event === 'validation-rejected').length, 1);
     validate(decision, item, normal);
     if (!normal) {
       assert.deepEqual(decision, fallbackChatRoute(input));
       assert.deepEqual(decision, browserFallback({ message: item.message, mode: item.mode, attachments: item.attachments, currentGraph: item.currentGraph }));
     }
     validate(enforceChatRouteSafety(decision, input), item, normal);
-    results.push({ id: item.id, fault, firstAttemptPassed: true, source: decision.source, fallbackTriggered: fallbackNotifications > 0, modelCalls, intent: decision.intent, activeAgentIds: decision.scheduler.activeAgentIds, steps: decision.scheduler.steps.map(({ id, agentId, dependsOn, skillIds }) => ({ id, agentId, dependsOn, skillIds })), durationMs: Math.round(performance.now() - started) });
+    results.push({ id: item.id, fault, firstAttemptPassed: true, source: decision.source, fallbackTriggered: fallbackNotifications > 0, modelCalls, routing: summarizeRoutingDiagnostics(measurements, diagnostics), intent: decision.intent, activeAgentIds: decision.scheduler.activeAgentIds, steps: decision.scheduler.steps.map(({ id, agentId, dependsOn, skillIds }) => ({ id, agentId, dependsOn, skillIds })), durationMs: Math.round(performance.now() - started) });
   } catch (error) {
     results.push({ id: item.id, fault, firstAttemptPassed: false, source: decision?.source ?? null, fallbackTriggered: fallbackNotifications > 0, modelCalls, error: error instanceof Error ? error.message : String(error) });
   }
@@ -162,6 +183,7 @@ const report = { generatedAt: new Date().toISOString(), scope: 'deterministic Ro
   firstAttemptPassRate: passed / results.length,
   healthy: { total: healthy.length, passed: healthy.filter((result) => result.firstAttemptPassed).length, fallbackCount: healthy.filter((result) => result.fallbackTriggered).length, fallbackRate: healthy.filter((result) => result.fallbackTriggered).length / healthy.length },
   injected: { total: injected.length, passed: injected.filter((result) => result.firstAttemptPassed).length, fallbackCount: injected.filter((result) => result.fallbackTriggered).length },
+  correction: { total: results.filter((result) => result.routing?.repaired).length, recovered: results.filter((result) => result.routing?.repaired && result.source === 'router-agent').length, maxModelCalls: Math.max(...results.map((result) => result.modelCalls ?? 0)) },
   boundaries: ['Faults are deterministic exceptions and responses; this does not measure real provider latency or availability.', 'Assertions cover executable plans, capabilities, Skill selection and dependencies; citations and final task completion need execution-quality evaluation.'], results };
 await writeFile(fileURLToPath(new URL('./routing-resilience-eval-results.json', import.meta.url)), `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify({ ...report, results: results.filter((result) => !result.firstAttemptPassed) }, null, 2));

@@ -27,7 +27,8 @@ import { createAgentStore } from './runtime/agentStore.js';
 import { agentCatalog, agentDirectoryReplyGuidance, appendMissingAgentDirectory, supplementAgentDirectoryResponse } from './runtime/agentCatalog.js';
 import { deepSeekCapabilityInfo } from './runtime/providerCapabilities.js';
 import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
-import { chatRouteDecisionSchema, durableMediaRoute, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, type ChatIntent, type ChatRouteDecision, type RoutingModelCall } from './runtime/chatRouter.js';
+import { chatRouteDecisionSchema, durableMediaRoute, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, RoutingUnavailableError, summarizeRoutingDiagnostics, type ChatIntent, type ChatRouteDecision, type RoutingDiagnostic, type RoutingModelCall } from './runtime/chatRouter.js';
+import { routingServerBudgetMs } from './shared/routingBudget.js';
 import { isOriginAllowed } from './runtime/originPolicy.js';
 import { defaultProviderLocation, normalizeProviderBaseUrl } from './runtime/providerLocation.js';
 import { buildContextWindow, estimateTokens, validatePersistedContextSummary, type DurableContextSourceMessage, type PersistedContextSummary } from './runtime/contextSummary.js';
@@ -1324,6 +1325,11 @@ app.post('/api/chat/route', async (c) => {
   ];
   const routeStartedAt = Date.now();
   const routeCalls: RoutingModelCall[] = [];
+  const routeEvents: RoutingDiagnostic[] = [];
+  const routeSignal = requestSignal(c.req.raw.signal, routingServerBudgetMs);
+  const diagnostics = () => ({ scope: 'server-route-request', durationMs: Date.now() - routeStartedAt,
+    calls: routeCalls, events: routeEvents, summary: summarizeRoutingDiagnostics(routeCalls, routeEvents) });
+  try {
   const decision = await routeChatIntent({
     message,
     mode,
@@ -1338,8 +1344,15 @@ app.post('/api/chat/route', async (c) => {
     availableSkills: runtimeSkillCatalog.map((skill) => ({ id: skill.id, label: skill.label, description: skill.description })),
     onFallback: (error) => logger.warn({ err: error, model: routeModel.model }, 'Router/Scheduler Agent output was rejected; deterministic fallback selected'),
     onModelCall: (measurement) => routeCalls.push(measurement),
-  }, routeModel, c.req.raw.signal);
-  return c.json({ decision, diagnostics: { scope: 'server-route-request', durationMs: Date.now() - routeStartedAt, calls: routeCalls } });
+    onDiagnostic: (event) => routeEvents.push(event),
+  }, routeModel, routeSignal);
+  logger.info({ routing: diagnostics().summary }, 'Routing plan validation summary');
+  return c.json({ decision, diagnostics: diagnostics() });
+  } catch (error) {
+    if (error instanceof RoutingUnavailableError) return c.json({ error: error.message, code: error.code, diagnostics: diagnostics() }, 503);
+    if (routeSignal.aborted) return c.json({ error: 'Routing was cancelled or exceeded its time budget.', code: 'ROUTING_INTERRUPTED', diagnostics: diagnostics() }, 408);
+    throw error;
+  }
 });
 
 app.post('/api/chat', async (c) => {

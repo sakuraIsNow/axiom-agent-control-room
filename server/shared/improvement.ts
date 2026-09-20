@@ -51,3 +51,71 @@ export type ImprovementTrialDraft = {
   proposalId: string;
   warnings: string[];
 };
+
+/** Scores describe only the frozen, tool-free contract suite, never global policy quality. */
+export type ImprovementQualityStatus = 'unverified' | 'improved' | 'no-clear-change' | 'regressed' | 'inconclusive';
+export type ImprovementEvaluationCheck = {
+  id: string;
+  category: 'requirements' | 'facts' | 'references';
+  passed: boolean;
+  detail: string;
+};
+export type ImprovementEvaluationArm = {
+  status: 'completed' | 'failed';
+  output: string;
+  checks: ImprovementEvaluationCheck[];
+  latencyMs: number;
+  tokens: number | null;
+  attempts: number | null;
+  error?: string;
+};
+export type ImprovementEvaluationCase = {
+  fixtureId: string;
+  title: string;
+  scope: string;
+  baseline?: ImprovementEvaluationArm;
+  candidate?: ImprovementEvaluationArm;
+};
+export type ImprovementEvaluationSummary = {
+  baselinePassed: number;
+  candidatePassed: number;
+  totalChecks: number;
+  baselineTokens: number | null;
+  candidateTokens: number | null;
+  baselineLatencyMs: number | null;
+  candidateLatencyMs: number | null;
+  monetaryCost: null;
+  humanInterventions: null;
+  improvedChecks: number;
+  regressedChecks: number;
+};
+export type ImprovementEvaluation = {
+  id: string;
+  revision: number;
+  proposalId: string;
+  proposalRevision: number;
+  suiteId: string;
+  suiteVersion: string;
+  suiteDigest: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  qualityStatus: ImprovementQualityStatus;
+  model?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  progress: { completed: number; total: number };
+  cases: ImprovementEvaluationCase[];
+  summary: ImprovementEvaluationSummary;
+  limitations: string[];
+  error?: string;
+};
+export type ImprovementEvaluationSuite = {
+  id: string;
+  version: string;
+  digest: string;
+  cases: Array<{ id: string; title: string; scope: string }>;
+  modelCalls: number;
+  maxOutputTokensPerCall: number;
+  timeoutMs: number;
+  limitations: string[];
+};

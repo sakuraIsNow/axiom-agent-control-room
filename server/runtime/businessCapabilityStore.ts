@@ -19,6 +19,7 @@ export type BusinessRecordKind =
   | 'task-action'
   | 'feedback'
   | 'improvement-proposal'
+  | 'improvement-evaluation'
   | 'decision';
 
 export type BusinessRecord = {
@@ -39,6 +40,8 @@ export type CreateBusinessRecord = Pick<BusinessRecord, 'tenantId' | 'userId' | 
   id?: string;
   projectId?: string;
 };
+
+export type ClaimImprovementEvaluation = CreateBusinessRecord & { id: string; proposalId: string };
 
 export class BusinessRecordRevisionConflictError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
@@ -97,9 +100,11 @@ export interface BusinessCapabilityStore {
   close(): Promise<void>;
   create(input: CreateBusinessRecord): Promise<BusinessRecord>;
   get(id: string, tenantId: string): Promise<BusinessRecord | null>;
-  list(tenantId: string, kind: BusinessRecordKind, options?: { projectId?: string; userId?: string; limit?: number }): Promise<BusinessRecord[]>;
+  list(tenantId: string, kind: BusinessRecordKind, options?: { projectId?: string; userId?: string; proposalId?: string; limit?: number }): Promise<BusinessRecord[]>;
   listAll(kind: BusinessRecordKind, limit?: number): Promise<BusinessRecord[]>;
   claimToolCall(input: ToolCallClaimInput): Promise<{ claimed: boolean; record: BusinessRecord }>;
+  /** Atomic per-proposal reservation; an existing running record is returned without executing again. */
+  claimImprovementEvaluation(input: ClaimImprovementEvaluation): Promise<{ claimed: boolean; record: BusinessRecord }>;
   resolveToolCallUnknown(input: ToolCallResolutionInput): Promise<void>;
   update(id: string, tenantId: string, patch: { status?: string; data?: Record<string, unknown>; projectId?: string | null }, expectedRevision: number): Promise<BusinessRecord>;
   delete(id: string, tenantId: string): Promise<boolean>;
@@ -180,11 +185,12 @@ export class SqliteBusinessCapabilityStore implements BusinessCapabilityStore {
     return row ? fromRow(row) : null;
   }
 
-  async list(tenantId: string, kind: BusinessRecordKind, options: { projectId?: string; userId?: string; limit?: number } = {}) {
+  async list(tenantId: string, kind: BusinessRecordKind, options: { projectId?: string; userId?: string; proposalId?: string; limit?: number } = {}) {
     const filters = ['tenant_id = ?', 'kind = ?'];
     const values: Array<string | number> = [tenantId, kind];
     if (options.projectId) { filters.push('project_id = ?'); values.push(options.projectId); }
     if (options.userId) { filters.push('user_id = ?'); values.push(options.userId); }
+    if (options.proposalId) { filters.push("json_extract(data_json, '$.proposalId') = ?"); values.push(options.proposalId); }
     values.push(Math.min(500, Math.max(1, options.limit ?? 100)));
     const rows = this.db.prepare(`SELECT * FROM axiom_business_records WHERE ${filters.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`).all(...values) as Row[];
     return rows.map(fromRow);
@@ -194,6 +200,31 @@ export class SqliteBusinessCapabilityStore implements BusinessCapabilityStore {
     const rows = this.db.prepare('SELECT * FROM axiom_business_records WHERE kind = ? ORDER BY updated_at DESC LIMIT ?')
       .all(kind, Math.min(10_000, Math.max(1, limit))) as Row[];
     return rows.map(fromRow);
+  }
+
+  async claimImprovementEvaluation(input: ClaimImprovementEvaluation) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const prior = this.db.prepare('SELECT * FROM axiom_business_records WHERE id = ? AND tenant_id = ?').get(input.id, input.tenantId) as Row | undefined;
+      if (prior) { this.db.exec('COMMIT'); return { claimed: false, record: fromRow(prior) }; }
+      const proposal = this.db.prepare("SELECT id FROM axiom_business_records WHERE id = ? AND tenant_id = ? AND user_id = ? AND owner_id = ? AND kind = 'improvement-proposal'")
+        .get(input.proposalId, input.tenantId, input.userId, input.ownerId);
+      if (!proposal) throw new Error('Improvement candidate not found.');
+      const running = this.db.prepare("SELECT * FROM axiom_business_records WHERE tenant_id = ? AND user_id = ? AND kind = 'improvement-evaluation' AND status = 'running' AND json_extract(data_json, '$.proposalId') = ?")
+        .all(input.tenantId, input.userId, input.proposalId) as Row[];
+      for (const row of running) {
+        const record = fromRow(row); const expiry = Date.parse(String(record.data.leaseExpiresAt ?? ''));
+        if (Number.isFinite(expiry) && expiry > Date.now()) { this.db.exec('COMMIT'); return { claimed: false, record }; }
+        const timestamp = new Date().toISOString();
+        this.db.prepare("UPDATE axiom_business_records SET status = 'failed', revision = revision + 1, updated_at = ?, data_json = ? WHERE id = ? AND revision = ?")
+          .run(timestamp, JSON.stringify({ ...record.data, qualityStatus: 'inconclusive', completedAt: timestamp, error: 'This comparison expired or was interrupted. Partial results are retained; no policy was applied.' }), record.id, record.revision);
+      }
+      const timestamp = new Date().toISOString();
+      const record: BusinessRecord = { id: input.id, tenantId: input.tenantId, userId: input.userId, ownerId: input.ownerId, kind: 'improvement-evaluation', status: 'running', revision: 1, data: clone(input.data), createdAt: timestamp, updatedAt: timestamp };
+      this.db.prepare('INSERT INTO axiom_business_records (id,tenant_id,user_id,kind,owner_id,status,revision,data_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(record.id, record.tenantId, record.userId, record.kind, record.ownerId, record.status, 1, JSON.stringify(record.data), timestamp, timestamp);
+      this.db.exec('COMMIT'); return { claimed: true, record };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
   async claimToolCall(input: ToolCallClaimInput) {
@@ -347,11 +378,12 @@ export class PostgresBusinessCapabilityStore implements BusinessCapabilityStore 
     return result.rows[0] ? fromRow(result.rows[0]) : null;
   }
 
-  async list(tenantId: string, kind: BusinessRecordKind, options: { projectId?: string; userId?: string; limit?: number } = {}) {
+  async list(tenantId: string, kind: BusinessRecordKind, options: { projectId?: string; userId?: string; proposalId?: string; limit?: number } = {}) {
     const values: unknown[] = [tenantId, kind];
     const filters = ['tenant_id = $1', 'kind = $2'];
     if (options.projectId) { values.push(options.projectId); filters.push(`project_id = $${values.length}`); }
     if (options.userId) { values.push(options.userId); filters.push(`user_id = $${values.length}`); }
+    if (options.proposalId) { values.push(options.proposalId); filters.push(`data_json->>'proposalId' = $${values.length}`); }
     values.push(Math.min(500, Math.max(1, options.limit ?? 100)));
     const result = await this.pool.query<Row>(`SELECT * FROM axiom_business_records WHERE ${filters.join(' AND ')} ORDER BY updated_at DESC LIMIT $${values.length}`, values);
     return result.rows.map(fromRow);
@@ -385,6 +417,28 @@ export class PostgresBusinessCapabilityStore implements BusinessCapabilityStore 
       const inserted = await client.query<Row>(`INSERT INTO axiom_business_records (id,tenant_id,user_id,kind,owner_id,status,revision,data_json,created_at,updated_at)
         VALUES ($1,$2,$3,$4,$5,$6,1,$7::jsonb,NOW(),NOW()) RETURNING *`, [record.id, record.tenantId, record.userId, record.kind, record.ownerId, record.status, JSON.stringify(record.data)]);
       await client.query('COMMIT'); return { claimed: true, record: fromRow(inserted.rows[0]) };
+    } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
+    finally { client.release(); }
+  }
+
+  async claimImprovementEvaluation(input: ClaimImprovementEvaluation) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Lock the existing candidate row: this is cross-worker, not a process-local mutex.
+      const proposal = await client.query("SELECT id FROM axiom_business_records WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND owner_id=$4 AND kind='improvement-proposal' FOR UPDATE", [input.proposalId, input.tenantId, input.userId, input.ownerId]);
+      if (!proposal.rows[0]) throw new Error('Improvement candidate not found.');
+      const prior = await client.query<Row>('SELECT * FROM axiom_business_records WHERE id=$1 AND tenant_id=$2', [input.id, input.tenantId]);
+      if (prior.rows[0]) { await client.query('COMMIT'); return { claimed: false, record: fromRow(prior.rows[0]) }; }
+      const running = await client.query<Row>("SELECT * FROM axiom_business_records WHERE tenant_id=$1 AND user_id=$2 AND kind='improvement-evaluation' AND status='running' AND data_json->>'proposalId'=$3 FOR UPDATE", [input.tenantId, input.userId, input.proposalId]);
+      for (const row of running.rows) {
+        const record = fromRow(row); const expiry = Date.parse(String(record.data.leaseExpiresAt ?? ''));
+        if (Number.isFinite(expiry) && expiry > Date.now()) { await client.query('COMMIT'); return { claimed: false, record }; }
+        const timestamp = new Date().toISOString();
+        await client.query("UPDATE axiom_business_records SET status='failed', revision=revision+1, updated_at=$1, data_json=$2::jsonb WHERE id=$3 AND revision=$4", [timestamp, JSON.stringify({ ...record.data, qualityStatus: 'inconclusive', completedAt: timestamp, error: 'This comparison expired or was interrupted. Partial results are retained; no policy was applied.' }), record.id, record.revision]);
+      }
+      const inserted = await client.query<Row>("INSERT INTO axiom_business_records (id,tenant_id,user_id,kind,owner_id,status,revision,data_json,created_at,updated_at) VALUES ($1,$2,$3,'improvement-evaluation',$4,'running',1,$5::jsonb,NOW(),NOW()) RETURNING *", [input.id, input.tenantId, input.userId, input.ownerId, JSON.stringify(input.data)]);
+      await client.query('COMMIT'); return { claimed: true, record: fromRow(inserted.rows[0]!) };
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
     finally { client.release(); }
   }

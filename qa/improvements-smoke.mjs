@@ -40,10 +40,29 @@ try {
       validationCases: [{ input: 'Research an unrelated domain with five papers.', expectedBehavior: 'Mark missing DOI instead of inventing it.' }],
       risks: ['More verification can add latency. No evaluation has been run.'] } });
   const trial = { input: 'Original request: research papers.\nUnverified guidance: check DOI.', mode: 'analyze', sourceTaskId: source.id, proposalId: 'candidate-one', warnings: ['No task has been executed.', 'Attachments are not carried over.'] };
+  const evaluationSuite = { id: 'fixture-comparison', version: '1', digest: 'fixture-digest', cases: [{ id: 'independent-fixture', title: 'Synthetic document contract', scope: 'Fixed text only' }], modelCalls: 2, maxOutputTokensPerCall: 900, timeoutMs: 180000, limitations: ['Not real workflow execution.'] };
+  let evaluations = [], evaluationConflict = false;
+  const evaluation = () => ({ id: 'evaluation-one', revision: 1, proposalId: 'candidate-one', proposalRevision: proposals[0].revision,
+    suiteId: evaluationSuite.id, suiteVersion: '1', suiteDigest: 'fixture-digest', status: 'running', qualityStatus: 'unverified', model: 'fixture-text-model',
+    createdAt: source.updatedAt, updatedAt: source.updatedAt, progress: { completed: 0, total: 2 },
+    cases: [{ fixtureId: 'independent-fixture', title: 'Synthetic document contract', scope: 'Fixed text only' }],
+    summary: { baselinePassed: 0, candidatePassed: 0, totalChecks: 2, baselineTokens: null, candidateTokens: null, baselineLatencyMs: null, candidateLatencyMs: null, monetaryCost: null, humanInterventions: null, improvedChecks: 0, regressedChecks: 0 }, limitations: ['Fixed cases only. Not a blind benchmark. No policy changes.'] });
   await page.route('**/api/**', async (route) => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname.replace(/\/$/, ''), method = request.method();
     requests.push({ path, method, body: request.postDataJSON() });
     const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    if (method === 'GET' && path === '/api/improvements/evaluation-suite') return json({ suite: evaluationSuite });
+    if (method === 'GET' && path === '/api/improvements/candidate-one/evaluations') return json({ evaluations });
+    if (method === 'POST' && path === '/api/improvements/candidate-one/evaluations') {
+      if (evaluationConflict) return json({ error: 'Evaluation changed.' }, 409);
+      const body = request.postDataJSON(); assert.equal(body.revision, proposals[0].revision); assert.ok(body.idempotencyKey?.length >= 8);
+      evaluations = [evaluation(), ...evaluations.filter((item) => item.id !== 'evaluation-one')]; return json({ evaluation: evaluations[0] }, 202);
+    }
+    if (method === 'POST' && path === '/api/improvements/candidate-one/evaluations/evaluation-one/cancel') {
+      assert.equal(request.postDataJSON().revision, evaluations[0].revision);
+      evaluations = [{ ...evaluations[0], status: 'cancelled', qualityStatus: 'inconclusive', revision: evaluations[0].revision + 1 }];
+      return json({ evaluation: evaluations[0] });
+    }
     if (method === 'GET' && path === '/api/improvements/sources') return json({ tasks: sources });
     if (method === 'GET' && path === '/api/improvements') return loadFailure ? json({ error: 'fixture unavailable' }, 503) : json({ proposals });
     if (method === 'POST' && path === '/api/improvements') {
@@ -161,11 +180,60 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
     await page.getByRole('button', { name: 'Refresh improvements', exact: true }).click();
     await expect(page.getByRole('alert')).toHaveCount(0);
   });
+  await check('Comparison requires explicit usage acknowledgement and remains tool-free', async () => {
+    const panel = page.getByTestId('improvement-evaluation');
+    const start = panel.getByRole('button', { name: 'Start comparison', exact: true });
+    await expect(start).toBeDisabled();
+    await panel.getByRole('checkbox').check(); await expect(start).toBeEnabled(); await start.click();
+    await expect(panel.getByRole('button', { name: 'Stop comparison', exact: true })).toBeVisible();
+    await expect(panel.locator('progress')).toHaveAttribute('value', '0');
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.path.endsWith('/evaluations')).length, 1);
+    assert.equal(requests.some((item) => /\/tasks|\/chat|\/nexus|\/plugins/.test(item.path)), false);
+    await expect(page.locator('.improvement-unverified')).toHaveText('Not validated');
+  });
+  await check('Stopping a comparison preserves a visible record, not a successful result', async () => {
+    const panel = page.getByTestId('improvement-evaluation');
+    await panel.getByRole('button', { name: 'Stop comparison', exact: true }).click();
+    await expect(panel.locator('.improvement-evaluation-result')).toHaveAttribute('data-outcome', 'inconclusive');
+    await expect(panel.locator('.improvement-evaluation-heading').last()).toContainText('Comparison stopped');
+    assert.equal(evaluations[0].status, 'cancelled');
+  });
+  await check('Comparison conflict stays recoverable without silently restarting', async () => {
+    const panel = page.getByTestId('improvement-evaluation'); evaluationConflict = true;
+    await panel.getByRole('checkbox').check(); await panel.getByRole('button', { name: 'Start comparison', exact: true }).click();
+    await expect(panel.getByRole('alert')).toBeVisible(); assert.equal(evaluations[0].status, 'cancelled');
+    evaluationConflict = false; await panel.getByRole('button', { name: 'Refresh comparisons', exact: true }).click();
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+  });
+  await check('Independent result exposes paired evidence and unknown usage without global promotion', async () => {
+    const arm = { status: 'completed', output: '{"finding":"No external tools executed"}', checks: [{ id: 'requirement', category: 'requirements', passed: true, detail: 'Required document fields match fixture evidence.' }], latencyMs: 500, tokens: null, attempts: 1 };
+    evaluations = [{ ...evaluation(), status: 'completed', qualityStatus: 'improved', progress: { completed: 2, total: 2 },
+      cases: [{ fixtureId: 'independent-fixture', title: 'Synthetic document contract', scope: 'Fixed text only', baseline: { ...arm, checks: [{ ...arm.checks[0], passed: false }] }, candidate: arm }],
+      summary: { ...evaluation().summary, baselinePassed: 0, candidatePassed: 1, totalChecks: 1, baselineLatencyMs: 500, candidateLatencyMs: 500, improvedChecks: 1 } }];
+    const panel = page.getByTestId('improvement-evaluation');
+    await panel.getByRole('button', { name: 'Refresh comparisons', exact: true }).click();
+    await expect(panel.locator('.improvement-evaluation-result')).toHaveAttribute('data-outcome', 'improved');
+    await expect(panel.getByRole('table')).toContainText('Not recorded');
+    await expect(panel.getByRole('table')).toContainText('Not measured, not zero');
+    await panel.getByText('Inspect case evidence', { exact: true }).click();
+    await expect(panel.locator('.improvement-evaluation-arms')).toContainText('Required document fields');
+    await expect(page.locator('.improvement-unverified')).toHaveText('Not validated');
+    await expect(panel).toContainText('has not been applied');
+    await mkdir(resolve('qa'), { recursive: true });
+    await panel.screenshot({ path: 'qa/improvements-comparison.png' });
+  });
+  await check('Comparison survives remount and does not launch another model request', async () => {
+    const count = requests.filter((item) => item.method === 'POST' && item.path.endsWith('/evaluations')).length;
+    await page.reload();
+    await expect(page.getByTestId('improvement-evaluation').locator('.improvement-evaluation-result')).toHaveAttribute('data-outcome', 'improved');
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.path.endsWith('/evaluations')).length, count);
+  });
   await check('Language switching preserves model/user text', async () => {
     await page.evaluate(() => window.qa.language('zh-CN'));
     await expect(page.getByRole('heading', { name: '任务改进', exact: true })).toBeVisible();
     await expect(page.locator('.improvement-unverified')).toHaveText('尚未验证');
     await expect(page.locator('.improvement-summary')).toHaveText(candidate().analysis.summary);
+    await expect(page.getByTestId('improvement-evaluation')).toContainText('先对照，再决定');
   });
   await mkdir(resolve('qa'), { recursive: true });
   await page.locator('.improvement-detail').evaluate((element) => { element.scrollTop = 0; });
@@ -195,7 +263,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
   });
   assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
   checks.push('No browser errors or unexpected API/side effects');
-  const report = { suite: 'controlled-rsi-ui-v1', passed: checks.length, failed: 0, checks, model: 'deterministic browser fixture', realModelQualityEvaluated: false };
+  const report = { suite: 'controlled-rsi-ui-v2', passed: checks.length, failed: 0, checks, model: 'deterministic browser fixture', realModelQualityEvaluated: false };
   await writeFile('qa/improvements-results.json', JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
 } finally {
