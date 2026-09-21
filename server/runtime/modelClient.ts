@@ -1,5 +1,6 @@
 import { consumeSseBlocks } from './sse.js';
 import { prepareDeepSeekImageFiles, type DeepSeekImagePart } from './deepseekFiles.js';
+import { defaultProviderLocation } from './providerLocation.js';
 
 export type ModelCompletionRequest = {
   model?: string;
@@ -64,6 +65,7 @@ export type ModelHealth = {
 
 export interface ModelClient {
   readonly model: string;
+  readonly location?: 'local' | 'internet';
   complete(request: ModelCompletionRequest): Promise<ModelCompletion>;
 }
 
@@ -84,6 +86,7 @@ const delay = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, r
 
 export class OpenAICompatibleModelClient implements ModelClient {
   readonly model: string;
+  readonly location: 'local' | 'internet';
   private readonly apiKey: string;
   private readonly apiBase: string;
   private readonly timeoutMs: number;
@@ -100,6 +103,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
     timeoutMs?: number;
     maxAttempts?: number;
     apiKeyOptional?: boolean;
+    location?: 'local' | 'internet';
     onUsage?: (usage?: Record<string, number>) => void;
   }) {
     this.apiKey = options?.apiKey ?? process.env.DEEPSEEK_API_KEY ?? '';
@@ -118,6 +122,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
     );
     this.maxAttempts = Math.min(6, Math.max(1, options?.maxAttempts ?? Number(process.env.AGENT_MODEL_MAX_ATTEMPTS ?? 3)));
     this.apiKeyOptional = options?.apiKeyOptional ?? false;
+    this.location = options?.location === 'local' || this.apiKeyOptional ? 'local' : defaultProviderLocation(this.apiBase);
     this.onUsage = options?.onUsage;
   }
 

@@ -29,6 +29,7 @@ import { deepSeekCapabilityInfo } from './runtime/providerCapabilities.js';
 import { prepareDeepSeekImageFiles } from './runtime/deepseekFiles.js';
 import { chatRouteDecisionSchema, durableMediaRoute, enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, RoutingUnavailableError, summarizeRoutingDiagnostics, type ChatIntent, type ChatRouteDecision, type RoutingDiagnostic, type RoutingModelCall } from './runtime/chatRouter.js';
 import { routingServerBudgetMs } from './shared/routingBudget.js';
+import { createDecisionRoutingConfig } from './runtime/decisionRouting.js';
 import { isOriginAllowed } from './runtime/originPolicy.js';
 import { defaultProviderLocation, normalizeProviderBaseUrl } from './runtime/providerLocation.js';
 import { buildContextWindow, estimateTokens, validatePersistedContextSummary, type DurableContextSourceMessage, type PersistedContextSummary } from './runtime/contextSummary.js';
@@ -226,6 +227,7 @@ const configuredModelNames = (process.env.AXIOM_ALLOWED_MODELS ?? '')
   .filter(Boolean);
 const modelRoutingCandidates = [...new Set([defaultTextProvider.model, ...configuredModelNames])];
 const modelRoutingPolicy = new ModelRoutingPolicy(parseModelCostCatalog(process.env.AXIOM_MODEL_COSTS));
+const decisionRoutingConfig = createDecisionRoutingConfig();
 if (taskStore.getModelRoutingStats) {
   try {
     modelRoutingPolicy.restore(await taskStore.getModelRoutingStats());
@@ -617,6 +619,7 @@ const reportModelFactory = async (credentialId: string | undefined, tenantId: st
 };
 
 app.route('/api', createTaskApi({
+  decisionRouting: decisionRoutingConfig.options,
   store: taskStore,
   hub: eventHub,
   coordinator,
@@ -1345,7 +1348,7 @@ app.post('/api/chat/route', async (c) => {
     onFallback: (error) => logger.warn({ err: error, model: routeModel.model }, 'Router/Scheduler Agent output was rejected; deterministic fallback selected'),
     onModelCall: (measurement) => routeCalls.push(measurement),
     onDiagnostic: (event) => routeEvents.push(event),
-  }, routeModel, routeSignal);
+  }, routeModel, routeSignal, provider.location === 'local' ? {} : decisionRoutingConfig.options);
   logger.info({ routing: diagnostics().summary }, 'Routing plan validation summary');
   return c.json({ decision, diagnostics: diagnostics() });
   } catch (error) {
@@ -1354,6 +1357,10 @@ app.post('/api/chat/route', async (c) => {
     throw error;
   }
 });
+
+app.get('/api/runtime/decision-routing', (c) => c.json({
+  ...decisionRoutingConfig.status, localTextModelsUseLegacy: true, legacyFallback: true,
+}));
 
 app.post('/api/chat', async (c) => {
   const contentLength = Number(c.req.header('content-length') ?? 0);

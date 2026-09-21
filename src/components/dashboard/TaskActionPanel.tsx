@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { Check, ChevronDown, ListChecks, LoaderCircle, Play, RefreshCw, RotateCcw, ShieldCheck, UserCheck, X } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { getToolRecovery } from '../../lib/toolRecoveryRuntime';
-import { getTaskHumanSnapshot, submitTaskHumanAction, TaskActionError, taskNeedsHumanAction, type TaskHumanAction } from '../../lib/taskActionRuntime';
+import { deliveryReviewSummary, getTaskHumanSnapshot, submitTaskHumanAction, TaskActionError, taskNeedsHumanAction, type TaskHumanAction } from '../../lib/taskActionRuntime';
 import { useUiLanguage } from '../../lib/uiLanguage';
 import type { WorkflowTask } from '../../types';
 import { ToolRecoveryPanel } from './ToolRecoveryPanel';
@@ -118,6 +118,11 @@ export function TaskActionPanel({ taskId, taskStatus, refreshKey, onChanged, con
     else setConfirmation({ scope, value });
   };
   const actions = task ? taskNeedsHumanAction(task) : null;
+  const delivery = task ? deliveryReviewSummary(task) : null;
+  const partialDelivery = Boolean(delivery && delivery.status !== 'passed');
+  const deliveryStatus = delivery?.status === 'passed' ? (zh ? '要求已复核' : 'Requirements reviewed')
+    : delivery?.status === 'needs-revision' ? (zh ? '待修正' : 'Revisions needed')
+      : zh ? '待核对' : 'Needs checking';
   const canResume = actions?.paused && !actions.plan && !actions.planRejected && !actions.review && !actions.tools.length && !loaded?.toolBlocked && !loaded?.toolResume;
   const visible = actions && (actions.plan || actions.planRejected || actions.review || actions.tools.length > 0 || actions.paused);
   const errorText = error === 403 || error === 401 ? (zh ? '你没有处理这项任务的权限。' : 'You do not have permission to manage this task.')
@@ -142,20 +147,37 @@ export function TaskActionPanel({ taskId, taskStatus, refreshKey, onChanged, con
         <div className="task-action-buttons"><button type="button" disabled={busy} onClick={() => requestAction('reject-tool', approval.id)}><X size={14} />{zh ? '拒绝调用' : 'Deny'}</button><button type="button" disabled={busy || loaded?.toolBlocked} onClick={() => requestAction('approve-tool', approval.id)}><Check size={14} />{zh ? '允许此次调用' : 'Allow Once'}</button></div>
       </div>)}
       {actions?.review && <div className="task-action-entry" data-testid={context === 'chat' ? 'chat-human-review-controls' : 'human-review-controls'}>
-        <strong><ListChecks size={15} />{zh ? '人工审核' : 'Human Review'}<small>{task?.review?.score}/100</small></strong>
+        <strong><ListChecks size={15} />{zh ? '人工审核' : 'Human Review'}{!delivery && <small>{task?.review?.score}/100</small>}</strong>
         <p>{task?.review?.summary}</p>
         <ul>{[...new Set([...(task?.review?.requiredCorrections ?? []), ...(task?.review?.gaps ?? [])])].map((issue) => <li key={issue}>{issue}</li>)}</ul>
         <textarea aria-label={zh ? '审核意见' : 'Decision Notes'} placeholder={zh ? '补充意见（可选）' : 'Decision notes (optional)'} value={note} rows={2} maxLength={2000} disabled={busy} onChange={(event) => setNote({ scope, value: event.target.value })} />
-        <div className="task-action-buttons"><button type="button" disabled={busy} onClick={() => requestAction('reject-review')}><RotateCcw size={14} />{zh ? context === 'chat' ? '继续整改' : '驳回并整改' : 'Request Revisions'}</button><button type="button" disabled={busy || loaded?.toolBlocked} onClick={() => requestAction('approve-review')}><Check size={14} />{zh ? context === 'chat' ? '按当前结果交付' : '批准交付' : 'Accept Result'}</button></div>
+        <div className="task-action-buttons"><button type="button" disabled={busy} onClick={() => requestAction('reject-review')}><RotateCcw size={14} />{zh ? context === 'chat' ? '继续整改' : '驳回并整改' : 'Request Revisions'}</button><button type="button" disabled={busy || loaded?.toolBlocked} onClick={() => requestAction('approve-review')}><Check size={14} />{partialDelivery ? (zh ? '接受部分结果' : 'Accept Partial Result') : zh ? context === 'chat' ? '按当前结果交付' : '批准交付' : 'Accept Result'}</button></div>
       </div>}
       {visible && !actions?.review && <textarea aria-label={zh ? '审核意见' : 'Decision Notes'} placeholder={zh ? '补充意见（可选）' : 'Decision notes (optional)'} value={note} rows={2} maxLength={2000} disabled={busy} onChange={(event) => setNote({ scope, value: event.target.value })} />}
       {canResume && <button type="button" className="task-action-resume" disabled={busy} onClick={() => requestAction('resume')}>{busy ? <LoaderCircle size={15} /> : <Play size={15} />}{zh ? '继续任务' : 'Continue Task'}</button>}
       {loaded?.toolBlocked && visible && <p>{zh ? '请先核对下方尚未确定的执行结果。' : 'Review the unresolved execution outcome below first.'}</p>}
     </section>}
-    {context === 'task' && task?.review && !actions?.review && <details className="task-review-findings" data-i18n-ignore="true"><summary>{zh ? '审查发现' : 'Review Findings'}<span>{task.review.score}/100</span></summary><p>{task.review.summary}</p><ul>{[...new Set([...task.review.requiredCorrections, ...task.review.gaps])].map((issue) => <li key={issue}>{issue}</li>)}</ul></details>}
+    {delivery && <details className="task-review-findings task-delivery-review" data-testid="task-delivery-review" data-outcome={delivery.status} data-i18n-ignore="true">
+      <summary><span><ListChecks size={15} />{zh ? '交付检查' : 'Delivery Check'}</span><span>{delivery.satisfied}/{delivery.total}<span className="task-delivery-status">{deliveryStatus}</span><ChevronDown size={14} /></span></summary>
+      <p className="task-delivery-boundary">{zh ? '模型复核，事实未独立验证。' : 'Model assessment; facts are not independently verified.'}{delivery.receipt.correctionAttempts > 0 && <span>{zh ? ` 已修正 ${delivery.receipt.correctionAttempts} 次` : ` Corrections: ${delivery.receipt.correctionAttempts}`}</span>}</p>
+      {(delivery.runtimeIncomplete || delivery.upstreamRejected || delivery.runtimeGaps.length > 0) && <div className="task-delivery-runtime" data-testid="task-delivery-runtime">
+        {delivery.runtimeIncomplete && <p>{delivery.receipt.runtimeExecution === 'partial' ? (zh ? '执行结果尚不完整' : 'Execution is incomplete') : (zh ? '执行结果待核对' : 'Execution needs checking')}</p>}
+        {delivery.upstreamRejected && <p>{zh ? '上游审查未通过' : 'Upstream review did not pass'}</p>}
+        {delivery.runtimeGaps.length > 0 && <ul>{delivery.runtimeGaps.map((gap) => <li key={gap}>{gap}</li>)}</ul>}
+      </div>}
+      <ul>{delivery.receipt.requirements.map((requirement) => <li key={requirement.id}>
+        <div><strong>{requirement.text}</strong><span>{requirement.status === 'satisfied' ? (zh ? '已满足' : 'Satisfied') : requirement.status === 'unsatisfied' ? (zh ? '未满足' : 'Not satisfied') : (zh ? '待核对' : 'Unknown')}</span></div>
+        <p>{requirement.reason}</p>
+        {requirement.calculation && <p className="task-delivery-calculation" data-outcome={requirement.calculation.status}>
+          {zh ? '计算校验' : 'Calculation check'}: {zh ? '预期' : 'Expected'} {requirement.calculation.expected ?? (zh ? '未知' : 'unknown')} &rarr; {zh ? '实际' : 'Actual'} {requirement.calculation.actual ?? (zh ? '未知' : 'unknown')}
+        </p>}
+        {requirement.outputQuote && <blockquote>{requirement.outputQuote}</blockquote>}
+      </li>)}</ul>
+    </details>}
+    {context === 'task' && task?.review && !actions?.review && <details className="task-review-findings" data-i18n-ignore="true"><summary>{zh ? '审查发现' : 'Review Findings'}{!delivery && <span>{task.review.score}/100</span>}</summary><p>{task.review.summary}</p><ul>{[...new Set([...task.review.requiredCorrections, ...task.review.gaps])].map((issue) => <li key={issue}>{issue}</li>)}</ul></details>}
     <ToolRecoveryPanel taskId={taskId} taskStatus={task?.status ?? taskStatus ?? ''} canManage={loaded?.scope === scope ? loaded.canManage : false} taskRevision={task?.revision} onResolved={() => load(scope)} onChanged={changed} />
     {confirmation && <ActionModal busy={busy} onDismiss={() => setConfirmation(null)}>{confirmation.action.endsWith('review')
-      ? <ReviewConfirmDialog action={confirmation.action === 'approve-review' ? 'approve' : 'reject'} note={note} busy={busy} onCancel={() => setConfirmation(null)} onConfirm={() => void run(confirmation)} />
+      ? <ReviewConfirmDialog action={confirmation.action === 'approve-review' ? 'approve' : 'reject'} note={note} busy={busy} partial={partialDelivery} onCancel={() => setConfirmation(null)} onConfirm={() => void run(confirmation)} />
       : <div className="dash-confirm-backdrop" role="presentation"><section className="dash-confirm-dialog task-action-confirm" data-i18n-ignore="true" role="alertdialog" aria-modal="true" aria-labelledby="task-action-confirm-title"><ShieldCheck size={22} /><h2 id="task-action-confirm-title">{zh ? '确认这次决定？' : 'Confirm This Decision?'}</h2><p>{confirmation.approvalId ? actions?.tools.find((item) => item.id === confirmation.approvalId)?.name : task?.plan?.summary}</p>{note && <p>{note}</p>}<div className="dash-confirm-actions"><button type="button" autoFocus disabled={busy} onClick={() => setConfirmation(null)}>{zh ? '取消' : 'Cancel'}</button><button type="button" disabled={busy} onClick={() => void run(confirmation)}>{busy ? <LoaderCircle size={15} /> : <Check size={15} />}{zh ? '确认' : 'Confirm'}</button></div></section></div>}</ActionModal>}
   </div>;
 }

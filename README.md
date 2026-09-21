@@ -33,8 +33,14 @@ This release builds on the existing Chat, Agent Graph, Nexus, and Mini Apps. It 
 
 ### 🔬 Next-iteration development (after rc.8)
 
+- **Try Jev for bounded Agent and Skill decisions without losing the original route.** Optional shadow and hybrid modes retain the configured text-model Scheduler and fall back to the original Router on uncertainty or errors. Text, search, vision, and media models stay unchanged. Recognized local model endpoints bypass this cloud service; private model hostnames can be declared explicitly. This is an experimental integration, not a universal accuracy or speed claim. See [configuration, rollback, and actual test results](docs/jev-routing-integration-20260921.md).
+- **Check complex answers against what you actually asked for.** A source-grounded requirement list is checked against the final answer, with at most one text-only revision. Completed tools are not replayed. Unresolved work stays as a draft you can clarify or explicitly accept as partial. Chat, tasks, Nexus, and Mini Apps share the same expandable delivery checks and real progress. Changed requirements invalidate earlier acceptance; ordinary chats keep their shorter path. Model review is not a guarantee of factual accuracy. See the [implementation and test record](docs/final-delivery-verification-20260921.md).
+- **Recompute declared numerical results.** Source-bound arithmetic checks compare JSON fields with server-calculated values, even when the review model approves a wrong number. This covers declared addition, subtraction, multiplication, and division, not arbitrary mathematical proofs or external truth.
 - **More reliable Agent assignments.** Router and Scheduler distinguish registered Skills from descriptive labels, validate their plan, and share one bounded correction attempt. Diagnostics separate a successful model response from a valid plan, including correction time and Token usage.
 - **Compare a suggestion before trying it.** Task improvements can run the same model on five independent fixed text scenarios, with and without the suggestion. Inspect checks, outputs, time and Token usage, stop a comparison, and return to its saved history.
+- **Resume unfinished work, keep completed work.** A service interruption no longer records the active Agent as a completed failure, so recovery can continue from saved results without repeating finished steps.
+- **Less scheduling for genuinely simple chats.** A high-confidence, validated first-turn conversation may use just the Router. Attachments, prior context, corrections, and complex tasks retain the full scheduling path.
+- **Check the deliverable, not only the route.** A new 24-case local suite checks documents, reports, files, Mini App versions, Nexus, and recovery. Secret-free CI reports flaky retries as failures, and an optional, bounded live-model suite preserves every observation. See the [scope and evidence](docs/business-delivery-closure-20260921.md).
 
 Comparisons use synthetic evidence and simulated contracts—not live search, real plugin changes, or Nexus execution. A better score only applies to those cases; no suggestion is automatically applied. Account login and private spaces are not included in this batch. The published version above remains rc.8 until the next release is finalized.
 
@@ -55,6 +61,7 @@ Comparisons use synthetic evidence and simulated contracts—not live search, re
 | Live research | Research news, papers, GitHub repositories, and time-sensitive facts while retaining sources | DeepSeek native search |
 | Multi-Agent work | Route each turn through Router Agent and Scheduler Agent, then run a dynamic DAG | Built in |
 | Human collaboration | Guide, pause, resume, cancel, review, retry, branch, merge, or rerun an Agent | Built in |
+| Complex delivery checks | Trace requirements to their source, check the final answer, attempt one bounded revision, and retain unresolved drafts and partial acceptance across restarts | Text model; semantic assessment is not independent fact verification |
 | Agent Nexus | Build reusable Agent flows with conditions, parallel paths, multiple Loops, nested Loops, and local reruns | Built in |
 | Plugin Mini Apps | Create, edit, preview, review, publish, sign, install, roll back, and withdraw plugins | Built in; external tools follow permissions |
 | Media and reports | Generate or edit images, request videos, and export Markdown, Word, LaTeX, or PDF reports | Configure the matching provider for media generation |
@@ -248,9 +255,17 @@ To connect Feishu, create an enterprise custom app and provide its `App ID` and 
 
 ## 🧪 Quality gates
 
+**Latest development checks · 2026-09-21:** the final source passed TypeScript checks and production build, with **907 tests passed, 0 failed, and 18 PostgreSQL-conditional skips**. Secret-free CI passed 12/12 locally on Windows; hosted GitHub runs are reported separately in Actions. The latest isolated full gate was **45 passed, 1 failed, and 3 external-service skips**: the Nexus Loop produced output but did not reach completion in either attempt. Visual checks passed 172/172, Agent Graph 22/22, and PostgreSQL stability 20/20. That full gate started before the final Jev privacy patch, so it is not an all-green acceptance of the final source. See the [current evidence and limitations](docs/jev-routing-integration-20260921.md).
+
+The earlier delivery batch had 46 full-gate passes and a 24/24 deterministic delivery suite. Its four-case live-model observation improved from 3/4 to 4/4 after evaluation-harness fixes; those historical results and failures remain in the [delivery acceptance record](docs/business-delivery-closure-20260921.md). They do not override the latest failures or establish general business accuracy. This source update is **Unreleased**, not a new production release.
+
 ```bash
 npm run check                 # TypeScript checks for web and server
 npm test                      # Unit and runtime tests
+npm run qa:ci                # Secret-free source copy, checks, tests, build and browser regressions
+npm run qa:business-delivery # 24 deterministic cross-component delivery cases; no provider calls
+npm run qa:business-oracles  # Independent result-checker and isolation regressions
+npm run qa:business-live     # Explicit live model evaluation; may incur model usage
 npm run build                 # Production web and server build
 npm run qa:i18n               # English default and Chinese switch regression
 npm run qa:visual             # Desktop and mobile visual regression

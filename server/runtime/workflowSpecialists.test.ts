@@ -15,6 +15,7 @@ import { nexusArtifactSetDigest, type NexusArtifactSnapshot } from './nexusArtif
 import { SqliteToolExecutionStore } from './toolExecutionStore.js';
 import { ToolRegistry } from './toolRegistry.js';
 import { summarizeExecutionQuality } from './executionQuality.js';
+import { deliveryModelFixture } from './testing/deliveryModelFixture.js';
 
 const envKeys = ['DMX_API_KEY', 'DMX_BASE_URL', 'DMX_MODEL', 'DEEPSEEK_API_KEY', 'DEEPSEEK_API_BASE', 'DEEPSEEK_NATIVE_SEARCH_MODEL', 'DEEPSEEK_NATIVE_SEARCH', 'DEEPSEEK_VISION_API_KEY', 'DEEPSEEK_VISION_API_BASE', 'DEEPSEEK_VISION_MODEL', 'VIDEO_API_BASE', 'VIDEO_API_KEY', 'VIDEO_MODEL'] as const;
 
@@ -203,6 +204,8 @@ test('orchestrator executes a snapshotted drawing Agent as a real workflow step'
     const model: ModelClient = {
       model: 'text-model',
       async complete(request) {
+        const delivery = deliveryModelFixture(request);
+        if (delivery) return delivery;
         synthesisInput = request.user;
         await request.onDelta?.({ content: '最终绘图结果' });
         return { content: '最终绘图结果', attempts: 1, durationMs: 1 };
@@ -251,6 +254,8 @@ test('orchestrator loads only digest-verified Nexus attachments for a document A
     model: 'document-model',
     async complete(request) {
       modelCalls += 1;
+      const delivery = deliveryModelFixture(request);
+      if (delivery) return delivery;
       if (request.system.includes('文档分析 Agent')) {
         documentInput = request.user;
         return { content: '附件预算为 120 万元。', attempts: 1, durationMs: 1 };

@@ -60,6 +60,10 @@ export const chatRouteDecisionSchema = z.object({
   skillIds: z.array(z.string().min(1).max(80)).max(12),
   routingVersion: z.string().min(1).max(80),
   routerModel: z.string().min(1).max(160).optional(),
+  decisionRouting: z.object({
+    mode: z.enum(['shadow', 'hybrid']), provider: z.literal('jev'), model: z.string().min(1).max(160),
+    outcome: z.enum(['selected', 'shadow', 'fallback']), reason: z.string().min(1).max(80).optional(),
+  }).strict().optional(),
   reportExport: reportExportDecisionSchema.optional(),
   router: routerAgentDecisionSchema,
   scheduler: schedulerAgentDecisionSchema,

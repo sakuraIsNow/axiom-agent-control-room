@@ -5,7 +5,7 @@ import { secureArtifactDocument } from '../../lib/chatArtifacts';
 import { getTaskHumanSnapshot } from '../../lib/taskActionRuntime';
 import { miniAppTaskOutput } from '../../lib/miniAppExecution';
 import { taskHasPartialDelivery } from '../../lib/taskDelivery';
-import { useUiLanguage } from '../../lib/uiLanguage';
+import { translateUiText, useUiLanguage } from '../../lib/uiLanguage';
 import { TaskActionPanel } from '../dashboard/TaskActionPanel';
 import './mini-app-recovery.css';
 
@@ -26,8 +26,8 @@ export function MiniAppWindow({ plugin, onClose, onAgentRequest, onAgentResume }
   const zh = language === 'zh-CN';
   const frameRef = useRef<HTMLIFrameElement>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
-  const callbacks = useRef({ plugin, onClose, onAgentRequest, onAgentResume });
-  callbacks.current = { plugin, onClose, onAgentRequest, onAgentResume };
+  const callbacks = useRef({ plugin, onClose, onAgentRequest, onAgentResume, language });
+  callbacks.current = { plugin, onClose, onAgentRequest, onAgentResume, language };
   const activeTaskRef = useRef<{ pluginId: string; taskId: string; requestId: string; sequence: number; status?: string; completionStatus?: 'complete' | 'partial'; reconnect?: boolean } | null>(null);
   const [taskView, setTaskView] = useState<typeof activeTaskRef.current>(null);
   const [reconnecting, setReconnecting] = useState(false);
@@ -43,7 +43,8 @@ export function MiniAppWindow({ plugin, onClose, onAgentRequest, onAgentResume }
       const next = { pluginId, requestId, taskId: progress.taskId ?? previous!.taskId, sequence: progress.sequence ?? previous?.sequence ?? 0, status: progress.status ?? previous?.status, completionStatus: progress.completionStatus ?? previous?.completionStatus };
       activeTaskRef.current = next; setTaskView(next);
     }
-    post({ type: 'axiom.plugin.agent.delta', requestId, ...progress });
+    post({ type: 'axiom.plugin.agent.delta', requestId, ...progress,
+      ...(progress.status ? { status: translateUiText(progress.status, callbacks.current.language) } : {}) });
   };
   const finishRequest = async (promise: Promise<string>, controller: AbortController, requestId: string, pluginId: string) => {
     const retain = (current: NonNullable<typeof activeTaskRef.current>, status?: string) => {

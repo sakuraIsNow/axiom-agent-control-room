@@ -14,6 +14,7 @@ import type { ModelClient } from './modelClient.js';
 import type { ArtifactStore } from './artifactStore.js';
 import { SqliteArtifactCatalog } from './artifactCatalog.js';
 import { z } from 'zod';
+import { deliveryModelFixture } from './testing/deliveryModelFixture.js';
 
 const memory: AgentMemory = {
   async recall() { return { context: '', itemCount: 0, available: false, items: [], quality: { candidates: 0, expiredFiltered: 0, lowConfidenceFiltered: 0, byLayer: { L1: 0, L2: 0, L3: 0 } } }; },
@@ -378,7 +379,9 @@ test('orchestrator pauses unknown media, preserves the exact invocation and expo
   const originalFetch = globalThis.fetch;
   let posts = 0;
   globalThis.fetch = async () => { posts += 1; if (posts === 1) throw new Error('Accepted then disconnected'); return json({ data: [{ url: 'https://cdn.example/final.png' }], usage: { total_tokens: 43 } }); };
-  const model: ModelClient = { model: 'text', async complete() { return { content: 'The generated result', attempts: 1, durationMs: 1 }; } };
+  const model: ModelClient = { model: 'text', async complete(request) {
+    return deliveryModelFixture(request) ?? { content: 'The generated result', attempts: 1, durationMs: 1 };
+  } };
   const task = await f.tasks.updateTask(f.task.id, { plan: {
     summary: 'Generate', routingReason: 'Explicit image capability', approvalStatus: 'approved',
     profile: { kind: 'creative', difficulty: 'moderate', route: 'full-workflow', score: 50, reasons: ['test'], maxSteps: 1, requiresReview: false },

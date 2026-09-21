@@ -1,9 +1,14 @@
 import { spawn } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { classifyGateAttempts, gateExitCode, summarizeGateResults } from './gate-report.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const evidenceId = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
+const evidenceDirectory = resolve(root, 'qa', 'production-gate', evidenceId);
+await mkdir(evidenceDirectory, { recursive: true });
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const configuredQaUrl = (process.env.QA_URL?.trim() || 'http://127.0.0.1:8787').replace(/\/$/, '');
 process.env.QA_URL = configuredQaUrl;
@@ -34,10 +39,13 @@ const checks = [
   ['静态检查', 'check'],
   ['单元与集成测试', 'test'],
   ['生产构建', 'build'],
+  ['质量门禁与隔离执行契约', 'qa:gate-contract'],
   ['多格式报告导出', 'qa:report-export'],
   ['复合路由故障降级', 'qa:routing-resilience'],
   ['真实 HTTP 路由纠错与诊断', 'qa:routing-repair-http'],
   ['交付质量与执行效率', 'qa:execution-quality'],
+  ['隔离真实业务交付验收', 'qa:business-delivery'],
+  ['真实业务评测判定契约', 'qa:business-oracles'],
   ['运行时 SSE 与 Artifact', 'qa:runtime'],
   ['聊天与多模态', 'qa:chat'],
   ['直达聊天流式重试', 'qa:direct-stream'],
@@ -71,32 +79,33 @@ const checks = [
   ['并发性能基线', 'perf:smoke'],
 ];
 
-const runOnce = (name, script, env = baseEnv) => new Promise((resolveResult) => {
+const runOnce = (name, script, env = baseEnv, attempt = 1) => new Promise((resolveResult) => {
   const startedAt = Date.now();
+  const logName = `${script.replaceAll(':', '-')}-attempt-${attempt}.log`;
+  const output = createWriteStream(resolve(evidenceDirectory, logName));
+  const log = `qa/production-gate/${evidenceId}/${logName}`;
   const child = spawn(npm, ['run', script], {
     cwd: root,
     env,
-    stdio: 'inherit',
+    stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32',
     windowsHide: true,
   });
-  child.on('close', (code, signal) => resolveResult({
+  for (const [stream, consoleStream] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) {
+    stream.on('data', (chunk) => { output.write(chunk); consoleStream.write(chunk); });
+  }
+  let executionError;
+  child.on('error', (error) => { executionError = error.message; });
+  child.on('close', (code, signal) => output.end(() => resolveResult({
     name,
     script,
-    status: code === 0 ? 'passed' : 'failed',
+    status: code === 0 && !executionError ? 'passed' : 'failed',
     code: code ?? 1,
     signal: signal ?? null,
     durationMs: Date.now() - startedAt,
-  }));
-  child.on('error', (error) => resolveResult({
-    name,
-    script,
-    status: 'failed',
-    code: 1,
-    signal: null,
-    durationMs: Date.now() - startedAt,
-    error: error.message,
-  }));
+    log,
+    ...(executionError ? { error: executionError } : {}),
+  })));
 });
 
 const run = async (name, script, env = baseEnv) => {
@@ -106,17 +115,15 @@ const run = async (name, script, env = baseEnv) => {
   // separately retained observations; any failed case keeps this gate red.
   const maxAttempts = script === 'qa:routing' ? 1 : 2;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    // A completed model task can leave short-lived worker cleanup in flight.
-    // Retry one time so the gate distinguishes that transient from a stable
-    // contract failure while retaining both outcomes in the report.
+    // A second attempt provides diagnosis only. A recovered stage stays
+    // unstable and fails the aggregate exit code; it is never a clean pass.
     // eslint-disable-next-line no-await-in-loop
-    const result = await runOnce(name, script, env);
+    const result = await runOnce(name, script, env, attempt);
     attempts.push({ attempt, ...result });
-    if (result.status === 'passed') return { ...result, attempts };
+    if (result.status === 'passed') return classifyGateAttempts(attempts);
     if (attempt < maxAttempts) await new Promise((resolveResult) => setTimeout(resolveResult, 1_000));
   }
-  const last = attempts.at(-1);
-  return { ...last, attempts };
+  return classifyGateAttempts(attempts);
 };
 
 const results = [];
@@ -210,12 +217,9 @@ if (harnessSidecarConfigured) {
 
 const summary = {
   generatedAt: new Date().toISOString(),
-  status: results.some((result) => result.status === 'failed') ? 'failed' : 'passed',
-  passed: results.filter((result) => result.status === 'passed').length,
-  failed: results.filter((result) => result.status === 'failed').length,
-  skipped: results.filter((result) => result.status === 'skipped').length,
-  results,
+  ...summarizeGateResults(results),
 };
 await writeFile(resolve(root, 'qa', 'production-gate-results.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+await writeFile(resolve(evidenceDirectory, 'results.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
 console.log(JSON.stringify(summary, null, 2));
-if (summary.failed > 0) process.exitCode = 1;
+process.exitCode = gateExitCode(summary);

@@ -21,6 +21,21 @@
 .task-review-findings { padding-block: 12px; border-top: 1px solid var(--dash-line); font-size: 14px; line-height: 1.6; color: var(--dash-soft); overflow-wrap: anywhere; }
 .task-review-findings summary { display: flex; justify-content: space-between; cursor: pointer; color: var(--dash-ink); }
 .task-review-findings p { margin-block: 10px; }
+.task-delivery-review summary { flex-wrap: wrap; gap: 6px 14px; }
+.task-delivery-review summary > span { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.task-delivery-review summary > span:last-child { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.task-delivery-review svg { flex: 0 0 auto; }
+.task-delivery-status { font-size: 13px; color: var(--dash-soft); }
+.task-delivery-review[data-outcome="passed"] .task-delivery-status { color: var(--dash-accent); }
+.task-delivery-boundary { color: var(--dash-muted); font-size: 13px; }
+.task-delivery-review ul { display: grid; gap: 12px; max-height: 320px; overflow-y: auto; margin: 12px 0 0; padding: 0; list-style: none; }
+.task-delivery-review li > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.task-delivery-review li strong { flex: 1 1 150px; font-weight: 500; color: var(--dash-ink); }
+.task-delivery-review li > div > span { color: var(--dash-muted); font-size: 13px; }
+.task-delivery-review li p { margin: 4px 0; }
+.task-delivery-calculation { font-size: 13px; }
+.task-delivery-calculation[data-outcome="unsatisfied"] { color: var(--dash-red, #d8787d); }
+.task-delivery-review blockquote { margin: 6px 0 0; padding-left: 10px; border-left: 2px solid var(--dash-line-strong); font-size: 13px; color: var(--dash-muted); white-space: pre-wrap; }
 .dash-chat-messages > .task-action-surface { width: 100%; padding-inline: 4px; }
 .workflow-runner .task-action-surface { padding-inline: 12px; }
 @media (max-width: 1100px) {

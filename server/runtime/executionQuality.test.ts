@@ -6,6 +6,7 @@ import { summarizeExecutionQuality } from './executionQuality.js';
 import { SqliteTaskStore } from './sqliteTaskStore.js';
 import { createTaskApi } from './taskApi.js';
 import { EventHub } from './eventHub.js';
+import { deliveryContextDigest, deliverySources, parseDeliveryAssessment, parseDeliveryContract } from './deliveryVerification.js';
 
 const epoch = Date.parse('2026-09-07T01:00:00Z');
 const step: StepResult = { stepId: 'a', agentId: 'analyst-a', role: 'analyst', status: 'completed',
@@ -14,6 +15,106 @@ const task = { id: 'quality-task', runId: 'run-1', status: 'completed', createdA
   updatedAt: new Date(epoch + 100).toISOString(), stepResults: [step] } as WorkflowTask;
 const event = (sequence: number, type: RuntimeEvent['type'], payload: Record<string, unknown> = {}, ms = sequence * 10): RuntimeEvent => ({
   id: `event-${sequence}`, taskId: task.id, runId: task.runId, sequence, type, payload, version: 1, timestamp: new Date(epoch + ms).toISOString(),
+});
+
+const taskWithDeliveryAssessment = (): WorkflowTask => {
+  const current = { ...task, tenantId: 'quality-owner', userId: 'reader', sessionId: 'quality-session',
+    input: 'Return budget 4700. Preserve retention of 14 days.', result: 'Budget: 4700. Retention: 14 days.', planVersion: 1,
+    plan: { summary: 'Deliver the specified budget and retention.', routingReason: 'Authored quality fixture.', version: 1, approvalStatus: 'approved',
+      profile: { kind: 'implementation', difficulty: 'hard', route: 'full-workflow', score: 5, reasons: ['fixture'], maxSteps: 1, requiresReview: false },
+      steps: [{ id: 'a', title: 'Prepare delivery', role: 'analyst', objective: 'Preserve the supplied values.', dependsOn: [], acceptanceCriteria: ['Budget and retention are present.'] }] },
+  } as WorkflowTask;
+  const sources = deliverySources(current, []);
+  const contract = parseDeliveryContract(JSON.stringify({ requirements: [
+    { id: 'budget', text: 'Return budget 4700.', sourceId: 'input', sourceQuote: 'Return budget 4700.' },
+    { id: 'retention', text: 'Preserve retention of 14 days.', sourceId: 'input', sourceQuote: 'Preserve retention of 14 days.' },
+  ] }), sources);
+  const delivery = parseDeliveryAssessment(JSON.stringify({ requirements: [
+    { id: 'budget', status: 'satisfied', reason: 'The candidate includes the requested budget.', outputQuote: '4700' },
+    { id: 'retention', status: 'satisfied', reason: 'The candidate includes the requested retention.', outputQuote: '14 days' },
+  ] }), contract, current.result!);
+  return { ...current, review: { approved: true, score: 100, summary: 'Model assessment completed.', gaps: [], requiredCorrections: [],
+    delivery: { ...delivery, contextDigest: deliveryContextDigest(current, current.stepResults, [], sources.inputDigest) } } };
+};
+
+const reverseObjectKeys = <T,>(value: T): T => {
+  if (Array.isArray(value)) return value.map((item) => reverseObjectKeys(item)) as T;
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reverseObjectKeys(item)])) as T;
+  return value;
+};
+
+test('current delivery coverage counts model assessments without claiming factual accuracy', () => {
+  const current = taskWithDeliveryAssessment();
+  const quality = summarizeExecutionQuality(current, []).quality;
+  assert.deepEqual(quality.requirementCoverage, { basis: 'model-assessment', satisfied: 2, total: 2, status: 'passed' });
+  assert.equal(quality.factualCorrectness, 'not-independently-evaluated');
+  const partial = structuredClone(current);
+  partial.review!.delivery!.requirements[1]!.status = 'unknown';
+  partial.review!.delivery!.status = 'inconclusive';
+  assert.deepEqual(summarizeExecutionQuality(partial, []).quality.requirementCoverage,
+    { basis: 'model-assessment', satisfied: 1, total: 2, status: 'inconclusive' });
+  assert.equal(summarizeExecutionQuality(partial, []).quality.factualCorrectness, 'not-independently-evaluated');
+});
+
+for (const mutation of ['input', 'notes', 'work', 'result', 'plan', 'rerun'] as const) test(`delivery coverage becomes unknown after ${mutation} changes the assessed scope`, () => {
+  const current = taskWithDeliveryAssessment();
+  const history: RuntimeEvent[] = [];
+  if (mutation === 'input') current.input = `${current.input} Include the source disclosure.`;
+  if (mutation === 'notes') history.push(event(1, 'human.note', { author: current.userId, message: 'Include the source disclosure.' }));
+  if (mutation === 'work') current.stepResults = current.stepResults.map((result) => ({ ...result, output: `${result.output} Evidence was updated.` }));
+  if (mutation === 'result') current.result = 'This is a different draft.';
+  if (mutation === 'plan') current.plan!.steps[0]!.objective = 'A changed objective.';
+  if (mutation === 'rerun') history.push(event(1, 'node.rerun_requested', { stepId: 'a' }));
+  assert.equal(summarizeExecutionQuality(current, history).quality.requirementCoverage, null);
+});
+
+test('JSONB-like key reordering preserves coverage of unchanged input, work and delivery', () => {
+  const current = taskWithDeliveryAssessment();
+  const reordered = reverseObjectKeys(current);
+  assert.deepEqual(reordered, current);
+  assert.notEqual(JSON.stringify(reordered.plan?.steps), JSON.stringify(current.plan?.steps));
+  assert.notEqual(JSON.stringify(reordered.stepResults), JSON.stringify(current.stepResults));
+  assert.deepEqual(summarizeExecutionQuality(reordered, []).quality.requirementCoverage,
+    { basis: 'model-assessment', satisfied: 2, total: 2, status: 'passed' });
+});
+
+test('delivery extraction, assessment and text revision have separate truthful phase usage', () => {
+  const current = taskWithDeliveryAssessment();
+  const report = summarizeExecutionQuality(current, [
+    event(1, 'model.completed', { stage: 'delivery:requirements', totalTokens: 11, durationMs: 10 }),
+    event(2, 'model.completed', { stage: 'delivery:contract-audit', totalTokens: 13, durationMs: 15 }),
+    event(3, 'model.completed', { stage: 'synthesizer', totalTokens: 17, durationMs: 20 }),
+    event(4, 'model.completed', { stage: 'delivery:verification', totalTokens: 19, durationMs: 30 }),
+    event(5, 'delivery.correction.started', { attempt: 1 }),
+    event(6, 'model.completed', { stage: 'delivery:correction', totalTokens: 23, durationMs: 40 }),
+    event(7, 'model.completed', { stage: 'delivery:verification', totalTokens: 29, durationMs: 50 }),
+    event(8, 'task.completed'),
+  ]);
+  assert.equal(report.usage.calls, 6);
+  assert.equal(report.usage.totalTokens, 112);
+  assert.equal(report.phases.planning?.calls, 2);
+  assert.equal(report.phases.planning?.totalTokens, 24);
+  assert.equal(report.phases.review?.calls, 2);
+  assert.equal(report.phases.review?.totalTokens, 48);
+  assert.equal(report.phases.review?.durationMs, 80);
+  assert.equal(report.phases.correction?.calls, 1);
+  assert.equal(report.phases.correction?.totalTokens, 23);
+  assert.equal(report.phases.delivery?.calls, 1);
+  assert.equal(report.phases.delivery?.totalTokens, 17);
+  assert.equal(report.quality.correctionRounds, 1);
+  assert.equal(report.quality.firstAttemptExecutionSuccess, false);
+  assert.equal(report.quality.humanTakeover, false);
+});
+
+test('starting a final delivery correction invalidates first-attempt success even without a retry or failed call', () => {
+  const current = taskWithDeliveryAssessment();
+  const calls = [event(1, 'model.completed', { stage: 'delivery:verification', totalTokens: 19 })];
+  assert.equal(summarizeExecutionQuality(current, calls).quality.firstAttemptExecutionSuccess, true);
+  const report = summarizeExecutionQuality(current, [...calls, event(2, 'delivery.correction.started', { attempt: 1 })]);
+  assert.equal(report.usage.failures, 0);
+  assert.equal(report.usage.retries, 0);
+  assert.equal(report.quality.correctionRounds, 1);
+  assert.equal(report.quality.firstAttemptExecutionSuccess, false);
 });
 
 test('execution quality deduplicates replay and keeps call duration separate from wall time', () => {

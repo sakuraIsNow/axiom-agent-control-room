@@ -2,6 +2,7 @@ import { chatRouteDecisionSchema, routerAgentDecisionSchema, schedulerAgentDecis
 export { chatRouteDecisionSchema, routerAgentDecisionSchema, schedulerAgentDecisionSchema } from '../shared/chatRoutingSchema.js';
 import type { AgentGraph, TaskDifficulty, TaskProfile, TurnSchedulingDecision, TurnSchedulingStep, WorkflowPlan, WorkflowStep } from './contracts.js';
 import type { ModelClient, ModelCompletionRequest } from './modelClient.js';
+import type { DecisionRouterAdapter } from './jevDecisionRouter.js';
 import { runtimeSkillCatalog } from './skillCatalog.js';
 import { attachmentRequirements, explicitlyDisablesRetrieval, fallbackChatRoute as sharedFallbackChatRoute, intentAgent, schedulingWaves as executionWaves } from '../shared/chatRoutingFallback.js';
 import type { ChatIntent, ChatRouteDecision } from '../shared/chatRoutingFallback.js';
@@ -26,6 +27,7 @@ export type RoutingModelCall = {
   stage: 'router' | 'scheduler'; status: 'completed' | 'failed'; durationMs: number;
   attempts: number; promptCharacters: number; totalTokens: number | null;
   purpose: 'initial' | 'repair';
+  provider?: 'jev' | 'text-model'; model?: string;
 };
 
 export type RoutingFailureCode = 'invalid-json' | 'invalid-schema' | 'unavailable-id' | 'outside-candidates'
@@ -33,9 +35,13 @@ export type RoutingFailureCode = 'invalid-json' | 'invalid-schema' | 'unavailabl
   | 'truncated-output' | 'unexpected-tool-call' | 'oversized-output' | 'forbidden-retrieval';
 export type RoutingDiagnostic = {
   stage: 'router' | 'scheduler' | 'routing';
-  event: 'validation-passed' | 'validation-rejected' | 'repair-started' | 'fallback' | 'cancelled' | 'unavailable';
+  event: 'validation-passed' | 'validation-rejected' | 'repair-started' | 'fallback' | 'cancelled' | 'unavailable' | 'scheduling-selected' | 'stage-skipped'
+    | 'decision-selected' | 'decision-shadow' | 'decision-fallback';
+  decisionReason?: string;
   purpose?: RoutingModelCall['purpose'];
   code?: RoutingFailureCode;
+  schedulingPath?: 'router-direct' | 'router-scheduler';
+  reason?: 'validated-trivial-conversation' | 'full-scheduler-required' | 'comparison-forced-scheduler';
 };
 class RoutingValidationError extends Error {
   constructor(readonly code: RoutingFailureCode, message: string) { super(message); this.name = 'RoutingValidationError'; }
@@ -53,10 +59,14 @@ export const summarizeRoutingDiagnostics = (calls: RoutingModelCall[], events: R
     : values.every((call) => call.totalTokens !== null) ? values.reduce((total, call) => total + call.totalTokens!, 0) : null;
   const repaired = events.some((event) => event.event === 'repair-started');
   const fallback = events.some((event) => event.event === 'fallback');
-  const accepted = events.some((event) => event.stage === 'scheduler' && event.event === 'validation-passed');
+  const decisionFallback = events.some((event) => event.event === 'decision-fallback');
+  const interrupted = events.some((event) => event.event === 'cancelled' || event.event === 'unavailable');
+  const skipped = events.find((event) => event.stage === 'scheduler' && event.event === 'stage-skipped');
+  const accepted = events.some((event) => event.stage === 'scheduler' && event.event === 'validation-passed') || Boolean(skipped);
   return {
-    firstPassValid: accepted && !repaired && !fallback,
+    firstPassValid: accepted && !repaired && !fallback && !decisionFallback && !interrupted,
     repaired, fallback,
+    ...(events.some((event) => event.event.startsWith('decision-')) ? { decisionFallback } : {}),
     validationFailures: events.filter((event) => event.event === 'validation-rejected').length,
     modelCalls: calls.length,
     modelDurationMs: calls.reduce((total, call) => total + call.durationMs, 0),
@@ -65,10 +75,12 @@ export const summarizeRoutingDiagnostics = (calls: RoutingModelCall[], events: R
     repairDurationMs: repairs.reduce((total, call) => total + call.durationMs, 0),
     repairTokens: measuredTokens(repairs),
     fallbackCode: events.find((event) => event.event === 'fallback')?.code ?? null,
+    schedulingPath: events.find((event) => event.event === 'scheduling-selected')?.schedulingPath ?? null,
+    schedulerSkippedReason: skipped?.reason ?? null,
   };
 };
 
-const routingVersion = 'router-scheduler/v2';
+const routingVersion = 'router-scheduler/v3';
 
 const defaultAgents: RoutingAgentDirectoryEntry[] = [
   { id: 'direct-responder', label: '对话 Agent', description: '简短问答与自然对话。', capabilities: ['conversation', 'answer'] },
@@ -112,8 +124,9 @@ const requireAttachmentCapabilities = (router: ChatRouteDecision['router'], inpu
 };
 const requireAttachmentSteps = (scheduler: TurnSchedulingDecision, router: ChatRouteDecision['router'], input: ChatRouteInput): TurnSchedulingDecision => {
   if (router.intent !== 'task') return scheduler;
-  const missing = attachmentRequirements(input).filter((requirement) => !scheduler.steps.some((step) => step.agentId === requirement.agentId));
-  if (!missing.length) return scheduler;
+  const requirements = attachmentRequirements(input);
+  if (!requirements.length) return scheduler;
+  const missing = requirements.filter((requirement) => !scheduler.steps.some((step) => step.agentId === requirement.agentId));
   const used = new Set(scheduler.steps.map((step) => step.id));
   const preparations = missing.map((requirement): TurnSchedulingStep => {
     let id = `attachment-${requirement.capability}`;
@@ -121,7 +134,11 @@ const requireAttachmentSteps = (scheduler: TurnSchedulingDecision, router: ChatR
     used.add(id);
     return { id, title: requirement.capability === 'image-analysis' ? '分析图片附件' : '分析文档附件', agentId: requirement.agentId, objective: `Analyze this turn's ${requirement.capability === 'image-analysis' ? 'image' : 'document'} attachments and pass source-backed findings to the dependent work. User request: ${input.message.slice(0, 1_500)}`, dependsOn: [], skillIds: [] };
   });
-  const steps = [...preparations, ...scheduler.steps.map((step) => step.dependsOn.length ? step : { ...step, dependsOn: preparations.map((item) => item.id) })];
+  const allSteps = [...preparations, ...scheduler.steps];
+  const attachmentIds = new Set(allSteps.filter((step) => requirements.some((requirement) => requirement.agentId === step.agentId)).map((step) => step.id));
+  // Existing attachment Agents are prerequisites too, not just newly inserted
+  // ones. A resulting cycle is rejected by the shared DAG validator.
+  const steps = allSteps.map((step) => attachmentIds.has(step.id) || step.dependsOn.length ? step : { ...step, dependsOn: [...attachmentIds] });
   if (steps.length > 8) throw new RoutingValidationError('invalid-plan', 'Attachment requirements exceed the eight-step schedule budget. Include every required attachment capability while combining other responsibilities into at most eight total steps.');
   return { ...scheduler, steps, activeAgentIds: unique(steps.map((step) => step.agentId)) };
 };
@@ -357,7 +374,24 @@ const validateScheduler = (scheduler: TurnSchedulingDecision, router: ChatRouteD
   };
 };
 
-export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient, signal: AbortSignal): Promise<ChatRouteDecision> => {
+// This option only adds the full Scheduler pass for controlled comparisons. It
+// is not part of ChatRouteInput and is never accepted from an HTTP request.
+export type RoutingExecutionOptions = {
+  forceScheduler?: boolean;
+  decisionRouter?: DecisionRouterAdapter;
+  decisionRouterMode?: 'shadow' | 'hybrid';
+};
+const canUseRouterDirect = (router: ChatRouteDecision['router'], input: ChatRouteInput) => input.mode === 'analyze'
+  && input.message.trim().length > 0 && input.message.length <= 1_000
+  && !input.attachments?.length && !input.conversationContext?.length
+  && !input.currentGraph?.nodes.length && !input.currentGraph?.edges.length
+  && router.intent === 'conversation' && router.taskKind === 'conversation' && router.difficulty === 'trivial'
+  && router.confidence >= 0.95 && !router.requiresExternalFacts && !router.reportExport
+  && router.candidateAgentIds.length === 1 && router.candidateAgentIds[0] === 'direct-responder'
+  && router.requiredCapabilities.length === 1 && router.requiredCapabilities[0] === 'conversation'
+  && router.candidateSkillIds.length === 0;
+
+export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient, signal: AbortSignal, options: RoutingExecutionOptions = {}): Promise<ChatRouteDecision> => {
   const recordDiagnostic = (event: RoutingDiagnostic) => {
     try { input.onDiagnostic?.(event); } catch { /* Diagnostics must not alter routing. */ }
   };
@@ -385,6 +419,7 @@ export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient,
   // One correction budget for the entire Router + Scheduler pass, not one per
   // stage. Provider failures are outside validation and never consume a repair.
   let repairUsed = false;
+  let routerUnchanged = false;
   let lastFailureCode: RoutingFailureCode = 'provider-error';
   const completeAndValidate = async <T>(stage: RoutingModelCall['stage'], request: ModelCompletionRequest, validate: (content: string) => T): Promise<T> => {
     let nextRequest = request;
@@ -423,6 +458,8 @@ export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient,
     }
   };
   let fallback: ChatRouteDecision | undefined;
+  let decisionRouting: ChatRouteDecision['decisionRouting'];
+  let jevSelected = false;
   const { agents, skills } = directories(input);
   const agentIds = new Set(agents.map((agent) => agent.id));
   const skillIds = new Set(skills.map((skill) => skill.id));
@@ -445,7 +482,7 @@ export const routeChatIntent = async (input: ChatRouteInput, model: ModelClient,
   try {
     throwIfCancelled();
     if (!agentIds.size) throw new RoutingUnavailableError();
-    const router = await completeAndValidate('router', {
+    const legacyRouter = () => completeAndValidate('router', {
       signal, responseFormat: 'json', toolChoice: 'none', temperature: 0, maxTokens: 900,
       system: `You are the Router Agent for a production Agent platform. Classify and select candidates only; never answer or schedule.
 Use the latest turn, compact conversation context, attachments, live Agent/Skill directories, and cumulative session Graph. Choose only supplied IDs and the smallest sufficient candidate set. Existing Graph Agents need not run again. Add capabilities only when this turn needs them.
@@ -453,6 +490,7 @@ selectionContract is authoritative: candidateAgentIds must come from selectableA
 Respect a latest-turn instruction not to search again: set requiresExternalFacts=false, omit search Agents and retrieval Skills, and work from supplied context. For a short contextual summary, direct-responder is normally sufficient; if selecting another Agent it must receive a real scheduled step.
 Attachments are additive required capabilities, never mutually exclusive intents. Image inputs require image-analysis/vision-agent; document inputs require document-analysis/document-agent. Mixed attachments or attachment analysis combined with research, reasoning, creation, or implementation are tasks; preserve every useful stage in a minimal plan.
 Intents: conversation only for greetings, thanks, social chat, or casual small talk; agent-registry; web-search for a simple current-fact lookup; academic-search; github-research; image-generation; video-generation; image-analysis; document-analysis; report-export only when the user explicitly asks to export, download, save, or generate a file from an existing answer/conversation; task for every comparison, decision, analysis, design, planning, implementation, report-writing request without an explicit file-export action, or multi-stage request. A retrieval request that also needs analysis or implementation is a task and should include the relevant search Agent plus reasoning/build Agents. Do not call every task complex. Confidence below 0.55 triggers fallback.
+Use conversation + trivial + requiredCapabilities=["conversation"] only for self-contained social dialogue with no requested work, factual lookup, review, generated artifact, code, tool use, or external action. A greeting followed by a task is still a task. Resolve references to prior work with the full context, not as a new greeting. When uncertain, select the actual task/capabilities with honest confidence; never inflate confidence to obtain a shorter route.
 For report-export, include reportExport with scope last-answer or conversation and format md, docx, tex, or pdf. Infer scope and format from the user's wording. Default to last-answer and docx when unspecified. For every other intent, omit reportExport. Never ask ordinary users whether they want an export.
 Return JSON only: {"intent":"...","taskKind":"conversation|question|research|implementation|decision|creative|operations","difficulty":"trivial|easy|moderate|hard|complex","requiresExternalFacts":false,"requiredCapabilities":["..."],"candidateAgentIds":["..."],"candidateSkillIds":["..."],"confidence":0.0,"rationale":"...","reportExport":{"scope":"last-answer|conversation","format":"md|docx|tex|pdf","title":"optional"}}.`,
       user: JSON.stringify({ latestUserTurn: input.message.slice(0, 8_000), mode: input.mode, attachments: input.attachments ?? [], conversationContext: (input.conversationContext ?? []).slice(-12).map((message) => ({ ...message, content: message.content.slice(0, 2_000) })), availableAgents: promptAgents(agents), availableSkills: skills, selectionContract: { selectableAgentIds: [...agentIds], selectableSkillIds: [...skillIds] }, currentSessionGraph: graph }),
@@ -462,9 +500,65 @@ Return JSON only: {"intent":"...","taskKind":"conversation|question|research|imp
       assertKnownIds(parsed.candidateSkillIds, skillIds, 'Router Skill');
       const validated = requireAttachmentCapabilities(enforceExplicitReportExport(normalizeRouter(parsed), input), input);
       validateRouter(validated, input, agentIds, skillIds);
+      routerUnchanged = JSON.stringify(parsed) === JSON.stringify(validated);
       return validated;
     });
-    const scheduler = await completeAndValidate('scheduler', {
+    let router: ChatRouteDecision['router'] | undefined;
+    if (model.location !== 'local' && options.decisionRouter && options.decisionRouterMode) {
+      const startedAt = Date.now();
+      let evaluationCompleted = false;
+      decisionRouting = { mode: options.decisionRouterMode, provider: 'jev', model: options.decisionRouter.model ?? 'jev', outcome: 'fallback' };
+      try {
+        const evaluated = await options.decisionRouter.evaluate({ ...input, availableAgents: agents, availableSkills: skills }, signal);
+        if (evaluated.requestSent !== false) recordModelCall({ stage: 'router', purpose: 'initial', provider: 'jev', model: evaluated.model,
+          status: 'completed', attempts: 1, durationMs: Date.now() - startedAt,
+          totalTokens: evaluated.totalTokens, promptCharacters: evaluated.promptCharacters });
+        evaluationCompleted = true;
+        throwIfCancelled();
+        decisionRouting.model = evaluated.model;
+        if (options.decisionRouterMode === 'shadow') {
+          decisionRouting.outcome = 'shadow';
+          decisionRouting.reason = evaluated.reason;
+          recordDiagnostic({ stage: 'router', event: 'decision-shadow', decisionReason: evaluated.reason });
+        } else if (!evaluated.decision) {
+          decisionRouting.reason = evaluated.reason ?? 'ambiguous';
+          recordDiagnostic({ stage: 'router', event: 'decision-fallback', decisionReason: decisionRouting.reason });
+        } else {
+          const parsed = routerAgentDecisionSchema.parse(evaluated.decision) as ChatRouteDecision['router'];
+          // Keep the same authorization, retrieval and attachment checks. A
+          // missing capability is not silently repaired into a Jev success.
+          validateRouter(parsed, input, agentIds, skillIds);
+          const normalized = requireAttachmentCapabilities(enforceExplicitReportExport(normalizeRouter(parsed), input), input);
+          if (JSON.stringify(parsed) !== JSON.stringify(normalized)) throw new RoutingValidationError('invalid-plan', 'Decision requires legacy semantic routing.');
+          router = parsed;
+          jevSelected = true;
+          decisionRouting.outcome = 'selected';
+          recordDiagnostic({ stage: 'router', event: 'decision-selected' });
+        }
+      } catch (error) {
+        const failure = error as { requestSent?: boolean; promptCharacters?: number };
+        if (!evaluationCompleted && failure?.requestSent !== false) recordModelCall({ stage: 'router', purpose: 'initial', provider: 'jev', model: decisionRouting.model,
+          status: 'failed', attempts: 1, durationMs: Date.now() - startedAt, totalTokens: null, promptCharacters: failure?.promptCharacters ?? 0 });
+        throwIfCancelled();
+        if (error instanceof Error && error.name === 'AbortError') throw error;
+        // Never include upstream error bodies, credentials or source text in
+        // routing metadata. Only bounded diagnostic codes cross the boundary.
+        const code = error instanceof RoutingValidationError ? error.code
+          : ['timeout', 'budget-exceeded', 'invalid-response'].includes(String((error as { code?: unknown })?.code))
+            ? String((error as { code?: unknown }).code) : 'provider-error';
+        decisionRouting.reason = code;
+        recordDiagnostic({ stage: 'router', event: 'decision-fallback', decisionReason: code });
+      }
+    }
+    router ??= await legacyRouter();
+    throwIfCancelled();
+    const direct = !jevSelected && !options.forceScheduler && !repairUsed && routerUnchanged && canUseRouterDirect(router, input);
+    recordDiagnostic({ stage: 'routing', event: 'scheduling-selected', schedulingPath: direct ? 'router-direct' : 'router-scheduler',
+      reason: direct ? 'validated-trivial-conversation' : options.forceScheduler ? 'comparison-forced-scheduler' : 'full-scheduler-required' });
+    const scheduler = direct ? validateScheduler(schedulerAgentDecisionSchema.parse({
+      route: 'direct', activeAgentIds: ['direct-responder'], skippedAgentIds: [], appendAgentIds: ['direct-responder'],
+      selectedSkillIds: [], executionWaves: [], steps: [], requiresReview: false, synthesisAgentId: 'synthesizer', reason: router.rationale,
+    }), router, input, agentIds, skillIds) : await completeAndValidate('scheduler', {
       signal, responseFormat: 'json', toolChoice: 'none', temperature: 0, maxTokens: 1_800,
       system: `You are the Scheduler Agent for a production multi-Agent runtime. Do not answer and do not change Router intent.
 Use only Router candidate IDs. Activate only Agents useful this turn; do not run every Agent already in the Graph. skippedAgentIds lists prior unused Agent roles. appendAgentIds lists genuinely new active roles.
@@ -475,18 +569,28 @@ For attachment tasks, schedule each required attachment analysis capability. Mak
 Return JSON only: {"route":"direct|single-agent|team|full-workflow","activeAgentIds":["..."],"skippedAgentIds":["..."],"appendAgentIds":["..."],"selectedSkillIds":["..."],"executionWaves":[["step-id"]],"steps":[{"id":"...","title":"...","agentId":"...","objective":"...","dependsOn":[],"skillIds":[]}],"requiresReview":false,"synthesisAgentId":"synthesizer","reason":"..."}.`,
       user: JSON.stringify({ latestUserTurn: input.message.slice(0, 8_000), mode: input.mode, routerDecision: router, candidateAgents: promptAgents(agents.filter((agent) => router.candidateAgentIds.includes(agent.id))), candidateSkills: skills.filter((skill) => router.candidateSkillIds.includes(skill.id)), selectionContract: { selectableAgentIds: router.candidateAgentIds, selectableSkillIds: router.candidateSkillIds }, currentSessionGraph: graph }),
     }, (content) => validateScheduler(schedulerAgentDecisionSchema.parse(withSystemSynthesizer(extractJson(content))), router, input, agentIds, skillIds));
+    throwIfCancelled();
+    if (direct) recordDiagnostic({ stage: 'scheduler', event: 'stage-skipped', schedulingPath: 'router-direct', reason: 'validated-trivial-conversation' });
+    throwIfCancelled();
     const execution = router.intent === 'task' && scheduler.route !== 'direct' ? 'workflow' : 'gateway';
     return chatRouteDecisionSchema.parse({
       intent: router.intent, execution, agentRole: execution === 'workflow' ? 'orchestrator' : scheduler.activeAgentIds[0], workflowRoute: scheduler.route,
       requiresSearch: router.requiresExternalFacts
         || router.candidateAgentIds.some((id) => ['search-agent', 'academic-search-agent', 'github-research-agent'].includes(id)),
       reason: scheduler.reason, source: 'router-agent', skillIds: scheduler.selectedSkillIds,
-      routingVersion, routerModel: model.model, ...(router.reportExport ? { reportExport: router.reportExport } : {}), router, scheduler,
+      routingVersion: jevSelected ? 'jev-router/1+router-scheduler/v3' : routingVersion,
+      routerModel: jevSelected ? decisionRouting!.model : model.model,
+      ...(decisionRouting ? { decisionRouting } : {}), ...(router.reportExport ? { reportExport: router.reportExport } : {}), router, scheduler,
     }) as ChatRouteDecision;
   } catch (error) {
     if (signal.aborted || error instanceof Error && error.name === 'AbortError') {
       recordDiagnostic({ stage: 'routing', event: 'cancelled', code: 'cancelled' });
       throw signal.reason ?? error;
+    }
+    if (jevSelected) {
+      recordDiagnostic({ stage: 'router', event: 'decision-fallback', decisionReason: 'scheduler-rejected' });
+      const legacy = await routeChatIntent(input, model, signal, { forceScheduler: options.forceScheduler });
+      return { ...legacy, decisionRouting: { ...decisionRouting!, outcome: 'fallback', reason: 'scheduler-rejected' } };
     }
     let decision: ChatRouteDecision;
     try {
@@ -498,7 +602,7 @@ Return JSON only: {"route":"direct|single-agent|team|full-workflow","activeAgent
     }
     recordDiagnostic({ stage: 'routing', event: 'fallback', code: lastFailureCode });
     try { input.onFallback?.(error); } catch { /* Diagnostics must not alter routing. */ }
-    return decision;
+    return { ...decision, ...(decisionRouting ? { decisionRouting } : {}) };
   }
 };
 
@@ -554,5 +658,6 @@ export const workflowPlanFromChatRoute = (inputDecision: ChatRouteDecision): Wor
     summary: `调度 Agent 已为本轮选择 ${steps.length} 个执行步骤。`, routingReason: decision.reason, steps, profile, graph: graphForSteps(steps), version: 1,
     approvalStatus: 'approved', approvedAt: new Date().toISOString(), approvedBy: 'router-scheduler-control-plane', routingDecision: decision.router,
     schedulingDecision: decision.scheduler, routingSource: decision.source, routingVersion: decision.routingVersion, routerModel: decision.routerModel, routerConfidence: decision.router.confidence,
+    ...(decision.decisionRouting ? { decisionRouting: decision.decisionRouting } : {}),
   };
 };

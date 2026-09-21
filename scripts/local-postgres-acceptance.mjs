@@ -93,6 +93,7 @@ const startIsolatedGateServer = async () => {
     AXIOM_OBJECT_STORAGE_ENDPOINT: '', AXIOM_OBJECT_STORAGE_PATH: join(gateWorkspace, 'artifacts'),
     AXIOM_AGENT_WORKSPACE_ROOT: gateWorkspace, AXIOM_PROVIDER_SECRET: randomUUID() + randomUUID(),
     AXIOM_API_KEY: '', AXIOM_PRINCIPAL_SECRET: '', AXIOM_TRUST_PROXY_AUTH: 'false', NODE_ENV: 'test',
+    AXIOM_DECISION_ROUTER: 'legacy', TYPESAFE_API_KEY: '', TYPESAFE_API_KEY_FILE: '',
     TDAI_MEMORY_ENDPOINT: '', TDAI_MEMORY_API_KEY: '',
     AXIOM_ALLOWED_ORIGINS: `http://127.0.0.1:${port},http://localhost:${port}`,
   };

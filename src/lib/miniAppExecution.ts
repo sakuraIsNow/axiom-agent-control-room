@@ -1,6 +1,7 @@
 import type { ChatRouteDecision, WorkflowEvent, WorkflowTask } from '../types';
 import { getWorkflowTask, streamWorkflowEvents } from './taskRuntime';
 import { taskHasPartialDelivery } from './taskDelivery';
+import { deliveryEventActivity } from './taskPresentation';
 
 export type MiniAppTaskProgress = { content?: string; reset?: boolean; status?: string; taskId?: string; sequence?: number; completionStatus?: 'complete' | 'partial' };
 
@@ -22,10 +23,12 @@ export async function observeMiniAppTask(taskId: string, signal: AbortSignal, on
   onProgress({ taskId, status: '正在读取任务状态' });
   const initial = await getWorkflowTask(taskId, signal);
   onProgress({ status: ['paused', 'awaiting_approval', 'waiting_for_human'].includes(initial.status)
-    ? '等待你处理后继续' : initial.status === 'completed' ? 'Agent 已完成' : initial.status === 'failed' || initial.status === 'cancelled' ? '任务已停止' : 'Agent 正在执行' });
+    ? '等待你处理后继续' : initial.status === 'completed' ? taskHasPartialDelivery(initial) ? 'Agent 已保存部分结果' : 'Agent 已完成' : initial.status === 'failed' || initial.status === 'cancelled' ? '任务已停止' : 'Agent 正在执行' });
   if (!['completed', 'failed', 'cancelled', 'paused', 'awaiting_approval', 'waiting_for_human'].includes(initial.status)) {
     await streamWorkflowEvents(taskId, signal, (event: WorkflowEvent) => {
       onProgress({ sequence: event.sequence });
+      const deliveryActivity = deliveryEventActivity(event);
+      if (deliveryActivity) onProgress({ status: deliveryActivity });
       if (event.type === 'model.delta' && event.payload.stage === 'synthesizer') {
         if (event.payload.reset === true) onProgress({ reset: true });
         if (typeof event.payload.content === 'string') onProgress({ content: event.payload.content });

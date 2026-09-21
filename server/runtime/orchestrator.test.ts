@@ -13,6 +13,7 @@ import { SqliteTaskStore } from './sqliteTaskStore.js';
 import { ToolRegistry } from './toolRegistry.js';
 import { ModelRoutingPolicy } from './modelRouting.js';
 import { FileArtifactStore } from './artifactStore.js';
+import { deliveryModelFixture } from './testing/deliveryModelFixture.js';
 
 class FakeModel implements ModelClient {
   readonly model = 'fake-production-model';
@@ -22,6 +23,8 @@ class FakeModel implements ModelClient {
 
   async complete(request: ModelCompletionRequest) {
     this.requestedModels.push(request.model ?? this.model);
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     if (request.system.includes('You are a researcher')) {
       this.researcherCalls += 1;
       if (this.researcherCalls === 1) throw new Error('Temporary sub-agent failure.');
@@ -225,6 +228,8 @@ class ConflictModel implements ModelClient {
   readonly model = 'conflict-model';
 
   async complete(request: ModelCompletionRequest) {
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     let content: string;
     if (request.system.includes('planner in a production')) {
       content = JSON.stringify({
@@ -308,6 +313,8 @@ class PausableParallelModel implements ModelClient {
   }
 
   async complete(request: ModelCompletionRequest) {
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     let content: string;
     if (request.system.includes('You are a researcher sub-agent')) {
       this.targetCalls += 1;
@@ -334,6 +341,8 @@ class DependencyTransferModel implements ModelClient {
   readonly downstreamInputs = new Map<string, string>();
 
   async complete(request: ModelCompletionRequest) {
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     let content: string;
     if (request.system.includes('You are a researcher sub-agent')) {
       content = JSON.stringify({
@@ -358,6 +367,8 @@ class ToolApprovalModel implements ModelClient {
   builderCalls = 0;
 
   async complete(request: ModelCompletionRequest) {
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     let content: string;
     if (request.system.includes('planner in a production')) {
       content = JSON.stringify({
@@ -399,6 +410,8 @@ class NativeToolCallModel implements ModelClient {
   nativeToolNames: string[] = [];
 
   async complete(request: ModelCompletionRequest) {
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     if (request.system.includes('planner in a production')) {
       const content = JSON.stringify({
         summary: 'Read one bounded workspace file and validate the result.',
@@ -439,6 +452,8 @@ class CustomRoleModel implements ModelClient {
   readonly model = 'custom-role-model';
 
   async complete(request: ModelCompletionRequest) {
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     let content: string;
     if (request.system.includes('planner in a production')) {
       content = JSON.stringify({
@@ -481,6 +496,8 @@ class BoundedReplannerModel implements ModelClient {
   originalCalls = 0;
 
   async complete(request: ModelCompletionRequest) {
+    const delivery = deliveryModelFixture(request);
+    if (delivery) return delivery;
     let content: string;
     if (request.system.includes('You are a researcher sub-agent') && !request.user.includes('诊断步骤')) {
       this.originalCalls += 1;
@@ -1400,6 +1417,70 @@ describe('WorkflowOrchestrator', () => {
       assert.equal((await store.getEvents(task.id)).length, 0);
     } finally {
       await store.close();
+    }
+  });
+
+  test('service interruption checkpoints completed work without making its active successor a failed terminal step', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'axiom-interrupted-checkpoint-'));
+    const filename = join(root, 'tasks.sqlite');
+    let store = new SqliteTaskStore(filename);
+    await store.initialize();
+    const controller = new AbortController();
+    let successorStarted!: () => void;
+    const started = new Promise<void>((resolve) => { successorStarted = resolve; });
+    const firstModel: ModelClient = {
+      model: 'interrupted-checkpoint-fixture',
+      async complete(request) {
+        if (request.system.includes('You are a analyst sub-agent')) return { content: JSON.stringify({ output: 'Budget: 4700.', evidence: [], confidence: 0.9, toolCalls: [] }), attempts: 1, durationMs: 1 };
+        successorStarted();
+        await new Promise<never>((_resolve, reject) => {
+          if (request.signal.aborted) reject(request.signal.reason);
+          else request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+        });
+        throw new Error('Interrupted output must never be returned.');
+      },
+    };
+    try {
+      const original = await store.createTask({ tenantId: 'tenant-a', userId: 'user-a', sessionId: 'interrupted-session', title: 'restart active successor', input: 'Analyze and deliver budget.', mode: 'build',
+        plan: { summary: 'Analyze before delivery.', routingReason: 'Sequential checkpoint test.', approvalStatus: 'approved',
+          profile: { kind: 'implementation', difficulty: 'moderate', route: 'team', score: 3, reasons: ['test'], maxSteps: 2, requiresReview: false },
+          steps: [
+            { id: 'analyze', title: 'Analyze', role: 'analyst', objective: 'Read budget.', dependsOn: [], acceptanceCriteria: ['Budget preserved.'] },
+            { id: 'deliver', title: 'Deliver', role: 'builder', objective: 'Deliver budget.', dependsOn: ['analyze'], acceptanceCriteria: ['Budget delivered.'], failureStrategy: 'retry' },
+          ] } });
+      const run = new WorkflowOrchestrator(store, new EventHub(), firstModel, memory, pino({ level: 'silent' })).run(original, controller.signal);
+      await Promise.race([started, run.then(() => { throw new Error('Task ended before active-step interruption.'); })]);
+      controller.abort(new DOMException('Runtime shutting down', 'AbortError'));
+      const interrupted = await run;
+      assert.notEqual(interrupted.status, 'cancelled');
+      assert.deepEqual(interrupted.stepResults.map((item) => item.stepId), ['analyze']);
+      assert.equal(interrupted.stepResults[0]?.status, 'completed');
+      const before = await store.getEvents(original.id);
+      assert.equal(before.filter((event) => event.type === 'agent.failed').length, 0);
+      assert.ok(before.some((event) => event.type === 'agent.interrupted' && event.payload.stepId === 'deliver'));
+
+      await store.close();
+      store = new SqliteTaskStore(filename);
+      await store.initialize();
+      const restored = await store.getTask(original.id);
+      let deliveryCalls = 0;
+      const recoveredModel: ModelClient = { model: 'recovered-checkpoint-fixture', async complete(request) {
+        assert.ok(!request.system.includes('You are a analyst sub-agent'), 'completed predecessor must not execute again');
+        assert.match(request.user, /4700/);
+        const synthesis = request.system.includes('You are the synthesizer');
+        if (!synthesis) deliveryCalls += 1;
+        return { content: synthesis ? 'Delivered budget 4700.' : JSON.stringify({ output: 'Report budget: 4700.', evidence: [], confidence: 0.9, toolCalls: [] }), attempts: 1, durationMs: 1 };
+      } };
+      const completed = await new WorkflowOrchestrator(store, new EventHub(), recoveredModel, memory, pino({ level: 'silent' })).run(restored!, AbortSignal.timeout(5_000));
+      assert.equal(completed.status, 'completed', completed.error);
+      assert.equal(completed.result, 'Delivered budget 4700.');
+      assert.equal(deliveryCalls, 1);
+      assert.deepEqual(completed.stepResults.map((item) => item.stepId), ['analyze', 'deliver']);
+      assert.ok(completed.stepResults.every((item) => item.status === 'completed'));
+    } finally {
+      controller.abort(new DOMException('Test cleanup', 'AbortError'));
+      await store.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 

@@ -90,8 +90,8 @@ const revoke=URL.revokeObjectURL.bind(URL); URL.revokeObjectURL=(url)=>{window.q
 function Fixture({kind,id,context}) {
  const {setLanguage}=useUiLanguage(); window.qa.language=setLanguage;
  const [tick,setTick]=React.useState(0); window.qa.rerender=()=>setTick(v=>v+1);
- const plugin={id:'plugin',name:'Fixture Mini App',definition:{type:'mini-app',width:900,height:680,agentEnabled:true,htmlContent:'<button id="request">Ask</button><output id="result"></output><script>document.querySelector("button").onclick=()=>parent.postMessage({type:"axiom.plugin.agent.request",requestId:"r1",prompt:"Analyze"},"*");addEventListener("message",event=>{if(event.data.type==="axiom.plugin.agent.response")document.querySelector("output").textContent=event.data.content||event.data.error});<'+ '/script>'}};
- const requested=async(_plugin,prompt,signal,progress)=>{window.qa.pluginStarts=(window.qa.pluginStarts||0)+1;signal.addEventListener('abort',()=>window.qa.aborts++); progress({taskId:'plugin-run',status:'Agent request queued'}); await new Promise(resolve=>window.qa.releasePlugin=resolve); throw new Error('Connection interrupted')};
+ const plugin={id:'plugin',name:'Fixture Mini App',definition:{type:'mini-app',width:900,height:680,agentEnabled:true,htmlContent:'<button id="request">Ask</button><output id="result"></output><output id="status"></output><script>document.querySelector("button").onclick=()=>parent.postMessage({type:"axiom.plugin.agent.request",requestId:"r1",prompt:"Analyze"},"*");addEventListener("message",event=>{if(event.data.type==="axiom.plugin.agent.response")document.querySelector("output").textContent=event.data.content||event.data.error;if(event.data.type==="axiom.plugin.agent.delta"&&event.data.status)document.querySelector("#status").textContent=event.data.status});<'+ '/script>'}};
+ const requested=async(_plugin,prompt,signal,progress)=>{window.qa.emitPluginProgress=progress;window.qa.pluginStarts=(window.qa.pluginStarts||0)+1;signal.addEventListener('abort',()=>window.qa.aborts++); progress({taskId:'plugin-run',status:'Agent request queued'}); await new Promise(resolve=>window.qa.releasePlugin=resolve); throw new Error('Connection interrupted')};
  const resume=async(taskId,signal,progress,after)=>{window.qa.resumed={taskId,after};await fetch('/api/qa/complete-plugin',{signal});progress({taskId,status:'Done'});return 'Plugin result after approval'};
  const content=kind==='nexus'?React.createElement(WorkflowStudio):kind==='operations'?React.createElement(OperationsConsole):kind==='plugin'?React.createElement(MiniAppWindow,{plugin,onClose:()=>{},onAgentRequest:requested,onAgentResume:resume}):kind==='media'?React.createElement(TaskMedia,{src:'/api/tasks/media/artifacts/media/'+id,alt:'Generated fixture'}):React.createElement(TaskActionPanel,{taskId:id,refreshKey:tick,context,onChanged:async(value)=>window.qa.changes.push(value)});
  return React.createElement('main',{className:'axiom-dashboard',style:{padding:'18px',position:'relative',height:'100vh',overflow:'auto',display:'block'}},React.createElement('div',{style:{maxWidth:kind==='panel'?'440px':'none'}},content));
@@ -198,6 +198,13 @@ window.qa.mount('panel');
     const frame = page.frameLocator('iframe');
     await frame.getByRole('button', { name: 'Ask' }).click();
     await expect.poll(() => page.evaluate(() => Boolean(window.qa.releasePlugin))).toBe(true);
+    await page.evaluate(() => window.qa.emitPluginProgress({ status: '交付 Agent 正在逐项复核结果' }));
+    await expect(frame.locator('#status')).toHaveText('Delivery Agent is reviewing each requirement');
+    await page.evaluate(() => window.qa.language('zh-CN'));
+    await expect(page.getByRole('button', { name: '按当前结果交付' }).or(page.getByRole('button', { name: '批准交付' }))).toBeVisible();
+    await page.evaluate(() => window.qa.emitPluginProgress({ status: '交付 Agent 正在修正未满足项' }));
+    await expect(frame.locator('#status')).toHaveText('交付 Agent 正在修正未满足项');
+    await page.evaluate(() => window.qa.language('en'));
     await page.evaluate(() => window.qa.rerender());
     assert.equal(await page.evaluate(() => window.qa.aborts), 0);
     await page.evaluate(() => window.qa.releasePlugin());
@@ -293,6 +300,123 @@ window.qa.mount('panel');
       assert.ok(bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= height);
       await page.screenshot({ path: name === 'desktop' ? 'qa/task-actions-nexus-issues.png' : 'qa/task-actions-nexus-issues-mobile.png', fullPage: false });
     }
+  });
+  const delivery = {
+    schemaVersion: 1, inputDigest: 'fixture-input', contractDigest: 'fixture-contract', resultDigest: 'fixture-output',
+    status: 'needs-revision', basis: 'model-assessment', factualCorrectness: 'not-independently-verified',
+    assessedAt: '2026-09-21T00:00:00Z', correctionAttempts: 1,
+    runtimeExecution: 'completed', runtimeGaps: [], upstreamReviewApproved: true,
+    requirements: [
+      { id: 'budget', text: 'Keep the revised budget', status: 'satisfied', reason: 'The budget matches the latest instruction.', outputQuote: 'Budget: 4500' },
+      { id: 'source', text: 'Include the source', status: 'unsatisfied', reason: 'The output omitted the requested source.', outputQuote: '' },
+      { id: 'price', text: 'Verify the current price', status: 'unknown', reason: 'A live price was not available.', outputQuote: '' },
+    ],
+  };
+  tasks.set('delivery', { ...task('delivery', 'completed'), review: { ...review, approved: true, delivery } });
+  await check('delivery checks appear consistently across task, chat and Nexus without equating acceptance with correctness', async () => {
+    for (const context of ['task', 'chat', 'nexus']) {
+      await page.evaluate((context) => { window.qa.language('en'); window.qa.mount('panel', 'delivery', context); }, context);
+      const receipt = page.getByTestId('task-delivery-review');
+      await expect(receipt.locator('summary')).toContainText('Delivery Check');
+      await expect(receipt.locator('summary')).toContainText('1/3');
+      await expect(receipt.locator('summary')).toContainText('Revisions needed');
+      await expect(receipt).toHaveAttribute('data-outcome', 'needs-revision');
+      if (!await receipt.evaluate((element) => element.open)) await receipt.locator('summary').click();
+      await expect(receipt).toContainText('facts are not independently verified');
+      await expect(receipt).toContainText('The output omitted the requested source.');
+      await expect(receipt).toContainText('A live price was not available.');
+      await expect(receipt).toContainText('Corrections: 1');
+      await expect(receipt.locator('blockquote')).toHaveText('Budget: 4500');
+      await expect(page.getByRole('button', { name: 'Accept Result' })).toHaveCount(0);
+    }
+  });
+  await check('delivery check labels translate without changing user requirements or claiming factual verification', async () => {
+    await page.evaluate(() => window.qa.language('zh-CN'));
+    const receipt = page.getByTestId('task-delivery-review');
+    await expect(receipt.locator('summary')).toContainText('交付检查');
+    await expect(receipt.locator('summary')).toContainText('待修正');
+    await expect(receipt).toContainText('事实未独立验证');
+    await expect(receipt).toContainText('Include the source');
+    await expect(receipt).toContainText('The output omitted the requested source.');
+    await page.evaluate(() => window.qa.language('en'));
+  });
+  await check('switching to legacy tasks removes the previous delivery receipt instead of inventing a result', async () => {
+    await page.evaluate(() => window.qa.mount('panel', 'b', 'chat'));
+    await expect(page.getByTestId('task-delivery-review')).toHaveCount(0);
+    await expect(page.getByText(review.summary, { exact: true })).toBeVisible();
+    tasks.set('delivery-inconclusive', { ...task('delivery-inconclusive', 'completed'), review: { ...review, approved: true, delivery: { ...delivery, status: 'inconclusive', requirements: [] } } });
+    await page.evaluate(() => window.qa.mount('panel', 'delivery-inconclusive', 'chat'));
+    await expect(page.getByTestId('task-delivery-review').locator('summary')).toContainText('Needs checking');
+    await expect(page.getByTestId('task-delivery-review').locator('summary')).not.toContainText('Requirements reviewed');
+  });
+  await check('passed delivery receipts say requirements reviewed, and glass details remain readable on desktop and mobile', async () => {
+    tasks.set('delivery-passed', { ...task('delivery-passed', 'completed'), review: { ...review, approved: true, delivery: { ...delivery, status: 'passed', correctionAttempts: 0, requirements: [delivery.requirements[0]] } } });
+    for (const [name, width, height] of [['desktop', 1440, 900], ['mobile', 390, 844]]) {
+      await page.setViewportSize({ width, height });
+      await page.evaluate(() => window.qa.mount('panel', 'delivery-passed', 'chat'));
+      const receipt = page.getByTestId('task-delivery-review');
+      await expect(receipt.locator('summary')).toContainText('Requirements reviewed');
+      await expect(receipt.locator('summary')).toContainText('1/1');
+      if (!await receipt.evaluate((element) => element.open)) await receipt.locator('summary').click();
+      await expect(receipt).toContainText('facts are not independently verified');
+      const bounds = await receipt.boundingBox();
+      assert.ok(bounds && bounds.width > 250 && bounds.x >= 0 && bounds.x + bounds.width <= width);
+      const metrics = await receipt.evaluate((element) => ({ overflow: element.scrollWidth > element.clientWidth, background: getComputedStyle(element).backgroundColor }));
+      assert.deepEqual(metrics, { overflow: false, background: 'rgba(0, 0, 0, 0)' });
+      await page.screenshot({ path: `qa/task-actions-delivery-${name}.png`, fullPage: true });
+    }
+  });
+  await check('runtime gaps and upstream rejection remain visible after an operator accepts a requirements-passed delivery', async () => {
+    tasks.set('delivery-runtime-gap', { ...task('delivery-runtime-gap', 'completed'), review: { ...review, approved: true, delivery: { ...delivery, status: 'passed', runtimeExecution: 'partial', runtimeGaps: ['Requested export did not finish.'], upstreamReviewApproved: false, requirements: [delivery.requirements[0]] } } });
+    await page.evaluate(() => window.qa.mount('panel', 'delivery-runtime-gap', 'chat'));
+    const receipt = page.getByTestId('task-delivery-review');
+    await expect(receipt.locator('summary')).toContainText('Revisions needed');
+    await expect(receipt).toHaveAttribute('data-outcome', 'needs-revision');
+    await expect(receipt.locator('summary')).not.toContainText('Requirements reviewed');
+    if (!await receipt.evaluate((element) => element.open)) await receipt.locator('summary').click();
+    await expect(page.getByTestId('task-delivery-runtime')).toContainText('Execution is incomplete');
+    await expect(page.getByTestId('task-delivery-runtime')).toContainText('Upstream review did not pass');
+    await expect(page.getByTestId('task-delivery-runtime')).toContainText('Requested export did not finish.');
+    await page.evaluate(() => window.qa.language('zh-CN'));
+    await expect(page.getByTestId('task-delivery-runtime')).toContainText('执行结果尚不完整');
+    await expect(page.getByTestId('task-delivery-runtime')).toContainText('上游审查未通过');
+  });
+  await check('incomplete final deliveries hide the old score and explicitly confirm partial acceptance in both languages', async () => {
+    tasks.set('delivery-partial-review', { ...task('delivery-partial-review', 'waiting_for_human'), review: { ...review, score: 100, delivery } });
+    await page.evaluate(() => { window.qa.language('en'); window.qa.mount('panel', 'delivery-partial-review'); });
+    await expect(page.getByRole('button', { name: 'Accept Partial Result', exact: true })).toBeVisible();
+    await expect(page.locator('.task-action-surface')).not.toContainText('100/100');
+    await page.getByRole('button', { name: 'Accept Partial Result', exact: true }).click();
+    const dialog = page.getByTestId('review-confirm-dialog');
+    await expect(dialog.getByRole('heading')).toHaveText('Accept the partial result?');
+    await expect(dialog).toContainText('Unmet requirements remain recorded. This does not confirm the result is correct.');
+    await expect(dialog.getByRole('button', { name: 'Accept Partial Result', exact: true })).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.evaluate(() => window.qa.language('zh-CN'));
+    await page.getByRole('button', { name: '接受部分结果', exact: true }).click();
+    await expect(dialog.getByRole('heading')).toHaveText('确认接受部分结果？');
+    await expect(dialog).toContainText('未满足项仍会保留，此操作不表示已验证正确。');
+    await dialog.getByRole('button', { name: '接受部分结果', exact: true }).click();
+    await expect(page.getByTestId('human-review-controls')).toHaveCount(0);
+    await expect(page.getByTestId('task-delivery-review')).toHaveAttribute('data-outcome', 'needs-revision');
+    await expect(page.locator('.task-action-surface')).not.toContainText('100/100');
+    assert.equal(mutations.at(-1).action, 'approve-review');
+  });
+  await check('deterministic calculation failures expose expected and actual values despite an upstream model pass', async () => {
+    tasks.set('delivery-calculation', { ...task('delivery-calculation', 'waiting_for_human'), review: { ...review, score: 100, delivery: { ...delivery, status: 'needs-revision', upstreamReviewApproved: true, requirements: [{ id: 'budget-check', text: 'Calculate the revised budget', status: 'unsatisfied', reason: 'The deterministic sum differs from the answer.', outputQuote: 'Total: 5200', calculation: { basis: 'deterministic-arithmetic', status: 'unsatisfied', expected: 4700, actual: 5200, path: ['budget'] } }] } } });
+    await page.evaluate(() => { window.qa.language('en'); window.qa.mount('panel', 'delivery-calculation', 'chat'); });
+    const receipt = page.getByTestId('task-delivery-review');
+    await expect(receipt.locator('summary')).toContainText('Revisions needed');
+    if (!await receipt.evaluate((element) => element.open)) await receipt.locator('summary').click();
+    const calculation = receipt.locator('.task-delivery-calculation');
+    await expect(calculation).toHaveText('Calculation check: Expected 4700 → Actual 5200');
+    await expect(calculation).toHaveAttribute('data-outcome', 'unsatisfied');
+    assert.equal(await calculation.evaluate((element) => getComputedStyle(element).color), 'rgb(216, 120, 125)');
+    await expect(receipt).toContainText('facts are not independently verified');
+    await expect(page.getByRole('button', { name: 'Accept Partial Result', exact: true })).toBeVisible();
+    await page.evaluate(() => window.qa.language('zh-CN'));
+    await expect(calculation).toHaveText('计算校验: 预期 4700 → 实际 5200');
+    await expect(receipt.locator('summary')).toContainText('待修正');
   });
   assert.deepEqual(errors, []);
   process.stdout.write(`${JSON.stringify({ results, errors, mutations: mutations.length }, null, 2)}\n`);

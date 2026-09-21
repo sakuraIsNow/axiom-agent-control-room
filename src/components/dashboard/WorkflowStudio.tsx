@@ -72,6 +72,7 @@ import { isNexusTaskExecuting, isNexusTaskTerminal, nexusTaskActivity } from '..
 import { TaskActionPanel } from './TaskActionPanel';
 import { ChatMessageMarkdown } from './ChatArtifact';
 import { taskHasPartialDelivery } from '../../lib/taskDelivery';
+import { deliveryEventActivity } from '../../lib/taskPresentation';
 import { useUiLanguage } from '../../lib/uiLanguage';
 import '../../styles/workflow-release.css';
 
@@ -746,6 +747,8 @@ export function WorkflowStudio({ providerConfig }: { providerConfig?: TaskProvid
             setRunActivity('汇总 Agent 正在生成 Nexus 输出');
           }
           if (event.type === 'review.started') setRunActivity('质量检查正在进行');
+          const deliveryActivity = deliveryEventActivity(event);
+          if (deliveryActivity) setRunActivity(deliveryActivity);
         }, taskSequences.current.get(target.taskId) ?? 0);
         const task = await getWorkflowTask(target.taskId, controller.signal);
         if (!current()) return;

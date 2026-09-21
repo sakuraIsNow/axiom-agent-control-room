@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { WorkflowTask } from '../types';
-import { getTaskHumanSnapshot, submitTaskHumanAction, TaskActionError, taskNeedsHumanAction } from './taskActionRuntime';
+import { deliveryReviewSummary, getTaskHumanSnapshot, submitTaskHumanAction, TaskActionError, taskNeedsHumanAction } from './taskActionRuntime';
 import { isNexusTaskExecuting, isNexusTaskTerminal, nexusTaskActivity } from './nexusRunPresentation';
 
 test('paused tasks retain pending plan, review and each distinct tool approval', () => {
@@ -51,4 +51,46 @@ test('Nexus only treats completed, failed and cancelled as terminal; human bound
   assert.equal(isNexusTaskExecuting('running'), true);
   assert.equal(isNexusTaskTerminal('completed'), true);
   assert.equal(nexusTaskActivity('completed', true), 'Agent Nexus 已保存部分结果');
+});
+
+test('delivery checks count requirements without treating human acceptance as a passed assessment', async () => {
+  const receipt = {
+    schemaVersion: 1,
+    inputDigest: 'input-digest', contractDigest: 'contract-digest', resultDigest: 'result-digest',
+    status: 'needs-revision', basis: 'model-assessment', assessedAt: '2026-09-21T00:00:00Z', correctionAttempts: 1,
+    factualCorrectness: 'not-independently-verified',
+    requirements: [
+      { id: 'r1', text: 'Use the latest budget', status: 'satisfied', reason: 'Matches the revision.', outputQuote: '4500' },
+      { id: 'r2', text: 'Provide a source', status: 'unsatisfied', reason: 'No source was supplied.', outputQuote: '' },
+      { id: 'r3', text: 'Verify the price', status: 'unknown', reason: 'Live price was not available.', outputQuote: '' },
+    ],
+  } as const;
+  const task = { id: 'accepted', revision: 4, status: 'completed', review: { approved: true, score: 80, summary: 'Accepted by operator', gaps: [], requiredCorrections: [], delivery: { ...receipt, requirements: [...receipt.requirements] } } } as unknown as WorkflowTask;
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => Response.json({ task, actionPermissions: { canManage: true } });
+    const snapshot = await getTaskHumanSnapshot(task.id);
+    const summary = deliveryReviewSummary(snapshot.task);
+    assert.equal(summary?.receipt.status, 'needs-revision');
+    assert.equal(summary?.receipt.factualCorrectness, 'not-independently-verified');
+    assert.equal(summary?.satisfied, 1);
+    assert.equal(summary?.total, 3);
+    assert.deepEqual(summary?.outstanding.map((requirement) => requirement.id), ['r2', 'r3']);
+  } finally { globalThis.fetch = original; }
+});
+
+test('older tasks do not invent delivery checks from reviewer approval or score', () => {
+  assert.equal(deliveryReviewSummary({}), null);
+  assert.equal(deliveryReviewSummary({ review: { approved: true, score: 100, summary: 'Approved', gaps: [], requiredCorrections: [] } }), null);
+});
+
+test('delivery summary does not present upstream rejection or incomplete execution as a fully passed result', () => {
+  const task = { review: { approved: true, delivery: { schemaVersion: 1, status: 'passed', requirements: [], runtimeExecution: 'completed', runtimeGaps: [], upstreamReviewApproved: true } } } as unknown as WorkflowTask;
+  assert.equal(deliveryReviewSummary(task)?.status, 'passed');
+  const receipt = task.review!.delivery!;
+  for (const override of [{ runtimeExecution: 'partial' }, { runtimeGaps: ['Export unavailable'] }, { upstreamReviewApproved: false }]) {
+    const checked = deliveryReviewSummary({ review: { ...task.review!, delivery: { ...receipt, ...override } } } as WorkflowTask);
+    assert.equal(checked?.status, 'needs-revision');
+  }
+  assert.equal(deliveryReviewSummary({ review: { ...task.review!, delivery: { ...receipt, runtimeExecution: undefined } } })?.status, 'inconclusive');
 });

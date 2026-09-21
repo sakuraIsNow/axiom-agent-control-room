@@ -1,0 +1,52 @@
+name: Offline Quality Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-quality:
+    name: Deterministic acceptance (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install Chromium and Linux dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - name: Install Chromium
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+      - name: Check, test, build and run isolated acceptance
+        run: npm run qa:ci
+      - name: Preserve results and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            qa/ci-quality-gate-results.json
+            qa/ci-quality/**
+          if-no-files-found: warn
+          retention-days: 14

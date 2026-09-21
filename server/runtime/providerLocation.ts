@@ -1,4 +1,17 @@
+import { isIP } from 'node:net';
+
 export type ProviderLocation = 'internet' | 'local';
+
+const exactHostname = (value: string) => {
+  const hostname = value.toLowerCase();
+  if (!hostname || hostname.length > 253 || !hostname.split('.').every((label) =>
+    label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) return null;
+  return hostname;
+};
+
+// Only deployment configuration can classify a custom DNS name as private.
+const configuredLocalModelHosts = () => new Set((process.env.AXIOM_LOCAL_MODEL_HOSTS ?? '').split(',')
+  .map((value) => exactHostname(value.trim())).filter((value): value is string => value !== null));
 
 export const defaultProviderLocation = (baseUrl: string): ProviderLocation => {
   try { return isLocalProviderHostname(new URL(baseUrl).hostname) ? 'local' : 'internet'; }
@@ -6,7 +19,13 @@ export const defaultProviderLocation = (baseUrl: string): ProviderLocation => {
 };
 
 export const isLocalProviderHostname = (rawHostname: string) => {
-  const hostname = rawHostname.toLowerCase().replace(/^\[|\]$/g, '');
+  let hostname = rawHostname.toLowerCase();
+  if (hostname.startsWith('[') || hostname.endsWith(']')) {
+    if (!hostname.startsWith('[') || !hostname.endsWith(']') || isIP(hostname.slice(1, -1)) !== 6) return false;
+    hostname = hostname.slice(1, -1);
+  }
+  if (!exactHostname(hostname) && isIP(hostname) !== 6) return false;
+  if (configuredLocalModelHosts().has(hostname)) return true;
   if (hostname === 'localhost' || hostname === '::1' || hostname === 'host.docker.internal' || hostname.endsWith('.local')) return true;
   if (!hostname.includes('.') && !hostname.includes(':')) return true;
   if (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) return true;

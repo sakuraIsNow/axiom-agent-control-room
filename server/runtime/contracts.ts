@@ -193,6 +193,10 @@ export type WorkflowPlan = {
   routingSource?: 'router-agent' | 'semantic-model' | 'deterministic-fallback';
   routerModel?: string;
   routerConfidence?: number;
+  decisionRouting?: {
+    mode: 'shadow' | 'hybrid'; provider: 'jev'; model: string;
+    outcome: 'selected' | 'shadow' | 'fallback'; reason?: string;
+  };
   /** Immutable exact-turn input artifacts, persisted before queue admission. */
   inputAttachments?: import('./taskInputAttachments.js').TaskInputAttachmentSnapshot[];
   mediaRequest?: { mode?: 'generate' | 'edit'; size?: string; count?: number; quality?: 'low' | 'medium' | 'high' | 'auto' };
@@ -667,6 +671,7 @@ export type ReviewResult = {
   summary: string;
   gaps: string[];
   requiredCorrections: string[];
+  delivery?: import('./deliveryVerification.js').DeliveryAssessment;
 };
 
 export type WorkflowTask = {
@@ -746,6 +751,10 @@ export type UpsertSessionInput = Omit<PersistedSession, 'tenantId' | 'userId' | 
 };
 
 export type RuntimeEventType =
+  | 'delivery.contract.created'
+  | 'delivery.stage.started'
+  | 'delivery.assessed'
+  | 'delivery.correction.started'
   | 'task.created'
   | 'task.queued'
   | 'task.started'

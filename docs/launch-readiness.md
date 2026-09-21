@@ -1,14 +1,28 @@
 # 上线就绪度与产品能力评估
 
-更新时间：2026-09-07
+更新时间：2026-09-21
 
 ## 稳定性整改说明
 
-9 月 6 日的第一批稳定性整改、9 月 7 日的[第二批执行闭环](execution-loop-upgrade-20260907.md)和[跨入口协作](cross-entry-consistency-20260907.md)保留原验收记录。当前 `v2.3.0-rc.7` 收口复合检索降级、执行质量测量、有数据双语状态与真实 Graph 交互性能，最新状态见 [rc.7 产品质量记录](rc7-product-quality-20260907.md)。下文更早的通过结果均为历史基线，不代表整个企业生产系统已经验收。
+当前版本为 `v2.3.0-rc.8` 加 Unreleased 开发改动。9 月 20 日的[发布验收](rc8-release-acceptance-20260920.md)、[路由与 RSI 对照](routing-rsi-upgrade-20260920.md)及 9 月 21 日的[业务交付与稳定性收口](business-delivery-closure-20260921.md)分别记录当轮证据。以下按日期保留的结果均为历史基线，不是当前部署实时健康报告，也不代表整个企业生产系统已经验收。
 
 ## 结论
 
-当前工作树是 `v2.3.0-rc.7` 产品质量候选版，保留中英文界面与内网企业化能力。任务创建时加密固定服务配置；Agent 的工具决策、外部写入回执与不确定结果分别保存，人工处理入口覆盖对话、任务、Nexus 和 Mini App。新增降级路由与固定交付评测不替代真实业务验收；执行完成、人工接受与事实正确分别看待。租户治理、工具配额与熔断、本地 Fake MCP 门禁、目录漂移保护和不可信内容隔离继续保留。目标部署仍需单独验收外部 OIDC/OAuth、MemoryCore、云对象存储和 Harness/Codex sidecar，不能仅凭候选版号宣称完整企业生产系统已经上线验收。
+当前适用于本地和受控内网团队试用，尚不是公开多用户企业 SaaS。任务创建时加密固定服务配置；工具决策、外部写入回执与不确定结果分别保存，人工处理入口覆盖对话、任务、Nexus 和 Mini App。本轮补充跨组件交付门禁、真实模型小样本、无密钥 CI 和中断恢复修复；模型自评、任务完成、人工接受与事实正确仍是不同结论。个人空间与可信登录按当前计划后移；目标部署的 OIDC/OAuth、MemoryCore、对象存储和 Harness/Codex sidecar 仍须独立现场验收。
+
+## 当前验收口径
+
+- 最新 [Jev 接入批次](jev-routing-integration-20260921.md) 最终源码检查/构建通过，925 项单测（907 通过 / 18 PG 条件跳过），本机无密钥 CI 12/12；隔离全门禁 45 通过 / 1 Nexus Loop 失败 / 3 外部跳过，且开始于最终隐私补丁之前。此次 Git 源码同步不是新发布或完整生产验收，不以此前全绿快照覆盖本轮失败。
+- 复杂非空计划新增 [最终交付验收](final-delivery-verification-20260921.md)：原文要求与最终正文绑定，最多一次无工具修订，无法通过则保留草稿并等待。模型覆盖检查与执行完整性、人工接受、事实正确性分别记录；不声称任意任务准确率已达标。
+- `qa:delivery-live` 显式运行两个固定复杂计划：完整资料的多约束交付，以及缺少独立证据时正确等待。首轮失败、提示澄清及复测分别保存，不等同跨行业/跨模型留出评测。
+- `qa:business-delivery` 验证六类业务的 24 个确定性案例，运行真实解析、API、持久化和执行组件，但模型采用本地替身，不是模型成功率。
+- `qa:business-live` 是显式启用、会产生模型费用的四例合成任务评测。保留失败、原文、实测 Token 和延迟；不代表真实搜索、媒体供应商或任意行业准确率。
+- `qa:ci` 在无部署配置、无供应商密钥的临时源码副本中执行。重试后成功标记为 `unstable` 并让门禁失败，不能计为首次通过。
+- 正常发布还需完整 `qa:all:local`。本机通过不代替目标部署验收；未配置的外部服务保持跳过。最新实测数字见本轮收口记录。
+
+## 历史基线
+
+以下状态、版本、端口和指标只描述各节记录当日，不能据此推断今天运行实例的配置。
 
 ## v2.3.0-rc.5 中英文界面验证（2026-09-04）
 
@@ -57,10 +71,10 @@ PostgreSQL 专项随后在独立临时库补跑为 `1 passed / 0 failed`，验�
 | 能力 | 当前状态 | 证据/边界 |
 | --- | --- | --- |
 | 任务持久化与恢复 | 已可用，本机故障接管已验收 | PostgreSQL task/event 表、租约、`FOR UPDATE SKIP LOCKED`、SSE 事件回放；跨进程崩溃、到期竞争、唯一接管和单次终态已进入 `qa:postgres-failover` |
-| 智能分级路由 | 已可用 | `direct`、`single-agent`、`team`、`full-workflow` 四路回归评测 4/4 |
-| 子 Agent 协作 | 已可用 | Planner 生成依赖批次，Researcher/Analyst/Builder 并行，Reviewer 可要求修正 |
+| 智能分级路由 | 已可用 | Router/Scheduler 模型决策、真实目录校验和有界纠错；`direct`、`single-agent`、`team`、`full-workflow` 四路，严格首轮纯对话可省略 Scheduler；最新三轮在线 21/21 |
+| 子 Agent 协作 | 已可用 | Scheduler 生成依赖批次，执行适用的 Researcher/Analyst/Builder 等角色，Reviewer 可要求修正；服务中断保留完成步骤，未完成步骤待恢复 |
 | 失败处理 | 已可用 | 模型超时/429/5xx 退避重试；推理模型自适应超时与并发；流读取停滞可中止；部分 Agent 失败时保留检查点并生成部分交付，全部失败才终止 |
-| 工具执行隔离 | 有边界可用 | Docker `--network=none`、只读根文件系统、能力丢弃、命令白名单；当前已接入 4 个只读/测试 Tool Registry 工具，写入和发布工具仍需策略审批 |
+| 工具执行隔离 | 有边界可用 | Docker `--network=none`、只读根文件系统、能力丢弃、命令白名单；Tool Registry 统一治理内置和受控外部工具，独立 Artifact 生成不增加工作区写审批，修改项目/发布等遵守风险策略 |
 | 图片生成/编辑 | 已可用 | 独立于文本会话的 Image Runtime；服务端 DMX 或临时自定义 Provider |
 | 长期记忆 | 适配器与恢复闭环已完成，部署未启用 | `TencentMemoryClient` 已完成 L1/L2/L3 召回、过期/置信度过滤、时间游标去重、跨重启收据和失败补偿；当前平台正式环境仍未配置 `TDAI_MEMORY_ENDPOINT`，真实 TencentDB 现场验收待凭据 |
 | 多实例 Artifact | 本机 MinIO 已验收，目标部署待复验 | `artifact_records`/`artifact_references` 持久化来源、保留期、引用和清理状态；S3 兼容 Put/Get/Delete、租户作用域 key、超时和 `HeadBucket` 探测已接入；本机已验证双 Store 读写、租户隔离、范围删除、大对象和二进制回读，正式实例仍需配置自己的 MinIO/S3/COS |
@@ -70,7 +84,7 @@ PostgreSQL 专项随后在独立临时库补跑为 `1 passed / 0 failed`，验�
 | Harness/Codex transport | 协议级完成，现场接入待配置 | DeepSeek ACP 与 Codex app-server v2 JSON-RPC stdio、Thread/Turn/Item 事件、审批回放、断点恢复和断流补偿已通过 fake sidecar；真实 sidecar 需固定版本和 workspace |
 | Agent Nexus 控制流 | 已可用 | 条件 DSL、多 Loop/嵌套 Loop（最多 256 步）、分支事件、DAG 展开和节点级局部重跑已通过单元/API 回归 |
 | Nexus 二进制附件 | 单节点已可用，多 Worker 存储契约已验收 | 测试与 Release 固定附件集合和 SHA-256；视觉/文档 Agent 读取真实内容，运行时校验租户、流程、MIME、大小和摘要；本机 MinIO 二进制跨 Store 回读已通过，目标部署仍须用实际 bucket 复验 |
-| MCP/OpenAPI 能力路由 | 能力包和飞书服务账号已可用 | 七类能力包、租户启停、健康探测、Agent 权限、调用质量和任务级 Top-K 已进入统一 Tool Registry；飞书 Secret 已加密，通用 MCP API Key/OAuth 代理尚未完成 |
+| MCP/OpenAPI 能力路由 | 能力包和认证代理已可用 | 七类能力包、租户启停、健康探测、Agent 权限、调用质量和任务级 Top-K 已进入统一 Tool Registry；飞书及通用 API Key/OAuth Secret 使用加密引用，真实供应商授权/刷新/撤销仍待部署验收 |
 | 业务能力 V2 | 受控环境可用 | 动态 Replanner、结构化交接、证据图、项目空间、Nexus 附件/发布、动态工具、长期记忆策略、交付后动作、Agent 干预、协作、反馈、解决方案、智能选择和运行预估均复用持久任务事实源 |
 | 插件发布与恢复 | 已可用 | 发布前检查完整结构、直连网络、外部资源、字段冲突和工具权限；修改后自动回草稿，历史版本以新版本恢复；Prompt 运行与 Mini App 打开前均重读当前版本；可选 HMAC 签名覆盖内容、权限和发布身份，内容、权限风险、签名或验签配置漂移时拒绝运行 |
 | 租户内插件市场 | 已可用 | 作者提交具体版本，签名租户 `owner/admin` 审核后生成不可变市场快照；安装固定版本，新版需显式升级；撤回版本立即禁止启动和运行，并可恢复到仍有效的安全审核版本。当前范围是租户内市场，不是跨租户公共应用商店 |
@@ -86,8 +100,8 @@ PostgreSQL 专项随后在独立临时库补跑为 `1 passed / 0 failed`，验�
 
 - 在反向代理或 OIDC 网关完成登录、租户解析和角色映射，再注入签名的 `x-axiom-principal`。
 - 开启 `AXIOM_API_KEY` 或可信代理认证，并限制 `AXIOM_ALLOWED_ORIGINS` 到正式域名。
-- 文本模型、图片模型和自定义 Provider Key 进入 Secret Manager；当前浏览器临时 Key 只适合会话直连，不支持可恢复任务。
-- 增加租户配额、并发配额、单任务成本上限和审计查询权限。
+- 文本、视觉、图片、视频和搜索配置已有持久加密绑定，任务恢复沿用原绑定；目标部署应保管并备份加密主密钥，按要求接入 Secret Manager。
+- 已有租户工具配额、并发治理和审计边界；仍需完整费用账本、计费策略及真实身份下的权限验收。
 
 ### 2. 持久化与分布式运行
 
@@ -100,8 +114,8 @@ PostgreSQL 专项随后在独立临时库补跑为 `1 passed / 0 failed`，验�
 
 - 制作包含 `node`、`npm`、`git`、`rg` 等依赖的专用 sandbox image，替换通用 `ubuntu:22.04`。
 - Tool Registry、参数 schema、审批、配额、超时、审计和结果 Artifact 已接入 Planner/Builder workflow；部署时仍需按租户复核工具 allowlist 和写操作政策。
-- 飞书服务账号已使用加密 Secret 引用；继续为任意 MCP/OpenAPI 补 API Key 注入、OAuth 2 state/PKCE 回调、Token 刷新和撤销。认证完成前保持待授权，不允许把 Secret 写进 specification 或模型上下文。
-- 七类能力包目录和租户启停已完成；继续补市场签名与发布审核、后台定时健康巡检、熔断恢复和租户调用/schema 预算，不把大量第三方 MCP 无审核地全量暴露给所有 Agent。
+- 通用 MCP 加密 API Key/OAuth 代理、能力包固定清单和飞书服务账号已实现；真实 OAuth 供应商回调、刷新、撤销和轮换仍须现场验收。不允许把 Secret 写进 specification 或模型上下文。
+- 已有租户内插件市场审核、固定版本、签名校验和撤回，以及工具配额/熔断；下一步验收目标供应商、后台巡检和跨租户分发，不重复把已实现的本地边界当新需求。
 
 ### 4. Harness、MemoryCore 与 Nexus 现场验收
 

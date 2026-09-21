@@ -45,9 +45,18 @@ for (let round = 1; round <= requestedRepeats; round += 1) for (const item of ca
     const measured = payload?.diagnostics?.scope === 'server-route-request' && Array.isArray(calls) && calls.length > 0
       && typeof routingSummary?.firstPassValid === 'boolean' && Array.isArray(payload?.diagnostics?.events)
       && calls.length <= 3 && calls.filter((call) => call.purpose === 'repair').length <= 1;
+    const schedulingPathValid = routingSummary?.schedulingPath === 'router-direct'
+      ? item.name === 'conversation' && calls?.length === 1 && calls[0].stage === 'router' && calls[0].purpose === 'initial'
+        && !routingSummary.repaired && routingSummary.schedulerSkippedReason === 'validated-trivial-conversation'
+        && decision.intent === 'conversation' && decision.router.difficulty === 'trivial' && decision.router.confidence >= 0.95
+        && decision.router.candidateAgentIds.length === 1 && decision.router.candidateAgentIds[0] === 'direct-responder'
+        && decision.router.requiredCapabilities.length === 1 && decision.router.requiredCapabilities[0] === 'conversation'
+        && decision.router.candidateSkillIds.length === 0 && !decision.router.requiresExternalFacts
+      : routingSummary?.schedulingPath === 'router-scheduler' && calls?.some((call) => call.stage === 'scheduler')
+        && routingSummary.schedulerSkippedReason === null;
     const passed = response.ok && decision?.source === 'router-agent' && item.routes.includes(decision.workflowRoute)
       && active.length > 0 && routeShapeValid && workflow === (decision.workflowRoute !== 'direct')
-      && (!item.search || searchActive && decision.requiresSearch) && (!item.noSearch || !searchActive && !decision.requiresSearch) && measured;
+      && (!item.search || searchActive && decision.requiresSearch) && (!item.noSearch || !searchActive && !decision.requiresSearch) && measured && schedulingPathValid;
     results.push({ name: item.name, round, expectedRoutes: item.routes, actual: decision?.workflowRoute ?? 'error', source: decision?.source ?? 'none',
       intent: decision?.intent ?? 'none', activeAgentIds: active, selectedSkillIds: decision?.skillIds, steps,
       diagnostics: payload?.diagnostics ?? null, durationMs: Date.now() - startedAt, passed });
@@ -69,6 +78,12 @@ const report = { generatedAt, methodology: 'One HTTP attempt per live case per r
   latencyMs: { p50: percentile(results.map((result) => result.durationMs), 0.5), p95: percentile(results.map((result) => result.durationMs), 0.95) },
   totalTokens: tokenSum('totalTokens'), repairTokens: tokenSum('repairTokens'),
   repairDurationMs: summaries.reduce((total, summary) => total + summary.repairDurationMs, 0),
+  schedulingPaths: Object.fromEntries(['router-direct', 'router-scheduler'].map((path) => {
+    const selected = results.filter((result) => result.diagnostics?.summary?.schedulingPath === path);
+    return [path, { observations: selected.length, passed: selected.filter((result) => result.passed).length,
+      modelCalls: selected.reduce((sum, result) => sum + result.diagnostics.summary.modelCalls, 0),
+      latencyMs: { p50: percentile(selected.map((result) => result.durationMs), 0.5), p95: percentile(selected.map((result) => result.durationMs), 0.95) } }];
+  })),
   fallbackRate: results.filter((item) => item.source === 'deterministic-fallback').length / results.length,
   unavailableRate: results.filter((item) => item.source === 'unavailable').length / results.length,
   controlPlane: 'router-agent + scheduler-agent', results };

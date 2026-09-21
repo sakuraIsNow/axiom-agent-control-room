@@ -23,6 +23,25 @@ export const taskNeedsHumanAction = (task: Pick<WorkflowTask, 'status' | 'plan' 
   };
 };
 
+export const deliveryReviewSummary = (task: Pick<WorkflowTask, 'review'>) => {
+  const receipt = task.review?.delivery;
+  if (!receipt || receipt.schemaVersion !== 1) return null;
+  const runtimeIncomplete = receipt.runtimeExecution !== 'completed';
+  const runtimeGaps = receipt.runtimeGaps ?? [];
+  const upstreamRejected = receipt.upstreamReviewApproved === false;
+  return {
+    receipt,
+    status: upstreamRejected || receipt.runtimeExecution === 'partial' || runtimeGaps.length ? 'needs-revision' as const
+      : receipt.status === 'passed' && runtimeIncomplete ? 'inconclusive' as const : receipt.status,
+    runtimeIncomplete,
+    runtimeGaps,
+    upstreamRejected,
+    satisfied: receipt.requirements.filter((requirement) => requirement.status === 'satisfied').length,
+    total: receipt.requirements.length,
+    outstanding: receipt.requirements.filter((requirement) => requirement.status !== 'satisfied'),
+  };
+};
+
 export async function submitTaskHumanAction(task: Pick<WorkflowTask, 'id' | 'revision'>, action: TaskHumanAction, note: string, approvalId?: string) {
   if (!Number.isInteger(task.revision)) throw new TaskActionError(409, 'The task revision is unavailable.');
   const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}/${action}`, {

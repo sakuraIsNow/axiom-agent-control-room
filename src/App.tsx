@@ -52,7 +52,7 @@ import { PluginWorkspace, type PluginShellDraft } from './components/dashboard/P
 import { TemplateWorkspace } from './components/dashboard/TemplateWorkspace';
 import type { ConversationHumanActionState } from './components/dashboard/dashboardTypes';
 import { taskStatusLabels } from './lib/graphPresentation';
-import { readinessStateLabel, taskDifficultyLabel, taskKindLabel, taskRouteLabel } from './lib/taskPresentation';
+import { deliveryEventActivity, readinessStateLabel, taskDifficultyLabel, taskKindLabel, taskRouteLabel } from './lib/taskPresentation';
 import { userFacingError } from './lib/errorPresentation';
 import type {
   AgentMode,
@@ -231,6 +231,8 @@ const humanActionEventStatus = (type: WorkflowEvent['type']): ConversationHumanA
 };
 
 const workflowEventLabel = (event: WorkflowEvent) => {
+  const deliveryActivity = deliveryEventActivity(event);
+  if (deliveryActivity) return deliveryActivity;
   const eventAgentName = agentDisplayName(String(event.payload.role ?? event.agentId?.split('-')[0] ?? 'agent'));
   if (event.type === 'agent.retrying') {
     const attempt = String(event.payload.nextAttempt ?? '');
@@ -318,6 +320,10 @@ const workflowEventLabel = (event: WorkflowEvent) => {
     'node.result_locked': 'Agent 结果已锁定',
     'node.result_unlocked': 'Agent 结果已解锁',
     'review.started': '审查员开始验证证据树',
+    'delivery.stage.started': '交付检查正在进行',
+    'delivery.contract.created': '交付要求已整理',
+    'delivery.assessed': '交付检查已结束',
+    'delivery.correction.started': '交付 Agent 正在修正未满足项',
     'review.completed': '审查员已完成质量门禁',
     'review.approval_requested': '审查员未通过，等待人工质量决策',
     'review.approved': '操作员已批准当前审查员结果',

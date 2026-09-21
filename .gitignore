@@ -22,6 +22,8 @@ qa/*.log
 qa/*.err
 qa/*-results.json
 qa/runtime-results.json
+qa/ci-quality/
+qa/production-gate/
 *.tsbuildinfo
 vite.config.d.ts
 *.zip

@@ -15,6 +15,11 @@ export type ChatRouteDecision = {
   skillIds: string[];
   routingVersion: string;
   routerModel?: string;
+  decisionRouting?: {
+    mode: 'shadow' | 'hybrid'; provider: 'jev'; model: string;
+    outcome: 'selected' | 'shadow' | 'fallback';
+    reason?: string;
+  };
   reportExport?: ReportExportDecision;
   router: {
     intent: ChatIntent;

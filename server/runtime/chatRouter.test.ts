@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ModelClient, ModelCompletionRequest } from './modelClient.js';
-import { enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, RoutingUnavailableError, summarizeRoutingDiagnostics, workflowPlanFromChatRoute, type RoutingDiagnostic, type RoutingModelCall } from './chatRouter.js';
+import { enforceChatRouteSafety, fallbackChatRoute, routeChatIntent, RoutingUnavailableError, summarizeRoutingDiagnostics, workflowPlanFromChatRoute, type ChatRouteInput, type RoutingDiagnostic, type RoutingModelCall } from './chatRouter.js';
 import { explicitlyDisablesRetrieval } from '../shared/chatRoutingFallback.js';
 
 class RouteModel implements ModelClient {
@@ -46,6 +46,161 @@ const schedulerOutput = (overrides: Record<string, unknown> = {}) => JSON.string
   synthesisAgentId: 'synthesizer',
   reason: '三个 Agent 分两波执行，避免无关角色参与。',
   ...overrides,
+});
+
+const conversationRouterOutput = (overrides: Record<string, unknown> = {}) => routerOutput({
+  intent: 'conversation', taskKind: 'conversation', difficulty: 'trivial', requiresExternalFacts: false,
+  requiredCapabilities: ['conversation'], candidateAgentIds: ['direct-responder'], candidateSkillIds: [],
+  confidence: 0.97, rationale: 'Self-contained social dialogue only.', ...overrides,
+});
+const conversationSchedulerOutput = () => schedulerOutput({ route: 'direct', activeAgentIds: ['direct-responder'],
+  appendAgentIds: ['direct-responder'], selectedSkillIds: [], executionWaves: [], steps: [], requiresReview: false });
+
+test('validated trivial social dialogue uses one real model call and an explicitly skipped Scheduler', async () => {
+  const calls: RoutingModelCall[] = [];
+  const events: RoutingDiagnostic[] = [];
+  const model = new RouteModel(conversationRouterOutput());
+  const decision = await routeChatIntent({ message: 'Good to see you this evening!', mode: 'analyze',
+    onModelCall: (call) => calls.push(call), onDiagnostic: (event) => events.push(event) }, model, new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(decision.routingVersion, 'router-scheduler/v3');
+  assert.equal(decision.execution, 'gateway');
+  assert.deepEqual(decision.scheduler.activeAgentIds, ['direct-responder']);
+  assert.deepEqual(decision.scheduler.steps, []);
+  assert.equal(decision.scheduler.requiresReview, false);
+  assert.equal(decision.requiresSearch, false);
+  assert.equal(model.requests.length, 1);
+  assert.deepEqual(calls.map((call) => [call.stage, call.purpose]), [['router', 'initial']]);
+  assert.equal(events.some((event) => event.stage === 'scheduler' && event.event === 'validation-passed'), false);
+  const summary = summarizeRoutingDiagnostics(calls, events);
+  assert.equal(summary.firstPassValid, true);
+  assert.equal(summary.modelCalls, 1);
+  assert.equal(summary.totalTokens, null);
+  assert.equal(summary.schedulingPath, 'router-direct');
+  assert.equal(summary.schedulerSkippedReason, 'validated-trivial-conversation');
+  assert.equal(summary.repaired, false);
+  assert.equal(summary.fallback, false);
+});
+
+test('internal paired comparison preserves the same direct execution contract while measuring two versus one calls', async () => {
+  const results = [];
+  for (const forceScheduler of [true, false]) {
+    const calls: RoutingModelCall[] = [];
+    const events: RoutingDiagnostic[] = [];
+    let count = 0;
+    const decision = await routeChatIntent({ message: 'Hello!', mode: 'analyze', onModelCall: (call) => calls.push(call),
+      onDiagnostic: (event) => events.push(event) }, { model: 'paired-fixture', async complete() {
+      count += 1;
+      return { content: count === 1 ? conversationRouterOutput() : conversationSchedulerOutput(), attempts: 1, durationMs: 1, usage: { total_tokens: 42 } };
+    } }, new AbortController().signal, { forceScheduler });
+    results.push({ decision, summary: summarizeRoutingDiagnostics(calls, events) });
+  }
+  const [baseline, optimized] = results;
+  assert.deepEqual([baseline!.summary.modelCalls, optimized!.summary.modelCalls], [2, 1]);
+  assert.deepEqual([baseline!.summary.totalTokens, optimized!.summary.totalTokens], [84, 42]);
+  assert.equal(baseline!.summary.schedulingPath, 'router-scheduler');
+  assert.equal(baseline!.summary.schedulerSkippedReason, null);
+  assert.equal(optimized!.summary.schedulingPath, 'router-direct');
+  for (const property of ['intent', 'execution', 'agentRole', 'workflowRoute', 'requiresSearch', 'skillIds'] as const) {
+    assert.deepEqual(optimized!.decision[property], baseline!.decision[property]);
+  }
+  for (const property of ['route', 'activeAgentIds', 'skippedAgentIds', 'appendAgentIds', 'selectedSkillIds', 'executionWaves', 'steps', 'requiresReview'] as const) {
+    assert.deepEqual(optimized!.decision.scheduler[property], baseline!.decision.scheduler[property]);
+  }
+});
+
+const fullSchedulerConversationCases: Array<{ name: string; input?: Partial<ChatRouteInput>; router?: Record<string, unknown> }> = [
+  { name: 'build mode', input: { mode: 'build' } },
+  { name: 'decision mode', input: { mode: 'decide' } },
+  { name: 'uncertain but valid confidence', router: { confidence: 0.94 } },
+  { name: 'nontrivial classification', router: { difficulty: 'easy' } },
+  { name: 'factual lookup', router: { requiresExternalFacts: true } },
+  { name: 'a selected Skill', router: { candidateSkillIds: ['quality-review'] } },
+  { name: 'review capability', router: { requiredCapabilities: ['conversation', 'quality-review'] } },
+  { name: 'unspecified capability', router: { requiredCapabilities: [] } },
+  { name: 'answer capability rather than social dialogue', router: { requiredCapabilities: ['answer'] } },
+  { name: 'task intent', router: { intent: 'task' } },
+  { name: 'task-kind normalization', router: { taskKind: 'question' } },
+  { name: 'long input beyond fast-path boundary', input: { message: 'Hello '.repeat(200) } },
+  { name: 'any prior conversation', input: { conversationContext: [{ role: 'user', content: 'Continue the implementation.' }] } },
+  { name: 'an existing Graph', input: { currentGraph: { nodes: [{ id: 'done', agentId: 'builder', role: 'builder', title: 'Build', status: 'completed', dependsOn: [] }], edges: [] } } },
+  { name: 'Graph edges without nodes', input: { currentGraph: { nodes: [], edges: [{ from: 'old', to: 'new', kind: 'dependency' }] } } },
+];
+for (const example of fullSchedulerConversationCases) test(`simple-chat optimization keeps full scheduling for ${example.name}`, async () => {
+  const events: RoutingDiagnostic[] = [];
+  const model = new RouteModel([conversationRouterOutput(example.router), conversationSchedulerOutput()]);
+  const decision = await routeChatIntent({ message: 'Hello!', mode: 'analyze', ...example.input,
+    onDiagnostic: (event) => events.push(event) }, model, new AbortController().signal);
+  assert.equal(decision.source, 'router-agent');
+  assert.equal(model.requests.length, 2);
+  assert.equal(events.some((event) => event.event === 'stage-skipped'), false);
+  assert.equal(events.find((event) => event.event === 'scheduling-selected')?.schedulingPath, 'router-scheduler');
+});
+
+test('attachments, export, media, live registry, review and multiple Agents retain the full Scheduler', async () => {
+  for (const [intent, agent, attachments] of [
+    ['image-analysis', 'vision-agent', [{ kind: 'image', name: 'photo.png' }]],
+    ['document-analysis', 'document-agent', [{ name: 'notes.txt' }]],
+    ['report-export', 'report-agent', []], ['image-generation', 'drawing-agent', []],
+    ['video-generation', 'video-agent', []], ['agent-registry', 'registry-agent', []],
+    ['web-search', 'search-agent', []],
+  ] as const) {
+    const events: RoutingDiagnostic[] = [];
+    const model = new RouteModel([conversationRouterOutput({ intent, candidateAgentIds: [agent],
+      ...(intent === 'report-export' ? { reportExport: { format: 'md', scope: 'last-answer' } } : {}) }),
+    schedulerOutput({ route: 'direct', activeAgentIds: [agent], appendAgentIds: [agent], selectedSkillIds: [], executionWaves: [], steps: [] })]);
+    const result = await routeChatIntent({ message: 'Please help with this request.', mode: 'analyze', attachments: [...attachments],
+      onDiagnostic: (event) => events.push(event) }, model, new AbortController().signal);
+    assert.equal(result.source, 'router-agent', intent);
+    assert.equal(model.requests.length, 2, intent);
+    assert.equal(events.some((event) => event.event === 'stage-skipped'), false, intent);
+  }
+  for (const candidates of [['reviewer'], ['analyst', 'reviewer']]) {
+    const events: RoutingDiagnostic[] = [];
+    const steps = candidates.map((agentId, index) => ({ id: `step-${index}`, title: 'Requested work', agentId,
+      objective: 'Complete the requested review or analysis.', dependsOn: [], skillIds: [] }));
+    const model = new RouteModel([conversationRouterOutput({ candidateAgentIds: candidates }), schedulerOutput({
+      route: 'team', activeAgentIds: candidates, appendAgentIds: candidates, selectedSkillIds: [], steps, executionWaves: [steps.map((step) => step.id)],
+    })]);
+    const result = await routeChatIntent({ message: 'Review the proposed design.', mode: 'analyze', onDiagnostic: (event) => events.push(event) }, model, new AbortController().signal);
+    assert.equal(result.source, 'router-agent');
+    assert.equal(result.intent, 'task');
+    assert.equal(model.requests.length, 2);
+    assert.equal(result.scheduler.requiresReview, true);
+    assert.equal(events.some((event) => event.event === 'stage-skipped'), false);
+  }
+});
+
+test('repaired, low-confidence or unauthorized greetings cannot enter the Router-only path', async () => {
+  const events: RoutingDiagnostic[] = [];
+  const repaired = new RouteModel(['{}', conversationRouterOutput(), conversationSchedulerOutput()]);
+  await routeChatIntent({ message: 'Hello!', mode: 'analyze', onDiagnostic: (event) => events.push(event) }, repaired, new AbortController().signal);
+  assert.equal(repaired.requests.length, 3);
+  assert.equal(events.some((event) => event.event === 'stage-skipped'), false);
+  assert.equal(events.filter((event) => event.event === 'repair-started').length, 1);
+  const uncertain = new RouteModel(conversationRouterOutput({ confidence: 0.2 }));
+  const fallback = await routeChatIntent({ message: 'Hello!', mode: 'analyze' }, uncertain, new AbortController().signal);
+  assert.equal(fallback.source, 'deterministic-fallback');
+  assert.equal(uncertain.requests.length, 1);
+  const unauthorized = new RouteModel([conversationRouterOutput(), conversationRouterOutput()]);
+  await assert.rejects(routeChatIntent({ message: 'Hello!', mode: 'analyze', availableAgents: [{ id: 'analyst', label: 'Analyst', description: 'Analysis', capabilities: ['analysis'] }] },
+    unauthorized, new AbortController().signal), RoutingUnavailableError);
+  assert.equal(unauthorized.requests.length, 2);
+});
+
+test('cancellation between validated Router output and direct return never emits a usable route', async () => {
+  for (const cancelEvent of ['validation-passed', 'scheduling-selected', 'stage-skipped']) {
+    const controller = new AbortController();
+    const events: RoutingDiagnostic[] = [];
+    const model = new RouteModel(conversationRouterOutput());
+    await assert.rejects(routeChatIntent({ message: 'Hello!', mode: 'analyze', onDiagnostic: (event) => {
+      events.push(event);
+      if (event.event === cancelEvent) controller.abort();
+    } }, model, controller.signal), { name: 'AbortError' });
+    assert.equal(model.requests.length, 1);
+    assert.equal(events.at(-1)?.event, 'cancelled');
+    assert.equal(events.some((event) => event.event === 'fallback'), false);
+  }
 });
 
 test('routing diagnostics measure Router and Scheduler separately without exposing prompts', async () => {
@@ -139,6 +294,7 @@ test('a conversational Router decision discards redundant Scheduler steps withou
       }),
     ]),
     new AbortController().signal,
+    { forceScheduler: true },
   );
   assert.equal(decision.source, 'router-agent');
   assert.equal(decision.intent, 'conversation');
@@ -651,7 +807,7 @@ test('capability tags mistaken for Skills get one scoped Scheduler correction wi
   assert.equal(model.requests.length, 3);
   assert.deepEqual(calls.map(({ stage, purpose }) => [stage, purpose]), [['router', 'initial'], ['scheduler', 'initial'], ['scheduler', 'repair']]);
   assert.equal(calls.every((call) => call.status === 'completed'), true, 'HTTP success is separate from semantic validity');
-  assert.deepEqual(events.map((event) => [event.event, event.code]), [['validation-passed', undefined], ['validation-rejected', 'unavailable-id'], ['repair-started', 'unavailable-id'], ['validation-passed', undefined]]);
+  assert.deepEqual(events.map((event) => [event.event, event.code]), [['validation-passed', undefined], ['scheduling-selected', undefined], ['validation-rejected', 'unavailable-id'], ['repair-started', 'unavailable-id'], ['validation-passed', undefined]]);
   const initial = JSON.parse(model.requests[1]!.user);
   const repair = JSON.parse(model.requests[2]!.user);
   assert.deepEqual(repair.selectionContract, initial.selectionContract);

@@ -51,6 +51,10 @@ export type ChatRouteDecision = {
   skillIds: string[];
   routingVersion: string;
   routerModel?: string;
+  decisionRouting?: {
+    mode: 'shadow' | 'hybrid'; provider: 'jev'; model: string;
+    outcome: 'selected' | 'shadow' | 'fallback'; reason?: string;
+  };
   reportExport?: ReportExportDecision;
   router: TurnRoutingDecision;
   scheduler: TurnSchedulingDecision;
@@ -384,6 +388,10 @@ export type WorkflowEventType =
   | 'node.result_locked'
   | 'node.result_unlocked'
   | 'review.started'
+  | 'delivery.stage.started'
+  | 'delivery.contract.created'
+  | 'delivery.assessed'
+  | 'delivery.correction.started'
   | 'review.completed'
   | 'review.approval_requested'
   | 'review.approved'
@@ -464,6 +472,7 @@ export type WorkflowTask = {
     schedulingDecision?: TurnSchedulingDecision;
     routingVersion?: string;
     routerModel?: string;
+    decisionRouting?: ChatRouteDecision['decisionRouting'];
     routerConfidence?: number;
     inputAttachments?: Array<{
       artifactRecordId: string; artifactId: string; name: string; mimeType: string; bytes: number; digest: string;
@@ -500,6 +509,23 @@ export type WorkflowTask = {
     summary: string;
     gaps: string[];
     requiredCorrections: string[];
+    delivery?: {
+      schemaVersion: 1;
+      inputDigest: string;
+      contractDigest: string | null;
+      resultDigest: string;
+      contextDigest?: string;
+      runtimeExecution?: 'completed' | 'partial' | 'unverified';
+      runtimeGaps?: string[];
+      upstreamReviewApproved?: boolean;
+      status: 'passed' | 'needs-revision' | 'inconclusive';
+      basis: 'model-assessment';
+      requirements: Array<{ id: string; text: string; status: 'satisfied' | 'unsatisfied' | 'unknown'; reason: string; outputQuote: string;
+        calculation?: { basis: 'deterministic-arithmetic'; path: string[]; status: 'satisfied' | 'unsatisfied' | 'unknown'; expected: number | null; actual: number | null } }>;
+      assessedAt: string;
+      correctionAttempts: number;
+      factualCorrectness: 'not-independently-verified';
+    };
   };
   result?: string;
   error?: string;

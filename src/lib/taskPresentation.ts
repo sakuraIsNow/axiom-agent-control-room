@@ -61,6 +61,10 @@ const stageLabels: Record<string, string> = {
   'tool execution': '工具执行',
   'direct-response': '直接响应',
   'quality-gate': '质量门禁',
+  'delivery:requirements': '交付要求整理',
+  'delivery:contract-audit': '交付规则核对',
+  'delivery:verification': '交付结果复核',
+  'delivery:correction': '交付结果修正',
   'focused task agent': '专注执行 Agent',
 };
 
@@ -100,6 +104,28 @@ export const taskStageLabel = (value?: string | null) => {
   if (!normalized) return '暂无阶段';
   if (normalized.startsWith('tool:')) return `工具：${value!.slice(value!.indexOf(':') + 1).trim()}`;
   return stageLabels[normalized] ?? localizeRuntimeText(value!);
+};
+
+const deliveryProgress: Record<string, { started: string; completed: string }> = {
+  'delivery:requirements': { started: '交付 Agent 正在整理验收要求', completed: '交付要求整理结束' },
+  'delivery:contract-audit': { started: '交付 Agent 正在核对要求与计算规则', completed: '交付规则核对结束' },
+  'delivery:verification': { started: '交付 Agent 正在逐项复核结果', completed: '交付检查已结束' },
+  'delivery:correction': { started: '交付 Agent 正在修正未满足项', completed: '交付修正已结束' },
+};
+
+export const deliveryEventActivity = (event: { type: string; payload: Record<string, unknown> }): string | null => {
+  const progress = deliveryProgress[String(event.payload.stage ?? '')];
+  if (progress && (event.type === 'delivery.stage.started' || event.type === 'model.delta')) return progress.started;
+  if (progress && event.type === 'model.completed') return progress.completed;
+  if (progress && event.type === 'model.failed') return '交付检查未完成';
+  if (event.type === 'delivery.contract.created') return '交付要求已整理';
+  if (event.type === 'delivery.correction.started') return deliveryProgress['delivery:correction'].started;
+  if (event.type === 'delivery.assessed') {
+    if (event.payload.status === 'needs-revision' || event.payload.runtimeExecution === 'partial' || event.payload.upstreamReviewApproved === false
+      || Array.isArray(event.payload.runtimeGaps) && event.payload.runtimeGaps.length > 0) return '交付存在待处理项';
+    return event.payload.status === 'passed' && event.payload.runtimeExecution === 'completed' ? '交付要求已复核' : '交付结果待核对';
+  }
+  return null;
 };
 
 export const localizeRuntimeText = (value: string) => {

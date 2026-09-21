@@ -1,5 +1,6 @@
 import type { RuntimeEvent, WorkflowTask } from './contracts.js';
 import { hasCurrentHumanAcceptance, summarizeCompletionEvidence } from './completionEvidence.js';
+import { deliveryContextDigest, deliverySources, digestDelivery } from './deliveryVerification.js';
 
 type Phase = 'routing' | 'scheduling' | 'planning' | 'execution' | 'review' | 'correction' | 'delivery';
 type Usage = {
@@ -13,7 +14,8 @@ const emptyUsage = (): Usage => ({ calls: 0, failures: 0, retries: 0, durationMs
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const timestamp = (value: string) => Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
 const phaseFor = (stage: string): Phase => stage.startsWith('router') ? 'routing'
-  : stage.startsWith('scheduler') ? 'scheduling' : stage === 'planner' ? 'planning'
+  : stage.startsWith('scheduler') ? 'scheduling' : stage === 'planner' || stage === 'delivery:requirements' || stage === 'delivery:contract-audit' ? 'planning'
+    : stage === 'delivery:verification' ? 'review' : stage === 'delivery:correction' ? 'correction'
     : stage.includes('review-correction-') ? 'correction' : stage === 'reviewer' ? 'review'
       : stage.startsWith('synthesizer') || stage === 'direct-response' || stage.startsWith('single-agent:') ? 'delivery' : 'execution';
 const visibleStage = (stage: unknown) => typeof stage === 'string'
@@ -23,7 +25,7 @@ const finalizeUsage = (usage: Usage) => ({ ...usage,
   usageStatus: usage.calls === 0 ? 'not-observed' : usage.unknownUsageCalls === 0 ? 'measured' : usage.measuredCalls ? 'partial' : 'unknown',
 });
 
-/** Rebuilt from owner-scoped durable events; no model scoring or transient process counters. */
+/** Rebuilt from owner-scoped durable events; model assessments remain labeled as such. */
 export const summarizeExecutionQuality = (task: WorkflowTask, input: readonly RuntimeEvent[], now = Date.now()) => {
   const events = [...new Map(input.filter((event) => event.taskId === task.id).map((event) => [event.sequence, event])).values()]
     .sort((a, b) => a.sequence - b.sequence);
@@ -76,11 +78,21 @@ export const summarizeExecutionQuality = (task: WorkflowTask, input: readonly Ru
   const routeEvent = events.filter((event) => event.type === 'routing.decided').at(-1);
   const routeSource = typeof routeEvent?.payload.source === 'string' ? routeEvent.payload.source
     : task.plan?.routingSource ?? null;
-  const correctionRounds = events.filter((event) => event.type === 'loop.iteration' && event.payload.phase === 'review-correction').length;
+  const correctionRounds = events.filter((event) => event.type === 'loop.iteration' && event.payload.phase === 'review-correction'
+    || event.type === 'delivery.correction.started').length;
   const retryEvents = events.filter((event) => event.type === 'agent.retrying').length;
   const specialistServiceFailures = events.filter((event) => event.type === 'agent.failed' && event.payload.callKind === 'specialist-service').length;
   const firstAttempt = total.calls === 0 ? null : task.status === 'completed' && evidence.execution === 'completed'
     && total.failures === 0 && total.retries === 0 && retryEvents === 0 && specialistServiceFailures === 0 && correctionRounds === 0 && !humanTakeover;
+  const delivery = task.review?.delivery;
+  let currentDelivery = false;
+  if (delivery && delivery.resultDigest === digestDelivery(task.result ?? '')) {
+    try {
+      const sources = deliverySources(task, events);
+      currentDelivery = delivery.inputDigest === sources.inputDigest
+        && delivery.contextDigest === deliveryContextDigest(task, task.stepResults, events, sources.inputDigest);
+    } catch { /* An incomplete request cannot inherit an earlier assessment. */ }
+  }
   return {
     schemaVersion: 1,
     taskId: task.id,
@@ -107,7 +119,9 @@ export const summarizeExecutionQuality = (task: WorkflowTask, input: readonly Ru
       supportedEvidenceItems: evidence.supportedEvidenceItems,
       evidenceItems: evidence.evidenceItems,
       factualCorrectness: 'not-independently-evaluated',
-      requirementCoverage: null,
+      requirementCoverage: currentDelivery && delivery
+        ? { basis: 'model-assessment', satisfied: delivery.requirements.filter((item) => item.status === 'satisfied').length,
+          total: delivery.requirements.length, status: delivery.status } : null,
       firstAttemptExecutionSuccess: firstAttempt,
       humanTakeover,
       manualActionCount: manualEvents.length,

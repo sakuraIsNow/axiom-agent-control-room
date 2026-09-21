@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { TaskRevisionConflictError, terminalStatuses, type AgentStore, type AgentWorkflowCanvas, type InAppNotification, type PersistedSessionMessage, type PluginStore, type RuntimeEvent, type TaskEventSummary, type TaskStatus, type TaskStore, type TemplateAccess, type TemplateStore, type UserDefinedAgent, type UserDefinedAgentDefinition, type UserPlugin, type UserPluginDefinition, type WorkflowTemplate, type WorkflowTemplateDefinition } from './contracts.js';
 import { canReuseCompletionArtifact, parseCompletionEvidence } from './completionEvidence.js';
 import { summarizeExecutionQuality } from './executionQuality.js';
+import { deliveryNeedsAttention } from './deliveryVerification.js';
 import { isBuiltinRoleId } from './agentStore.js';
 import type { TaskCoordinator } from './coordinator.js';
 import type { EventHub } from './eventHub.js';
@@ -28,7 +29,7 @@ import { workflowSpecialistCatalog } from './workflowSpecialists.js';
 import { providerConfigSchema, type ProviderConfig, type ProviderBindingOwner, type ProviderBindingReference } from './providerBindings.js';
 import { runtimeSkillCatalog } from './skillCatalog.js';
 import { verifyWebhookRequest } from './webhookSecurity.js';
-import { chatRouteDecisionSchema, fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute, type ChatRouteDecision, type RoutingAgentDirectoryEntry } from './chatRouter.js';
+import { chatRouteDecisionSchema, fallbackChatRoute, routeChatIntent, workflowPlanFromChatRoute, type ChatRouteDecision, type RoutingAgentDirectoryEntry, type RoutingExecutionOptions } from './chatRouter.js';
 import { generateReport } from './reportExport.js';
 import { nextRunAtForCadence, scheduleCadenceSchema } from './scheduleCadence.js';
 import { fallbackScheduleDraft, parseScheduleDraft, scheduleAgentPrompt } from './scheduleAgent.js';
@@ -688,6 +689,7 @@ const harnessCommandFailureStatus = (result: { capabilities?: { configured?: boo
 };
 
 export const createTaskApi = (dependencies: {
+  decisionRouting?: RoutingExecutionOptions;
   store: TaskStore;
   hub: EventHub;
   coordinator: TaskCoordinator;
@@ -1172,6 +1174,7 @@ export const createTaskApi = (dependencies: {
           routingVersion: input.routing.routingVersion,
           routerModel: input.routing.routerModel,
           routerConfidence: input.routing.router.confidence,
+          ...(input.routing.decisionRouting ? { decisionRouting: input.routing.decisionRouting } : {}),
           activeAgentIds: input.routing.scheduler.activeAgentIds,
           selectedSkillIds: input.routing.scheduler.selectedSkillIds,
         } : {}),
@@ -1265,7 +1268,7 @@ export const createTaskApi = (dependencies: {
       ? await dependencies.scheduleModelFactory(trigger.modelCredentialId, trigger.tenantId, trigger.userId)
       : model;
     const decision = routeModel
-      ? await routeChatIntent(routeInput, routeModel, AbortSignal.timeout(45_000))
+      ? await routeChatIntent(routeInput, routeModel, AbortSignal.timeout(45_000), routeModel.location === 'local' ? {} : dependencies.decisionRouting)
       : fallbackChatRoute(routeInput);
     return ensureScheduledWorkflow(decision, trigger.input);
   };
@@ -3942,7 +3945,8 @@ export const createTaskApi = (dependencies: {
     const event = await store.appendEvent(approved, {
       type: 'review.approved',
       agentId: 'operator-review',
-      payload: { approvedBy: userId, note, score: review.score },
+      payload: { approvedBy: userId, note, score: review.score,
+        ...(review.delivery ? { deliveryResultDigest: review.delivery.resultDigest, deliveryContextDigest: review.delivery.contextDigest, acceptedPartial: deliveryNeedsAttention(review.delivery) } : {}) },
     });
     hub.publish(event);
     coordinator.nudge();

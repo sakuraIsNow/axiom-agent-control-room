@@ -26,6 +26,10 @@ const router = () => ({ intent: 'task', taskKind: 'decision', difficulty: 'easy'
   requiredCapabilities: ['analysis', 'tradeoffs'], candidateAgentIds: ['analyst'], candidateSkillIds: ['architecture-design'], confidence: 0.95, rationale: 'One analysis responsibility suffices for this turn.' });
 const scheduler = () => ({ route: 'single-agent', activeAgentIds: ['analyst'], skippedAgentIds: [], appendAgentIds: ['analyst'], selectedSkillIds: ['architecture-design'], executionWaves: [['analyze']],
   steps: [{ id: 'analyze', title: 'Compare options', agentId: 'analyst', objective: 'Compare the supplied deployment options without external retrieval.', dependsOn: [], skillIds: ['architecture-design'] }], requiresReview: false, synthesisAgentId: 'synthesizer', reason: 'Keep the execution minimal.' });
+const conversationalRouter = () => ({ intent: 'conversation', taskKind: 'conversation', difficulty: 'trivial', requiresExternalFacts: false,
+  requiredCapabilities: ['conversation'], candidateAgentIds: ['direct-responder'], candidateSkillIds: [], confidence: 0.98, rationale: 'Only self-contained social dialogue.' });
+const conversationalScheduler = () => ({ route: 'direct', activeAgentIds: ['direct-responder'], skippedAgentIds: [], appendAgentIds: ['direct-responder'], selectedSkillIds: [], executionWaves: [], steps: [],
+  requiresReview: false, synthesisAgentId: 'synthesizer', reason: 'Only self-contained social dialogue.' });
 
 const provider = createServer(async (request, response) => {
   try {
@@ -41,6 +45,9 @@ const provider = createServer(async (request, response) => {
       response.writeHead(503, { 'content-type': 'application/json' }); response.end('{"error":{"message":"Injected unavailable"}}'); return;
     }
     let output = stage === 'router' ? router() : scheduler();
+    if (name.startsWith('conversation-')) output = stage === 'router' ? conversationalRouter() : conversationalScheduler();
+    if (name === 'conversation-low-confidence' && stage === 'router') output.confidence = 0.7;
+    if (name === 'conversation-repair' && stage === 'router' && !payload.correction) output = {};
     let finishReason = 'stop';
     let toolCalls;
     if (stage === 'scheduler' && (name === 'skill-repair' && !payload.correction || name === 'persistent-invalid' || name === 'shared-budget')) output.selectedSkillIds = ['tradeoffs', 'risk-analysis'];
@@ -112,15 +119,37 @@ try {
   }
   assert.ok(port, 'Isolated server startup timed out.');
   const baseUrl = `http://127.0.0.1:${port}`;
-  const request = async (name, message = 'Compare PostgreSQL and SQLite deployment tradeoffs.', authorized = true) => {
+  const request = async (name, message = 'Compare PostgreSQL and SQLite deployment tradeoffs.', authorized = true, extra = {}) => {
     const response = await fetch(`${baseUrl}/api/chat/route`, { method: 'POST', headers: { 'content-type': 'application/json', ...(authorized ? { authorization: `Bearer ${apiKey}` } : {}) },
-      body: JSON.stringify({ message, mode: 'decide', provider: { apiUrl: providerUrl, apiKey: 'fixture-model-key', model: name, location: 'local' } }), signal: AbortSignal.timeout(15_000) });
+      body: JSON.stringify({ message, mode: 'decide', ...extra, provider: { apiUrl: providerUrl, apiKey: 'fixture-model-key', model: name, location: 'local' } }), signal: AbortSignal.timeout(15_000) });
     return { response, body: await response.json() };
   };
   await test('healthy-plan-has-first-pass-diagnostics', async () => {
     const { response, body } = await request('healthy'); assert.equal(response.status, 200);
     assert.equal(body.decision.source, 'router-agent'); assert.equal(body.diagnostics.summary.firstPassValid, true);
     assert.equal(body.diagnostics.summary.modelCalls, 2); assert.equal(body.diagnostics.summary.totalTokens, 84); assert.equal(body.diagnostics.summary.repairTokens, 0);
+    assert.equal(body.diagnostics.summary.schedulingPath, 'router-scheduler'); assert.equal(body.diagnostics.summary.schedulerSkippedReason, null);
+  });
+  await test('trivial-chat-skips-only-the-scheduler-with-real-http-token-accounting', async () => {
+    const { response, body } = await request('conversation-fast', 'Hello!', true, { mode: 'analyze' }); assert.equal(response.status, 200);
+    assert.equal(body.decision.source, 'router-agent'); assert.equal(body.decision.execution, 'gateway'); assert.equal(body.decision.agentRole, 'direct-responder');
+    assert.equal(body.diagnostics.summary.firstPassValid, true); assert.equal(body.diagnostics.summary.modelCalls, 1); assert.equal(body.diagnostics.summary.totalTokens, 42);
+    assert.equal(body.diagnostics.summary.schedulingPath, 'router-direct'); assert.equal(body.diagnostics.summary.schedulerSkippedReason, 'validated-trivial-conversation');
+    assert.equal(calls.get('conversation-fast'), 1); assert.deepEqual(body.diagnostics.calls.map((call) => call.stage), ['router']);
+    assert.equal(body.diagnostics.events.some((event) => event.stage === 'scheduler' && event.event === 'validation-passed'), false);
+  });
+  await test('follow-up-chat-keeps-scheduler-and-does-not-reactivate-old-agents', async () => {
+    const { response, body } = await request('conversation-followup', 'Thank you!', true, { mode: 'analyze',
+      conversationContext: [{ role: 'user', content: 'Compare database tradeoffs.' }, { role: 'assistant', content: 'The comparison is complete.' }],
+      currentGraph: { nodes: [{ id: 'analysis', role: 'analyst', title: 'Analyst', status: 'completed', dependsOn: [] }], edges: [] } });
+    assert.equal(response.status, 200); assert.equal(body.diagnostics.summary.modelCalls, 2); assert.equal(body.diagnostics.summary.schedulingPath, 'router-scheduler');
+    assert.deepEqual(body.decision.scheduler.activeAgentIds, ['direct-responder']); assert.deepEqual(body.decision.scheduler.skippedAgentIds, ['analyst']);
+  });
+  for (const [name, expectedCalls] of [['conversation-low-confidence', 2], ['conversation-repair', 3]]) await test(`${name}-cannot-bypass-scheduler`, async () => {
+    const { response, body } = await request(name, 'Hello!', true, { mode: 'analyze' }); assert.equal(response.status, 200);
+    assert.equal(body.decision.source, 'router-agent'); assert.equal(body.diagnostics.summary.modelCalls, expectedCalls);
+    assert.equal(body.diagnostics.summary.schedulingPath, 'router-scheduler'); assert.equal(body.diagnostics.summary.schedulerSkippedReason, null);
+    assert.equal(calls.get(name), expectedCalls);
   });
   for (const [name, code] of [['skill-repair', 'unavailable-id'], ['truncated-repair', 'truncated-output'], ['tool-repair', 'unexpected-tool-call']]) {
     await test(`${name}-through-real-sse-provider`, async () => {
